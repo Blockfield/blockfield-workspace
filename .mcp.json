@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "blockfield-dev": {
+      "command": "just",
+      "args": ["mcp"],
+      "cwd": "${workspaceFolder}"
+    },
+    "blockfield-game": {
+      "command": "just",
+      "args": ["mcp", "--game"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}

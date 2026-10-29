@@ -1,0 +1,50 @@
+#!/bin/sh
+# Prefer an ffmpeg with the libvorbis encoder (TaCZ animsync stretches ogg with
+# -c:a libvorbis; Homebrew ffmpeg 7+/9 dropped it, /usr/bin/ffmpeg keeps it).
+set -u
+# Identify this script as a file, so PATH entries that resolve back to it
+# (this dir, `shims/.`, symlinked aliases) are skipped by inode identity
+# instead of re-executed: probing ourselves would recurse forever.
+case $0 in
+    */*) self=$0 ;;
+    *)
+        self=$0
+        old_ifs=$IFS; IFS=:
+        # shellcheck disable=SC2162
+        for dir in ${PATH:-}; do
+            IFS=$old_ifs
+            [ -n "${dir:-}" ] || dir=.
+            if [ -x "$dir/$self" ] && [ ! -d "$dir/$self" ]; then
+                self=$dir/$self
+                break
+            fi
+            IFS=:
+        done
+        IFS=$old_ifs
+        ;;
+esac
+pick=""
+first=""
+old_ifs=$IFS; IFS=:
+# shellcheck disable=SC2162
+for dir in ${PATH:-}; do
+    IFS=$old_ifs
+    [ -n "${dir:-}" ] || dir=.
+    candidate="$dir/ffmpeg"
+    if [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+        if [ "$candidate" -ef "$self" ] 2>/dev/null; then
+            : # ourselves under another name: never probe or exec
+        else
+            if [ -z "$first" ]; then first=$candidate; fi
+            if [ -z "$pick" ] && "$candidate" -hide_banner -encoders 2>/dev/null | grep -q libvorbis; then
+                pick=$candidate
+            fi
+        fi
+    fi
+    IFS=:
+done
+IFS=$old_ifs
+if [ -n "$pick" ]; then exec "$pick" "$@"; fi
+if [ -n "$first" ]; then exec "$first" "$@"; fi
+echo "ffmpeg shim: no ffmpeg outside $self on PATH" >&2
+exit 127

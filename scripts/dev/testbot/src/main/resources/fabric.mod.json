@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "bftestbot",
+  "version": "0.1.0",
+  "name": "Blockfield test bot",
+  "description": "TCP control channel for the headless test client. Never ship in the pack.",
+  "environment": "client",
+  "entrypoints": { "client": ["bf.testbot.TestBot"] },
+  "mixins": ["bftestbot.mixins.json"],
+  "depends": { "fabricloader": ">=0.15", "fabric-api": "*", "minecraft": "1.21.1" }
+}

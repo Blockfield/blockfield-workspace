@@ -1,0 +1,58 @@
+name: Release text
+description: Facts and generated text for release notes, Discord announcements and PR descriptions. Never fails the caller on a text-generation error.
+inputs:
+  mode:
+    description: release or pr
+    required: true
+  repository:
+    description: Repository whose releases hold the version (release) or the pull request (pr)
+    default: ${{ github.repository }}
+  version:
+    description: Release tag (release mode)
+  kind:
+    description: client, server, mod, decor or proxy (release mode)
+  out-dir:
+    description: Directory for release-notes.md and announcement.json (release mode)
+    default: release-text
+  source-repository:
+    description: Repository with the code and tags when it differs from the release repository
+    default: ${{ github.repository }}
+  build-json:
+    description: Path to this build's build.json for the client-fingerprint check (client)
+    default: ""
+  pr-number:
+    description: Pull request number (pr mode)
+    default: ${{ github.event.pull_request.number }}
+  github-token:
+    description: Token that reads the release repository, component releases and pull requests
+    default: ${{ github.token }}
+outputs:
+  notes:
+    description: Path to release-notes.md
+    value: ${{ steps.run.outputs.notes }}
+  announcement:
+    description: Path to announcement.json, empty when it was not produced
+    value: ${{ steps.run.outputs.announcement }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MODE: ${{ inputs.mode }}
+        REPOSITORY: ${{ inputs.repository }}
+        VERSION: ${{ inputs.version }}
+        KIND: ${{ inputs.kind }}
+        OUT_DIR: ${{ inputs.out-dir }}
+        SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+        BUILD_JSON: ${{ inputs.build-json }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+      run: |
+        if [ "$MODE" = release ]; then
+          args=(release --repository "$REPOSITORY" --version "$VERSION" --kind "$KIND" --out-dir "$OUT_DIR" --source-repository "$SOURCE_REPOSITORY")
+          [ -n "$BUILD_JSON" ] && args+=(--build-json "$BUILD_JSON")
+        else
+          args=(pr --repository "$REPOSITORY" --pr-number "$PR_NUMBER")
+        fi
+        python3 "$GITHUB_ACTION_PATH/release_text.py" "${args[@]}"

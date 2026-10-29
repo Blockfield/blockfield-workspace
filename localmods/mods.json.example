@@ -1,0 +1,34 @@
+{
+  "_comment": "Git submodules of blockfield-mod + forks, pinned by the workspace. Keys are localmods/ dirs; values map to the owning org repo and the pack metafiles that pin them.",
+  "blockfield-mod": {
+    "repo": "Blockfield/blockfield-mod",
+    "client": "blockfield-client.pw.toml",
+    "server": "blockfield-server.pw.toml"
+  },
+  "create-fabric": {
+    "repo": "Blockfield/create-fabric",
+    "both": "create.pw.toml"
+  },
+  "parcool-fabric": {
+    "repo": "Blockfield/parcool-fabric",
+    "both": "parcool.pw.toml"
+  },
+  "superbwarfare-fabric": {
+    "repo": "Blockfield/superbwarfare-fabric",
+    "both": "superbwarfare.pw.toml"
+  },
+  "simplebedrockmodel-fabric": {
+    "repo": "Blockfield/simplebedrockmodel-fabric",
+    "both": "simplebedrockmodel.pw.toml"
+  },
+  "lr-tactical": {
+    "repo": "Blockfield/lr-tactical",
+    "both": "lrtactical-fabric.pw.toml",
+    "jar": "files/mods/lrtactical-1.21.1-0.4.1-bf2.jar"
+  },
+  "tacz-refabricated": {
+    "repo": "Blockfield/tacz-refabricated",
+    "both": "tacz-refabricated.pw.toml",
+    "jar": "files/mods/TACZ-Refabricated-1.21.1-0.7.0-bf8.jar"
+  }
+}

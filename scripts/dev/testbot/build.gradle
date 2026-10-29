@@ -1,0 +1,80 @@
+plugins {
+    id 'fabric-loom' version '1.11-SNAPSHOT'
+}
+version = '0.1.0'
+group = 'bf'
+base { archivesName = 'bftestbot' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.parchmentmc.org' }
+}
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.layered {
+        officialMojangMappings()
+        parchment("org.parchmentmc.data:parchment-${parchment_minecraft_version}:${parchment_mappings_version}@zip")
+    }
+    modImplementation "net.fabricmc:fabric-loader:${loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 21 }
+
+tasks.register('lintJava', JavaCompile) {
+    dependsOn 'testClasses'
+    source sourceSets.main.allJava, sourceSets.test.allJava
+    classpath = sourceSets.main.compileClasspath + sourceSets.test.compileClasspath + sourceSets.main.output + sourceSets.test.output
+    destinationDirectory = layout.buildDirectory.dir('classes/java/lint')
+    options.annotationProcessorPath = files()
+    options.compilerArgs += ['-proc:none', '-Xlint:divzero,empty,fallthrough,finally,-removal', '-Werror']
+}
+tasks.named('check') { dependsOn tasks.named('lintJava') }
+
+tasks.register('rawInputCheck', JavaExec) {
+    group = 'verification'
+    dependsOn 'classes'
+    classpath = sourceSets.main.output
+    mainClass = 'bf.testbot.RawInputState'
+    maxHeapSize = '128m'
+}
+tasks.named('check') { dependsOn tasks.named('rawInputCheck') }
+
+tasks.register('inputCommandsCheck', JavaExec) {
+    group = 'verification'
+    dependsOn 'classes'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'bf.testbot.InputCommands'
+    maxHeapSize = '128m'
+    systemProperty 'java.awt.headless', 'true'
+}
+tasks.named('check') { dependsOn tasks.named('inputCommandsCheck') }
+
+tasks.register('modelAuditCheck', JavaExec) {
+    group = 'verification'
+    dependsOn 'classes'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'bf.testbot.ModelAudit'
+    maxHeapSize = '128m'
+    systemProperty 'java.awt.headless', 'true'
+}
+tasks.named('check') { dependsOn tasks.named('modelAuditCheck') }
+
+tasks.register('playerGeometryCheck', JavaExec) {
+    group = 'verification'
+    dependsOn 'classes'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'bf.testbot.RenderedPlayerGeometry'
+    maxHeapSize = '128m'
+    systemProperty 'java.awt.headless', 'true'
+}
+tasks.named('check') { dependsOn tasks.named('playerGeometryCheck') }
+
+tasks.register('acceptanceProbesCheck', JavaExec) {
+    group = 'verification'
+    dependsOn 'testClasses'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'bf.testbot.AcceptanceProbesTest'
+    maxHeapSize = '128m'
+    systemProperty 'java.awt.headless', 'true'
+}
+tasks.named('check') { dependsOn tasks.named('acceptanceProbesCheck') }

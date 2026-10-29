@@ -1,0 +1,12 @@
+{
+  // Pylance/Pyright: type checking is off for this script-style codebase (no
+  // annotations); the config exists to resolve runtime sys.path hacks so the
+  // editor stops reporting false reportMissingImports. Real gates: ruff +
+  // unittest (see .pre-commit-config.yaml).
+  // NOTE: venv-only third-party deps (portablemc in .dev/pmc, numpy/PIL in
+  // tool venvs) and the local `rcon` still warn if the editor uses
+  // the system interpreter. Select .dev/pmc/bin/python for scripts/dev, or
+  // ignore the remaining warnings: runtime resolution is unaffected.
+  "typeCheckingMode": "off",
+  "extraPaths": ["scripts/dev"]
+}

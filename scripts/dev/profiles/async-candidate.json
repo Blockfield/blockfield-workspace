@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "scope": "offline-candidate-only",
+  "minecraft": "1.21.1",
+  "candidate": {
+    "version": "0.2.0+alpha-1.21.1",
+    "filename": "async-fabric-0.2.0+alpha-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/vEC2jm6I/versions/PhDCt4Jt/async-fabric-0.2.0%2Balpha-1.21.1.jar",
+    "sha256": "142dc48fc3f8d01aa8ba7b98f7177bda91abb1ffb846bc50081663cd04fa1db2",
+    "source_commit": "560b65f0578a4e809682c12b857c653abb1abf99",
+    "source_association": "historical build timing; binary behavior independently inspected, not cryptographic provenance"
+  },
+  "config": {
+    "disabled": false,
+    "maxThreads": 2,
+    "enableAsyncSpawn": false,
+    "enableAsyncRandomTicks": false,
+    "synchronizedEntities": [
+      "minecraft:tnt",
+      "minecraft:item",
+      "minecraft:experience_orb",
+      "minecraft:armor_stand",
+      "tacz:*",
+      "lrtactical:*",
+      "superbwarfare:*",
+      "create:*",
+      "fowlplay:*"
+    ]
+  }
+}

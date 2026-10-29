@@ -1,0 +1,1034 @@
+{
+  "bucket": "blockfield-assets",
+  "objects": [
+    {
+      "key": "gucci-vuitton-attachment/v1/SHA256SUMS",
+      "size": 95,
+      "sha256": "ad1ef4bc359dabf1291d54d25b5ef962a3d7c2ecb4007f51e2c4831d49c901c1",
+      "sources": [
+        {
+          "repository": "Blockfield/gucci-vuitton-attachment",
+          "release": "v1",
+          "asset_id": 591965254
+        }
+      ]
+    },
+    {
+      "key": "gucci-vuitton-attachment/v1/github-release.json",
+      "size": 8069,
+      "sha256": "a716a971cadb16cd8507b9b0c61792dee7fca24b7f2f2f86dda747bdbcded407",
+      "sources": [
+        {
+          "repository": "Blockfield/gucci-vuitton-attachment",
+          "release": "v1"
+        }
+      ]
+    },
+    {
+      "key": "gucci-vuitton-attachment/v1/gucci-vuitton-attachment.zip",
+      "size": 1557831,
+      "sha256": "1d3c7042a26e2ede691802d713e463ee0e64b40a50e4bbe36b0d02df9870ed11",
+      "sources": [
+        {
+          "repository": "Blockfield/gucci-vuitton-attachment",
+          "release": "v1",
+          "asset_id": 591965247
+        }
+      ]
+    },
+    {
+      "key": "gucci-vuitton-attachment/v1/release-notes.md",
+      "size": 1788,
+      "sha256": "63e03ee59970e439c42b025b87aa1ec4b3391b8be8e02e49f3434da22d95c6bf",
+      "sources": [
+        {
+          "repository": "Blockfield/gucci-vuitton-attachment",
+          "release": "v1",
+          "asset_id": 592706705
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v1/SHA256SUMS",
+      "size": 83,
+      "sha256": "608d228b7db029fb6dc3240d2e8613c2912755ceb789e6f1e2297a56f3aa8903",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v1"
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v1/archive-release.json",
+      "size": 4596,
+      "sha256": "d9c379116cda7062c9fa323e5b7701a75e7101041d955cfcdd745ad8875d43aa",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v1"
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v1/firing_range.zip",
+      "size": 1197200,
+      "sha256": "d644ee3307f71e2f6e26a48cc91cb79be614f3f4b3b6eeb7f6175576cbec96bf",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v1",
+          "asset_id": 591475471
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v1/release-notes.md",
+      "size": 313,
+      "sha256": "4fddd483aefafa59755e5cadcdc5eead0c6d43e7674d88fd326ac23a678c5960",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v1"
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v2/SHA256SUMS",
+      "size": 83,
+      "sha256": "1fa569a2bb09e77a3a174376927ed691bd858278399e57fbb2a97d6b627c7155",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v2"
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v2/archive-release.json",
+      "size": 4472,
+      "sha256": "2da668c491fdb02dfda3e7cad41423eebf0b8f49131bdd84c81daf504aa3e88b",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v2"
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v2/firing_range.zip",
+      "size": 1197197,
+      "sha256": "bd5fdd425769a4bed5355b6e227eb8cb1d454a6882a1e36552bc1863ecec34ba",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v2",
+          "asset_id": 591499824
+        }
+      ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-house-v2/release-notes.md",
+      "size": 183,
+      "sha256": "3dc90c14031fb567d9b9fabd7545e82616f0d9e0311ab07bf4f56c8691098f5f",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-firing-range-house-v2"
+        }
+      ]
+    },
+    {
+      "key": "maps/kozyatyn/map-kozyatyn-887d42bc80e11cde/SHA256SUMS",
+      "size": 79,
+      "sha256": "846e572f873ab906aefd6190399c9128e6b3b9d5e859680bb51c18585d4b50bc",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-kozyatyn-887d42bc80e11cde"
+        }
+      ]
+    },
+    {
+      "key": "maps/kozyatyn/map-kozyatyn-887d42bc80e11cde/archive-release.json",
+      "size": 4472,
+      "sha256": "db710a08113bc06a25f742e29704cccd2cc96ce199688fa3e89652f9fbdc6f6c",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-kozyatyn-887d42bc80e11cde"
+        }
+      ]
+    },
+    {
+      "key": "maps/kozyatyn/map-kozyatyn-887d42bc80e11cde/kozyatyn.zip",
+      "size": 6064300,
+      "sha256": "887d42bc80e11cded6d1ce0391cc4017bd33efe6369c92e9f2cc078174e9d7b2",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-kozyatyn-887d42bc80e11cde",
+          "asset_id": 586280986
+        }
+      ]
+    },
+    {
+      "key": "maps/kozyatyn/map-kozyatyn-887d42bc80e11cde/release-notes.md",
+      "size": 191,
+      "sha256": "2195bad325cdd35dd493cbea5b20e9acf58b2b36a9f6823fcd38ead1f9b25ed8",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "map-kozyatyn-887d42bc80e11cde"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v1/SHA256SUMS",
+      "size": 89,
+      "sha256": "2ca04acf373d3a782dfcd10a0f08d5f5c3a21787cdc8535c6138352107e59598",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v1"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v1/archive-release.json",
+      "size": 4498,
+      "sha256": "9bad9ca1b27317b006af5e3db79688f23752fee62281cbcd3408770aac746db8",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v1"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v1/blockfield-music-1.jar",
+      "size": 6875534,
+      "sha256": "7a32d85500b136e78d41b54a8314740c2fd92852a29d65502271ba5c526303f1",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v1",
+          "asset_id": 574771957
+        }
+      ]
+    },
+    {
+      "key": "music/music-v1/release-notes.md",
+      "size": 111,
+      "sha256": "9c4430e102e21f86a73b5af257359ad5e84c8ad60692c9f6e14cc207079e3b49",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v1"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v2/SHA256SUMS",
+      "size": 89,
+      "sha256": "7881896b0feee74e1202c5579e4483a508cb91689f93163bfd6140a04fae0ca4",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v2"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v2/archive-release.json",
+      "size": 4292,
+      "sha256": "2ec0e9019e04a5369ea4daea0e5d6d1b2cb33aa052bca4b0436f3e124c17019b",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v2"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v2/blockfield-music-2.jar",
+      "size": 73435279,
+      "sha256": "3ec50bf2f5075b6d4e13488b19dc8b6e4bb016bc18e550e252bdc261f136981a",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v2",
+          "asset_id": 582101131
+        }
+      ]
+    },
+    {
+      "key": "music/music-v2/release-notes.md",
+      "size": 69,
+      "sha256": "b62108e007391f566ae9a89b6f5857909ee4fd859bc52852ba8e6ed09e5f80c9",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v2"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v3/SHA256SUMS",
+      "size": 89,
+      "sha256": "d01ca0f6acc102f70eb06b3d59e2d9c455634b64bc720a350f3602290efd638c",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v3"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v3/archive-release.json",
+      "size": 4293,
+      "sha256": "26530cf05f630ea3baef9804f429e931ce8b8c479a53ab452a5edb572319ce9a",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v3"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v3/blockfield-music-3.jar",
+      "size": 80278173,
+      "sha256": "c4e820a8eeae3955479c98b2bf6c125630693ac86cdd6b676e7a29302d0b7166",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v3",
+          "asset_id": 591973443
+        },
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "music-v3",
+          "asset_id": 584841725
+        }
+      ]
+    },
+    {
+      "key": "music/music-v3/github-release.json",
+      "size": 6088,
+      "sha256": "867b8a1283267357e326cf4dd0bdce6307afc3415081773fde5a7a3594ed5498",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v3"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v3/release-notes.md",
+      "size": 1748,
+      "sha256": "e77e6025fff9a28ac84147085c817ebfd43cae05d9adb5c024c372e061ee5253",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v3",
+          "asset_id": 592706640
+        }
+      ]
+    },
+    {
+      "key": "music/music-v4/SHA256SUMS",
+      "size": 89,
+      "sha256": "f87ae88e69c681201e3f339b92171b570221fdb79cdd54b2518e5c18bc868e45",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v4"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v4/blockfield-music-4.jar",
+      "size": 80411945,
+      "sha256": "3ea01b428abe89cfe1897770335534f0d71930fda9a5820e705b6d8bd54e71c2",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v4"
+        }
+      ]
+    },
+    {
+      "key": "music/music-v4/release-notes.md",
+      "size": 2655,
+      "sha256": "1bc9e641983457dbe7a3023bf378f032740cd36730b2e120fd980afa24fafa73",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-music",
+          "release": "music-v4"
+        }
+      ]
+    },
+    {
+      "key": "schematics/v1/SHA256SUMS",
+      "size": 92,
+      "sha256": "a86922aa6b9481d8f2bb70c896329b11ef859c9bb9a12cf06b2fbffc8b510323",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-schematics",
+          "release": "v1",
+          "asset_id": 592069398
+        }
+      ]
+    },
+    {
+      "key": "schematics/v1/blockfield-schematics.zip",
+      "size": 3079635,
+      "sha256": "beb4051bb0521f0df8fc8e0d00e47cfa1d96d9e8ed67e8934bce0250d9883aae",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-schematics",
+          "release": "v1",
+          "asset_id": 592069399
+        }
+      ]
+    },
+    {
+      "key": "schematics/v1/github-release.json",
+      "size": 8024,
+      "sha256": "2b9b85f76d2d7824de28ecb366aeab2c7d5851544b2f4bb1961c7d8d4a0f3774",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-schematics",
+          "release": "v1"
+        }
+      ]
+    },
+    {
+      "key": "schematics/v1/release-notes.md",
+      "size": 1874,
+      "sha256": "e3958cd6e0d0676583bfbb1af87943fbdcd801532390e08e8b5ce2eb53947294",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-schematics",
+          "release": "v1",
+          "asset_id": 592706676
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v1/SHA256SUMS",
+      "size": 81,
+      "sha256": "cab942314723ae91c9900f299d8febe3e0950da381f9e14656cdf2e436206bc2",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v1"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v1/archive-release.json",
+      "size": 4751,
+      "sha256": "f3a34c2d84a2373d21efeeedbd65809e22d99745da93d6fdc2325ae49e516788",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v1"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v1/release-notes.md",
+      "size": 206,
+      "sha256": "4d806a4cc9289677488f197bca6f908f8a8a5437269fb6cdbb6a0fb14ba3daf1",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v1"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v1/world-seed.zip",
+      "size": 55763591,
+      "sha256": "0d22e29d539fc48a23b35ac84c702ba76f63f7e9522fb5ff5dbb30d8a2e7b1db",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v1",
+          "asset_id": 560284052
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v10/SHA256SUMS",
+      "size": 81,
+      "sha256": "c5ce3ae188eb7b872562cb79b0869ced0576055856ca76d523da89dc7c27343e",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v10"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v10/github-release.json",
+      "size": 5593,
+      "sha256": "7a6e3a004c4e64d5d3b183949cbe8b851bd52ba5db78e6b1ea8dadd83e920cf0",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v10"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v10/release-notes.md",
+      "size": 649,
+      "sha256": "727d6c5faa77384b96bc6ce65d3a5d10ac9589c4679a1dd8d7c1919e0bf22af6",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v10"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v10/world-seed.zip",
+      "size": 61602700,
+      "sha256": "099cdd9434fa167cac2efb103a991be29014ae66064312f74fbce5bc2e6d65b5",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v10",
+          "asset_id": 595460981
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v11/SHA256SUMS",
+      "size": 81,
+      "sha256": "ea158b577910d2bc6b672efbaabe290014cba0d2eaae7f3ea24656057673f9ab",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v11"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v11/release-notes.md",
+      "size": 943,
+      "sha256": "792af16ea54f4bb3eaf264381eee4b9525bab1b021887052b94e51670a875103",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v11"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v11/world-seed.zip",
+      "size": 61547700,
+      "sha256": "d4a10d1283793df18e4b4df6f7831de55ea70e51a93e3f1d0dd10fcf3d1afff7",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v11"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v12/SHA256SUMS",
+      "size": 81,
+      "sha256": "dd6e1cd29f9d3c6b8c7ec275eaddc4a34e965a60d34ff2207f56ff73f94f017e",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v12"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v12/release-notes.md",
+      "size": 1988,
+      "sha256": "8c25c3967088e7d83b2dd84ac1aba8fd85a71e1e26eca290feb22cc59a08f698",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v12"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v12/world-seed.zip",
+      "size": 65737638,
+      "sha256": "58a1d8e7dcb39d86aa38b0603672d70a0635aa92e45398204cbc87c46e263ef5",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v12"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v13/SHA256SUMS",
+      "size": 81,
+      "sha256": "1631c0d0375900221696ab63d85458dab7e7f0bdbb07752ae1a112f634970c45",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v13"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v13/release-notes.md",
+      "size": 1032,
+      "sha256": "36105cd7240f14e3b7895560aca6e0c73523d73f6ae68bf5e9c6d01e72d20ff5",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v13"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v13/world-seed.zip",
+      "size": 65666827,
+      "sha256": "541fba57e7dd781306cde5a3c555b54436f058f3163dad0aa07a9ff0ba8a0422",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v13"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v14/SHA256SUMS",
+      "size": 81,
+      "sha256": "b72d489578ae9a5f4126b5184fc2417557e388b835d02f071c853722f62f042d",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v14"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v14/release-notes.md",
+      "size": 948,
+      "sha256": "1d7bf7065743c272ea1d76793a1b577107b5745eed3ab2ac60f3d5661734de1a",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v14"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v14/world-seed.zip",
+      "size": 65657400,
+      "sha256": "a830da054008965acea064bd1da1daa023530af5d7229ab4a7c665199e4a2d2b",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v14"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v15/SHA256SUMS",
+      "size": 81,
+      "sha256": "dc499d001a81ea4d9ab434f63c94393e22e8c231812e578fddc4545af3ebcc5a",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v15"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v15/release-notes.md",
+      "size": 730,
+      "sha256": "088a314d4741e80fb4ba38452a2657861e39a0d7089ab49cc175d1a27700df0b",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v15"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v15/world-seed.zip",
+      "size": 64322855,
+      "sha256": "e24d9db60b6c1ac8e0f7fe3066e0de1cabb7fb8009d1ae1987662be814fbd737",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v15"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v2/SHA256SUMS",
+      "size": 81,
+      "sha256": "0ca2d05d82904414429534b1dbf63428bc20f1ef2965737e417549e3c74379f2",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v2"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v2/archive-release.json",
+      "size": 5259,
+      "sha256": "e103f05aec0d2a46ac07147f29dd516ea34fbe57525eb88d74d88038a4d2ec2f",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v2"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v2/release-notes.md",
+      "size": 451,
+      "sha256": "41e8ddc9a5291709dbae37f3e22d342f02c151f2fe56fa122cb2d94e80d6d142",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v2"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v2/world-seed.zip",
+      "size": 58643555,
+      "sha256": "dc6e306bc586c26fb996e268349c362b14addaef0b753330f989a291e60b7f2e",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v2",
+          "asset_id": 570019219
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v3/SHA256SUMS",
+      "size": 81,
+      "sha256": "a95c149b0cc5820377b3e4b960481cd8a55257d2124fc232d336e25d8b8adc28",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v3"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v3/archive-release.json",
+      "size": 5009,
+      "sha256": "de8c3ec4675c54990d74fed556e8bed7d3a7f1db56715e5351af4c823304bd8c",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v3"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v3/release-notes.md",
+      "size": 371,
+      "sha256": "9402e3d36789fcb34275dd92b07d2a6b4778675c74556c5c45b228e30923e45c",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v3"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v3/world-seed.zip",
+      "size": 63602809,
+      "sha256": "3befe3bed14f1feb353cf3223fcf18b41bcc903f2c9239e1f7ce6b97f66c482d",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v3",
+          "asset_id": 582397706
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v4/SHA256SUMS",
+      "size": 81,
+      "sha256": "919eece3866a0b75ae539c281acea637b542473953cd23071a07d4138f2c6d40",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v4"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v4/archive-release.json",
+      "size": 5141,
+      "sha256": "b2da2bf373daefc7c607ce28c3f5aa732b3d13f136727e39b4a6b820b5009b28",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v4"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v4/release-notes.md",
+      "size": 414,
+      "sha256": "eabcf4269de8f06e96223252dc6ee3b8a99ba350908aeccf1dc4ebb45b7d531c",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v4"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v4/world-seed.zip",
+      "size": 64284674,
+      "sha256": "e71cb711827ad155831e7480cdee4ed092e35def35381d60b6afe9142e560118",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v4",
+          "asset_id": 583429198
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v5/SHA256SUMS",
+      "size": 81,
+      "sha256": "ae1dceeeabfe830e3b9fcadd690e5b4e11c05b0e7d8302dcaae3c6c107629d2e",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v5"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v5/archive-release.json",
+      "size": 5857,
+      "sha256": "14c5d619ab99af6ec5da74c77d06a850047c353f3eed3a880a2685ddeb2e6587",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v5"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v5/release-notes.md",
+      "size": 674,
+      "sha256": "b05a98efbe281d12d78c24f4199286382d5bff4df16955ba4cd80c6c85effc82",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v5"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v5/world-seed.zip",
+      "size": 64957140,
+      "sha256": "bc5d5a9e347ea97f81077c821efcd77e318fd04049ba4c1a714d1e5d6750b70e",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v5",
+          "asset_id": 584244141
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v6/SHA256SUMS",
+      "size": 81,
+      "sha256": "35cd9de05e2529205bbecf351f8f3092b285182e29c7ca5c204f8cc5bc365935",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v6"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v6/archive-release.json",
+      "size": 5723,
+      "sha256": "58ef6a465b1d4e271be3089764e83a92b7dd75b37b7ea57516d3ed5e79e6c1a4",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v6"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v6/release-notes.md",
+      "size": 709,
+      "sha256": "7b24691b8f20c088f508f0c57d76b80e6510af38c90fb12c55955d8af81af66b",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v6"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v6/world-seed.zip",
+      "size": 62632798,
+      "sha256": "4f2466d6136b7c351c92f0e509f57e73435f0085bfc5eb218bd5c596900c205b",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v6",
+          "asset_id": 586053776
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v7/SHA256SUMS",
+      "size": 81,
+      "sha256": "c679fce7cb951b63bb19845744c5f524440b1e2a609286c0b8b648695c1c9bc4",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v7"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v7/archive-release.json",
+      "size": 5077,
+      "sha256": "9d4c3a8d959c00e6987c8fccdc36f41f842aa66808c447df8dd60b94a4c46e97",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v7"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v7/release-notes.md",
+      "size": 827,
+      "sha256": "577fda5d7bf0d37a053e7f18ab9b44dbb6e5cfe96ae0055be0e44a0167c7ac01",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v7"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v7/world-seed.zip",
+      "size": 64410089,
+      "sha256": "73442e0e06dabec63e93b807e9da6ae5f939608584cd08c077870fefebcfc9a7",
+      "sources": [
+        {
+          "repository": "netherg-io/blockfield-modpack",
+          "release": "world-seed-v7",
+          "asset_id": 591911092
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v8/SHA256SUMS",
+      "size": 81,
+      "sha256": "ae9cb7520df284bdb386ba377fa0fe55e3fe33578006a61500ad2361c8d88cbc",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v8"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v8/github-release.json",
+      "size": 6308,
+      "sha256": "43390e9c0de69a8cb8fadc9f6d56a42b7dea652c5803d17b5d0c64daa145c48a",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v8"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v8/release-notes.md",
+      "size": 956,
+      "sha256": "716d657871e6ed39d028cb8150433e5963e6a1b32b64100bd8079e74a5c15391",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v8"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v8/world-seed.zip",
+      "size": 61305189,
+      "sha256": "15fe70c06934e7b47af026f9bc02412ba70f3a8e37d39152e12e5f83d80cbb99",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v8",
+          "asset_id": 592246022
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v9/SHA256SUMS",
+      "size": 81,
+      "sha256": "3322b125312b1139e05f2ad952fa412e871ae9d6bfc09b557dde72c1ae5310bb",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v9"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v9/github-release.json",
+      "size": 6968,
+      "sha256": "ead054624eafbf32c6d263dda97e0f76b20a4d819d6a24da441511b5234ea394",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v9"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v9/release-notes.md",
+      "size": 1178,
+      "sha256": "b4e189f1c3471d3ebd10e5215a4b70f01512821078c7431ef6687b974c4d92c6",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v9"
+        }
+      ]
+    },
+    {
+      "key": "world-seed/world-seed-v9/world-seed.zip",
+      "size": 61569704,
+      "sha256": "7bd62f1d46f235a1fa5543de0174e5f1aa2a36ffac171b48a5e56245f01d175f",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "world-seed-v9",
+          "asset_id": 592540938
+        }
+      ]
+    }
+  ]
+}

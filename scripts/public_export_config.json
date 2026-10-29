@@ -1,0 +1,246 @@
+{
+  "version": 3,
+  "comment": "PUBLIC gate policy: generic class shapes only. This file ships in the export and must contain no private literals (no org/identity names, paths, URLs, IDs or secret names); verify with the shipped-cleanliness test. Literal scrub rules live in the excluded private policy.",
+  "exclude_paths": [
+    ".gitmodules",
+    ".github/workflows/**",
+    ".dev/**",
+    "scripts/public_export_private.json"
+  ],
+  "public_submodule_paths": [
+    "localmods/create-fabric",
+    "localmods/parcool-fabric",
+    "localmods/simplebedrockmodel-fabric",
+    "localmods/superbwarfare-fabric"
+  ],
+  "allowed_binaries": {
+    "scripts/dev/testbot/gradle/wrapper/gradle-wrapper.jar": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
+  },
+  "submodule_note_path": "SUBMODULES.md",
+  "workflow_path": ".github/workflows/public-export-check.yml",
+  "replacements": [
+    {
+      "id": "net-r2-endpoint",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?i)(?:https?://)?[0-9a-f\\s]{32,64}?\\.\\s*(?:[a-z]{2}\\s*\\.\\s*)?r2\\s*\\.\\s*cloudflarestorage\\s*\\.\\s*com",
+      "replacement": "https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com"
+    },
+    {
+      "id": "net-app-suffix",
+      "paths": [
+        "docs/**"
+      ],
+      "regex": true,
+      "pattern": "(?i)blockfield-(proxy|server|workshop|web|errors)-[a-z0-9]{6}(?![a-z0-9])",
+      "replacement": "blockfield-\\1-<SUFFIX>"
+    },
+    {
+      "id": "boat-ssh-vm-id",
+      "paths": [
+        "docs/**"
+      ],
+      "regex": true,
+      "pattern": "\\bssh\\sbx_ID\\b",
+      "replacement": "ssh"
+    },
+    {
+      "id": "boat-home-workspace",
+      "paths": [
+        "docs/**"
+      ],
+      "regex": true,
+      "pattern": "\\/home\\/user\\/blockfield-workspace",
+      "replacement": "~/blockfield-workspace"
+    },
+    {
+      "id": "repo-public-name",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "\\bblockfield-workspace-private\\b",
+      "replacement": "blockfield-workspace"
+    }
+  ],
+  "forbidden": [
+    {
+      "id": "f-r2-endpoint",
+      "paths": ["**"],
+      "regex": true,
+      "multiline": true,
+      "pattern": "(?i)(?:https?://)?[0-9a-f\\s]{32,64}?\\.\\s*(?:[a-z]{2}\\s*\\.\\s*)?r2\\s*\\.\\s*cloudflarestorage\\s*\\.\\s*com"
+    },
+    {
+      "id": "f-r2-bare-id",
+      "paths": ["**"],
+      "regex": true,
+      "multiline": true,
+      "pattern": "(?i)[\"']?R2_ACCOUNT_ID[\"']?\\s*[:=]\\s*[\"']?(?:[0-9a-f]{32}|[0-9a-f]{16}(?:\\s*\\n\\s*[0-9a-f]{16})+)\\b"
+    },
+    {
+      "id": "f-app-suffix",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?i)blockfield-(?:proxy|server|workshop|web|errors)-[a-z0-9]{6}(?![a-z0-9])"
+    },
+    {
+      "id": "f-app-random",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?i)\\bapp(?:-[a-z0-9]+)+-[a-z0-9]{6}(?![a-z0-9])"
+    },
+    {
+      "id": "f-email",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?![\\w.+-]+@[\\w.-]*\\.(?:invalid|example|test|localhost)\\b)[\\w.+-]+@[\\w-]+\\.[\\w.-]+"
+    },
+    {
+      "id": "f-email-no-tld",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "[\\w.+-]+@(?!(?:[0-9a-f]{4,64}|localhost|example|test|invalid|sha256|sha512|md5)(?![\\w.]))[A-Za-z0-9-]+(?![\\w.])"
+    },
+    {
+      "id": "f-ssh",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "\\bssh\\s+\\S+"
+    },
+    {
+      "id": "f-ssh-upper",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?m)^[\\s$>~`#]*SSH\\s+\\S+"
+    },
+    {
+      "id": "f-ssh-noun",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "\\bSSH\\s+(?!loopback\\b|tunnel\\b|tunnels\\b|key\\b|keys\\b|config\\b|connection\\b|connections\\b|client\\b|clients\\b|server\\b|servers\\b|session\\b|sessions\\b|port\\b|ports\\b|protocol\\b|agent\\b|agents\\b)\\S+"
+    },
+    {
+      "id": "f-ssh-host",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?m)^\\s*Host\\s+(?:\\*|[A-Za-z0-9_.-]*(?:home|agent)[A-Za-z0-9_.-]*|[A-Za-z0-9_.-]+\\.[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+)\\s*$"
+    },
+    {
+      "id": "f-opaque-backtick",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "`(?=[^`\\n]*[A-Z])(?=[^`\\n]*[a-z])(?=[^`\\n]*[0-9])(?![^`\\n]*[Ss]ha256)(?![0-9a-f]+`)(?P<tok>[A-Za-z0-9_-]{16,})`",
+      "allow_exact": [
+        "Deadmau5EarsLayer",
+        "SubscribeC2SPacket",
+        "Xvfb-linux-amd64",
+        "OpenJDK21U-jdk_x64_linux_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_linux_hotspot_21",
+        "OpenJDK21U-jdk_x64_windows_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_windows_hotspot_21",
+        "u00a77Synchronized",
+        "WorkshopAiPreviewS2CPacket",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8",
+        "l9sAAAAASUVORK5CYII",
+        "TACZ-Refabricated-1",
+        "Blockfield-client-v2",
+        "2B20260924-aarch64-unknown-linux-gnu-install_only",
+        "2B20260924-x86_64-unknown-linux-gnu-install_only",
+        "2B20260924-aarch64-pc-windows-msvc-install_only",
+        "2B20260924-x86_64-pc-windows-msvc-install_only"
+      ]
+    },
+    {
+      "id": "f-opaque-quoted",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "\"(?=[^\"\\n]*[A-Z])(?=[^\"\\n]*[a-z])(?=[^\"\\n]*[0-9])(?![^\"\\n]*[Ss]ha256)(?!(?:0[xX])?[0-9a-fA-F]+\\\")(?P<tok1>[A-Za-z0-9_-]{16,})\"|'(?=[^'\\n]*[A-Z])(?=[^'\\n]*[a-z])(?=[^'\\n]*[0-9])(?![^'\\n]*[Ss]ha256)(?!(?:0[xX])?[0-9a-fA-F]+')(?P<tok2>[A-Za-z0-9_-]{16,})'",
+      "allow_exact": [
+        "Deadmau5EarsLayer",
+        "SubscribeC2SPacket",
+        "Xvfb-linux-amd64",
+        "OpenJDK21U-jdk_x64_linux_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_linux_hotspot_21",
+        "OpenJDK21U-jdk_x64_windows_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_windows_hotspot_21",
+        "u00a77Synchronized",
+        "WorkshopAiPreviewS2CPacket",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8",
+        "l9sAAAAASUVORK5CYII",
+        "TACZ-Refabricated-1",
+        "Blockfield-client-v2",
+        "2B20260924-aarch64-unknown-linux-gnu-install_only",
+        "2B20260924-x86_64-unknown-linux-gnu-install_only",
+        "2B20260924-aarch64-pc-windows-msvc-install_only",
+        "2B20260924-x86_64-pc-windows-msvc-install_only"
+      ]
+    },
+    {
+      "id": "f-opaque-assigned",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?:=|:)\\s*[\"']?(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[0-9])(?![A-Za-z0-9_-]*[Ss]ha256)(?!(?:0[xX])?[0-9a-fA-F]+(?![A-Za-z0-9_-]))(?P<tok>[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])",
+      "allow_exact": [
+        "Deadmau5EarsLayer",
+        "SubscribeC2SPacket",
+        "Xvfb-linux-amd64",
+        "OpenJDK21U-jdk_x64_linux_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_linux_hotspot_21",
+        "OpenJDK21U-jdk_x64_windows_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_windows_hotspot_21",
+        "u00a77Synchronized",
+        "WorkshopAiPreviewS2CPacket",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8",
+        "l9sAAAAASUVORK5CYII",
+        "TACZ-Refabricated-1",
+        "Blockfield-client-v2",
+        "2B20260924-aarch64-unknown-linux-gnu-install_only",
+        "2B20260924-x86_64-unknown-linux-gnu-install_only",
+        "2B20260924-aarch64-pc-windows-msvc-install_only",
+        "2B20260924-x86_64-pc-windows-msvc-install_only"
+      ]
+    },
+    {
+      "id": "f-opaque-bare",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "(?<![A-Za-z0-9_@.:\\-])(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[0-9])(?![A-Za-z0-9_-]*[Ss]ha256)(?!(?:0[xX])?[0-9a-fA-F]+(?![A-Za-z0-9_-]))(?P<tok>[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_@\\-])",
+      "allow_exact": [
+        "Deadmau5EarsLayer",
+        "SubscribeC2SPacket",
+        "Xvfb-linux-amd64",
+        "OpenJDK21U-jdk_x64_linux_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_linux_hotspot_21",
+        "OpenJDK21U-jdk_x64_windows_hotspot_21",
+        "OpenJDK21U-jdk_aarch64_windows_hotspot_21",
+        "u00a77Synchronized",
+        "WorkshopAiPreviewS2CPacket",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8",
+        "l9sAAAAASUVORK5CYII",
+        "TACZ-Refabricated-1",
+        "Blockfield-client-v2",
+        "2B20260924-aarch64-unknown-linux-gnu-install_only",
+        "2B20260924-x86_64-unknown-linux-gnu-install_only",
+        "2B20260924-aarch64-pc-windows-msvc-install_only",
+        "2B20260924-x86_64-pc-windows-msvc-install_only"
+      ]
+    },
+    {
+      "id": "f-home-dir",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "/home/[A-Za-z0-9_][A-Za-z0-9_.-]*"
+    },
+    {
+      "id": "f-root-dir",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "/root/[A-Za-z0-9_][A-Za-z0-9_.-]*"
+    },
+    {
+      "id": "f-local-dir",
+      "paths": ["**"],
+      "regex": true,
+      "pattern": "~\\/\\.(?:local|config)/"
+    }
+  ]
+}

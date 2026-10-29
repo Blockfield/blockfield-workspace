@@ -1,0 +1,10 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.9
+    hooks:
+      # Факты, а не стиль: неиспользуемое, невалидные escape, заведомые
+      # опечатки (f-string без плейсхолдеров), протухшие импорты.
+      # UP036 (outdated version block) выключен: флор версии нигде не
+      # задекларирован, bf.py проверяет 3.10+ вручную.
+      - id: ruff
+        args: [--fix, --select, "F,W,E9,UP035,UP037", --ignore, "UP036"]

@@ -1,0 +1,54 @@
+{
+  "_sources": {
+    "client": "c9b942e72672c1b2199ea90cb2983314d82208eb",
+    "server": "6d5eb299a74dabd65d4f63aad21bf5e5f3c10783"
+  },
+  "client/.github/workflows/client.yml": [
+    "jobs:\n  check:\n",
+    "      - name: Create prerelease\n",
+    "            gh release create \"$GITHUB_REF_NAME\" --repo Blockfield/blockfield-releases --title \"Blockfield $GITHUB_REF_NAME\" --notes \"Blockfield $GITHUB_REF_NAME release in progress; notes follow shortly.\" --prerelease --latest=false\n",
+    "      - name: Publish client archives\n",
+    "          gh release upload \"$GITHUB_REF_NAME\" --repo Blockfield/blockfield-releases --clobber \"${files[@]}\"\n",
+    "      - name: Release text\n",
+    "      - name: Publish release notes\n",
+    "  deploy:\n",
+    "    needs: check\n",
+    "    uses: ./.github/workflows/deploy.yml\n"
+  ],
+  "server/.github/workflows/release.yml": [
+    "jobs:\n  prepare:\n",
+    "  release:\n    needs: prepare\n",
+    "      - name: Create version GitHub Release\n",
+    "      - name: Release text\n",
+    "      - name: Publish release notes\n",
+    "            gh release upload \"$GITHUB_REF_NAME\" \"${files[@]}\" --clobber\n",
+    "  deploy:\n    needs: release\n",
+    "    uses: ./.github/workflows/deploy.yml\n"
+  ],
+  "client/.github/workflows/deploy.yml": [
+    "jobs:\n  deploy:\n",
+    "      - name: Verify compatibility and deploy client\n        id: deploy\n        env:\n          TAG: ${{ inputs.tag }}\n        run: just python scripts/deploy-client.py \"$TAG\"\n",
+    "      - name: Mark the deployed client as latest\n        if: steps.deploy.outputs.served == 'true'\n",
+    "data=b'{\"prerelease\":false,\"make_latest\":\"true\"}'"
+  ],
+  "server/.github/workflows/deploy.yml": [
+    "jobs:\n  deploy:\n",
+    "      - name: Validate target and remember previous pair\n        id: previous\n        # ponytail: keep long code out of run blocks until actionlint fixes its pre-start stdin pipe write.\n        run: just python scripts/prepare-server-deploy.py >> \"$GITHUB_OUTPUT\"\n"
+  ],
+  "client/scripts/deploy-client.py": [
+    "        pack.stage(tag)\n",
+    "            f\"Client {tag} staged invisibly; \"\n",
+    "        return \"staged\"\n"
+  ],
+  "server/scripts/prepare-server-deploy.py": [
+    "        \"Server gates on another client than the served one: rerun Deploy server with client_tag \"\n"
+  ],
+  "server/.github/workflows/check.yml": [
+    "      image: ${{ steps.image-scope.outputs.image }}\n",
+    "          tree=$(git rev-parse \"HEAD^{tree}\")\n",
+    "          tree=$(git rev-parse \"HEAD^{tree}\")\n",
+    "  image:\n",
+    "            tree=$(git rev-parse \"HEAD^{tree}\")\n",
+    "              echo \"tag=candidate-$tree\"\n"
+  ]
+}

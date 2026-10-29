@@ -1,0 +1,38 @@
+name: Public export check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          submodules: false
+          fetch-depth: 1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12.10"
+      - name: Rewrite engine unit tests
+        run: python3 -m unittest discover -s scripts/dev/tests -p "test_public_export*.py" -v
+      - name: Public policy re-check (generic gates, no private literals)
+        run: python3 -I scripts/public_export.py --check .
+      - name: Pinned gitleaks scan (fail-closed)
+        run: |
+          set -eu
+          unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+          url="https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz"
+          curl -fsSL -o /tmp/gitleaks-scan.tar.gz "$url"
+          echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  /tmp/gitleaks-scan.tar.gz" | sha256sum -c -
+          rm -rf /tmp/gitleaks-scan && mkdir -p /tmp/gitleaks-scan
+          tar -xzf /tmp/gitleaks-scan.tar.gz -C /tmp/gitleaks-scan
+          printf '[extend]\nuseDefault = true\n' > /tmp/gitleaks-trusted.toml
+          rm -rf /tmp/gitleaks-no-ignore && mkdir -p /tmp/gitleaks-no-ignore
+          /tmp/gitleaks-scan/gitleaks detect --no-git --source . --config /tmp/gitleaks-trusted.toml --gitleaks-ignore-path /tmp/gitleaks-no-ignore --ignore-gitleaks-allow --redact --exit-code 1

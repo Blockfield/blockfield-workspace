@@ -792,6 +792,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("printf '[extend]\\nuseDefault = true\\n'", workflow)
         self.assertIn("unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML", workflow)
         actionlint = shutil.which("actionlint")
+        if actionlint is None and not HAS_PRIVATE:
+            # Public CI has no pinned toolchain; the private CI keeps this mandatory.
+            self.skipTest("actionlint not on PATH")
         self.assertIsNotNone(actionlint, "actionlint not on PATH")
         with tempfile.TemporaryDirectory() as tmp:
             wf = Path(tmp) / "public-export-check.yml"

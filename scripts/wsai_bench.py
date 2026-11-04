@@ -32,7 +32,6 @@ DEV = ROOT / ".dev"
 ACCEPT = DEV / "wsai-accept"
 SECRETS_KEY = DEV / "secrets" / "openrouter-eval.key"
 GRADLE_SLOT = ROOT / ".dev" / "coord-20261009" / "gradle-slot"
-JDK = DEV / "jdk" / "temurin-21.0.12+8-linux-amd64"
 SERVER_PORTS = (25599, 25575, 47777, 5005, 5006)
 SERVER_ADDR = "127.0.0.1:25599"
 UTC3 = datetime.timezone(datetime.timedelta(hours=3))
@@ -66,6 +65,14 @@ def devstack():
 
 def home():
     return Path(os.environ["BF_DEV_HOME"])
+
+
+def pinned_jdk():
+    """Temurin 21 from the shared toolchain (honors BF_DEV_HOME and platform)."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from toolchain import java_home
+
+    return java_home()
 
 
 def log_call(row):
@@ -1498,9 +1505,10 @@ def cmd_build(args):
         subprocess.run(
             ["git", "checkout", "--detach", ref], cwd=src, check=True, timeout=120
         )
+    jdk = pinned_jdk()
     env = dict(os.environ)
-    env["JAVA_HOME"] = str(JDK)
-    env["PATH"] = str(JDK / "bin") + os.pathsep + env.get("PATH", "")
+    env["JAVA_HOME"] = str(jdk)
+    env["PATH"] = str(jdk / "bin") + os.pathsep + env.get("PATH", "")
     slot = [str(GRADLE_SLOT), "--"] if not args.no_slot else []
     subprocess.run(
         [

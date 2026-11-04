@@ -20,6 +20,12 @@ from .common import connect_rcon, rcon_args, wait_while
 
 SCENARIO = {"name": "stress", "help": "Carpet-bot load with tick-query metrics"}
 BOT_TAG = "bfbot"
+# Kits land on deploy, and deploy only sticks once the match is live: the
+# pre-window gate retries spawn+fire until this deadline, then fails loudly.
+ARM_WAIT_SECS = 90
+# End-of-window FFA casualties rejoin within seconds; the final sweep retries
+# this many rounds (~3 s each) before the strict gates decide.
+SWEEP_ROUNDS = 20
 
 
 def online(rcon):
@@ -44,10 +50,12 @@ def spawn(rcon, names):
             raise RuntimeError(f"Bot did not receive the stress tag: {name}")
 
 
-def gunner_stats(rcon, expected):
+def gunner_stats(rcon, expected=None):
     stats = (rcon.cmd("bf bot stats") or "").strip()
     match = re.search(r"\bfiring=(\d+)\b", stats)
-    if not match or int(match.group(1)) != expected:
+    # drainStats() resets the counters on every call: a bare call reports the
+    # window just measured, an expected count additionally gates full strength.
+    if expected is not None and (not match or int(match.group(1)) != expected):
         raise RuntimeError(f"Expected {expected} armed bots: {stats}")
     return stats
 
@@ -89,6 +97,9 @@ def report(samples, new_lines, **extra):
         kills=sum(" убит " in line for line in new_lines),
         captures=sum("захвачена командой" in line for line in new_lines),
         rejected_shots=sum("shot rejected" in line for line in new_lines),
+        rejected_no_ammo=sum(
+            "shot rejected" in line and " NO_AMMO" in line for line in new_lines
+        ),
         windows=samples,
     )
     print(json.dumps(row, ensure_ascii=False), flush=True)
@@ -156,6 +167,30 @@ def points_of(dim, maps_dir):
     return [(p["x"], p["y"], p["z"]) for p in data["mode_data"]["campaign"]["points"]]
 
 
+def rejoin(rcon, names, room_of, sprint, fire_secs=None):
+    """Instantly respawn bots missing from `list`: spawn + room + kit + walk.
+
+    Rejoined gunners also get their own `bf bot fire` so they shoot for the
+    rest of the window instead of idling until the next broadcast refresh.
+    A bot that refuses to come back is reported, not fatal: the end-of-run
+    strict gates decide. Returns the bots it tried to bring back.
+    """
+    missing = [b for b in names if b not in online(rcon)]
+    for name in missing:
+        try:
+            spawn(rcon, [name])
+            join(rcon, [name], room_of[name])
+            walk(rcon, name, sprint=sprint)
+            if fire_secs is not None:
+                # Deploy first: kits land on spawn, and draw() below needs the
+                # gun in hand for the entry to stick at the first attempt.
+                rcon.cmd(f"bf action {name} spawn:BASE")
+                rcon.cmd(f"bf bot fire {name} {fire_secs}")
+        except (TimeoutError, RuntimeError) as exc:
+            print(f"rejoin {name} failed: {exc}", flush=True)
+    return missing
+
+
 def combat(rcon, get_log, args, maps_dir, new_rcon=None):
     new_rcon = new_rcon or connect_rcon
     camp = [f"bot{i:02d}" for i in range(1, args.campaign + 1)]
@@ -190,6 +225,11 @@ def combat(rcon, get_log, args, maps_dir, new_rcon=None):
     for name in camp + dm:
         walk(rcon, name, sprint=not args.guns)
     stop, rejoined = threading.Event(), [0]
+    # Fire cover must outlast the whole run; rejoined bots get the remainder.
+    fire_deadline = time.time() + args.warmup + args.window + 30
+
+    def fire_secs():
+        return max(10, int(fire_deadline - time.time()) + 5)
 
     def loop():
         extra = new_rcon()
@@ -215,15 +255,18 @@ def combat(rcon, get_log, args, maps_dir, new_rcon=None):
                         f"{x + random.uniform(-3, 3):.1f} {y + 1} {z + random.uniform(-3, 3):.1f}"
                     )
             if args.guns and n % 10 == 1:
-                extra.cmd(f"bf bot fire @a[tag={BOT_TAG}] 20")
-            if n % 10 == 0:
-                missing = [b for b in camp + dm if b not in online(extra)]
-                if missing:
-                    spawn(extra, missing)
-                    for name in missing:
-                        join(extra, [name], room_of[name])
-                        walk(extra, name, sprint=not args.guns)
-                    rejoined[0] += len(missing)
+                extra.cmd(f"bf bot fire @a[tag={BOT_TAG}] {fire_secs()}")
+            # Instant respawn (was: every 15 s): a dead FFA bot is back and
+            # shooting within ~2 s instead of sagging the whole window.
+            rejoined[0] += len(
+                rejoin(
+                    extra,
+                    camp + dm,
+                    room_of,
+                    sprint=not args.guns,
+                    fire_secs=fire_secs() if args.guns else None,
+                )
+            )
 
     worker = threading.Thread(target=loop, daemon=True)
     worker.start()
@@ -231,9 +274,54 @@ def combat(rcon, get_log, args, maps_dir, new_rcon=None):
         time.sleep(args.warmup)
         rejoined[0] = 0
         if args.guns:
-            gunner_stats(rcon, len(camp + dm))  # reset counters to the window
+            # Fail fast on degraded load (dry kits, bots that never arm), but
+            # only after the match is live: kits deploy on spawn:BASE, and an
+            # early assert would flake while the room still prepares.
+            arm_deadline = time.time() + ARM_WAIT_SECS
+            while True:
+                rejoin(
+                    rcon,
+                    camp + dm,
+                    room_of,
+                    sprint=False,
+                    fire_secs=fire_secs(),
+                )
+                rcon.cmd("bf action @a spawn:BASE")
+                rcon.cmd("bf action @a spawn:any")
+                rcon.cmd(f"bf bot fire @a[tag={BOT_TAG}] {fire_secs()}")
+                try:
+                    gunner_stats(rcon, len(camp + dm))  # reset counters to window
+                    break
+                except RuntimeError:
+                    if time.time() >= arm_deadline:
+                        raise
+                    time.sleep(5)
         samples, new_lines = sample_window(rcon, get_log, args.window)
-        gunner = gunner_stats(rcon, len(camp + dm)) if args.guns else ""
+        gunner = gunner_stats(rcon) if args.guns else ""
+        # Final sweep: respawn last-second casualties, then hold the strict
+        # gates (full online + full arming, no disconnects tolerated). FFA
+        # churn means one snapshot is flaky; retry rounds before deciding.
+        for _ in range(max(1, SWEEP_ROUNDS)):
+            rejoin(
+                rcon,
+                camp + dm,
+                room_of,
+                sprint=not args.guns,
+                fire_secs=30 if args.guns else None,
+            )
+            if args.guns:
+                rcon.cmd(f"bf bot fire @a[tag={BOT_TAG}] 30")
+            time.sleep(3)
+            if {name.lower() for name in camp + dm} <= online(rcon):
+                if not args.guns:
+                    break
+                try:
+                    gunner_stats(rcon, len(camp + dm))
+                    break
+                except RuntimeError:
+                    pass  # casualties still cycling; next round retries
+        if args.guns:
+            gunner_stats(rcon, len(camp + dm))
         if not {name.lower() for name in camp + dm} <= online(rcon):
             raise RuntimeError("Requested combat bots disconnected during the window")
     finally:
@@ -279,7 +367,12 @@ def register(sub):
     parser.add_argument("--dm", type=int, default=18)
     parser.add_argument("--campaign-map", default="")
     parser.add_argument("--dm-map", default="dust2")
-    parser.add_argument("--guns", action="store_true")
+    parser.add_argument(
+        "--guns",
+        action="store_true",
+        help="server-side TACZ fire for every bot (needs kits: use --campaign 0 "
+        "--dm N, campaign bots never arm)",
+    )
     parser.add_argument("--window", type=int, default=120)
     parser.add_argument("--warmup", type=int, default=40)
     rcon_args(parser)

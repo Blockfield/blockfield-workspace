@@ -39,6 +39,41 @@ from toolchain import download  # noqa: E402
 
 CONFIG_DEFAULT = ROOT / "scripts" / "public_export_config.json"
 PRIVATE_DEFAULT = ROOT / "scripts" / "public_export_private.json"
+CLIENT_OVERLAY_DEFAULT = ROOT / "scripts" / "public_export_client.json"
+MOD_OVERLAY_DEFAULT = ROOT / "scripts" / "public_export_mod.json"
+
+TARGETS = {
+    "workspace": {
+        "repo": ROOT,
+        "config": CONFIG_DEFAULT,
+        "private": PRIVATE_DEFAULT,
+        "overlay": None,
+    },
+    "client": {
+        "repo": ROOT / "client",
+        "config": CONFIG_DEFAULT,
+        "private": PRIVATE_DEFAULT,
+        "overlay": CLIENT_OVERLAY_DEFAULT,
+    },
+    "mod": {
+        "repo": ROOT / "localmods" / "blockfield-mod",
+        "config": CONFIG_DEFAULT,
+        "private": PRIVATE_DEFAULT,
+        "overlay": MOD_OVERLAY_DEFAULT,
+    },
+}
+
+
+def resolve_target(name):
+    """Map an export target name to (repo, config, private, overlay) paths."""
+    try:
+        target = TARGETS[name]
+    except KeyError:
+        raise SystemExit(
+            f"unknown export target: {name} (want one of {sorted(TARGETS)})"
+        )
+    return target["repo"], target["config"], target["private"], target["overlay"]
+
 
 GITLEAKS_VERSION = "8.24.3"
 GITLEAKS_BASE = (
@@ -90,13 +125,42 @@ GITLEAKS_TRUSTED_CONFIG = "[extend]\nuseDefault = true\n"
 GITLEAKS_CONFIG_ENV = ("GITLEAKS_CONFIG", "GITLEAKS_CONFIG_TOML")
 
 
-def run_git(repo, *args):
+_GIT_SELECTING_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def _sanitized_env(env=None):
+    """Caller environment minus repository-selecting Git variables.
+
+    Repository selection always comes from the explicit cwd: an inherited
+    GIT_DIR/WORK_TREE/etc. (e.g. an export run from a Git hook) would
+    otherwise redirect reads or writes into the caller's repository.
+    """
+    full_env = dict(os.environ)
+    if env:
+        full_env.update(env)
+    for var in _GIT_SELECTING_ENV:
+        full_env.pop(var, None)
+    return full_env
+
+
+def run_git(repo, *args, env=None, input=None):
     return subprocess.run(
         ["git", *map(str, args)],
         cwd=repo,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        input=input,
+        env=_sanitized_env(env),
     )
 
 
@@ -114,8 +178,20 @@ def git_blob(ref, path, repo=ROOT):
         cwd=repo,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=_sanitized_env(),
     )
     return proc.stdout if proc.returncode == 0 else None
+
+
+def _ref_has_path(ref, path, repo=ROOT):
+    proc = subprocess.run(
+        ["git", "cat-file", "-e", f"{ref}:{path}"],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_sanitized_env(),
+    )
+    return proc.returncode == 0
 
 
 def read_ref_snapshot(ref, repo=ROOT):
@@ -148,6 +224,10 @@ def read_ref_snapshot(ref, repo=ROOT):
         for rel in [rel for rel in files if rel.startswith(link + "/")]:
             del files[rel]
     gitmodules = git_blob(ref, ".gitmodules", repo)
+    if gitmodules is None and _ref_has_path(ref, ".gitmodules", repo):
+        raise SystemExit(
+            f"tracked .gitmodules unreadable in export ref {ref}: failing closed"
+        )
     return files, gitlinks, symlinks, specials, gitmodules
 
 
@@ -167,11 +247,16 @@ def load_config(path):
     return config
 
 
-def load_policy(public_path, private_path):
+def load_policy(public_path, private_path, overlay_path=None):
     """Merge the shippable generic policy with the private literal policy.
 
     Fails closed when the private policy is absent: without it the export
-    cannot prove it removed the private literals.
+    cannot prove it removed the private literals. An overlay (client sterile
+    export) replaces exclude_paths/allowed_binaries, appends replacements,
+    and patches named forbidden rules with extra except_paths/allow_exact.
+    Overlay stub_files (rel path -> public file content) publish a stub for
+    an excluded private original (the client deploy workflow); stubs join the
+    payload after excludes and pass the same scans and workflow inventory.
     """
     public = load_config(public_path)
     if not Path(private_path).is_file():
@@ -179,18 +264,93 @@ def load_policy(public_path, private_path):
             f"private export policy missing: {private_path} (refusing to export)"
         )
     private = load_config(private_path)
-    return {
+    if overlay_path is not None:
+        overlay = json.loads(Path(overlay_path).read_text(encoding="utf-8"))
+    else:
+        overlay = {}
+    forbidden = [dict(rule) for rule in public.get("forbidden", [])]
+    if overlay.get("rule_patches"):
+        patches = overlay["rule_patches"]
+        seen = set()
+        for rule in forbidden:
+            patch = patches.get(rule["id"])
+            if patch is None:
+                continue
+            seen.add(rule["id"])
+            for key in ("except_paths", "allow_exact"):
+                if patch.get(key):
+                    rule[key] = list(rule.get(key, [])) + list(patch[key])
+        unknown = set(patches) - seen
+        if unknown:
+            raise ValueError(f"overlay patches unknown rules: {sorted(unknown)}")
+    banned_tokens = []
+    if overlay_path is not None:
+        keep_word_paths = set(overlay.get("banned_token_word_paths", []))
+    for entry in private.get("banned_tokens", []):
+        if overlay_path is not None and isinstance(entry, dict):
+            # Path exemptions were reviewed against workspace files, while the
+            # client tree is a different repo where the same path may carry
+            # private literals: whole-file exempts and spelling exempts never
+            # cross targets, and only overlay-declared word paths carry over.
+            entry = dict(entry)
+            entry.pop("except_paths", None)
+            entry.pop("except_spellings", None)
+            entry["except_words"] = [
+                w
+                for w in entry.get("except_words", []) or []
+                if w.get("path") in keep_word_paths
+            ]
+        banned_tokens.append(entry)
+    policy = {
         "replacements": public.get("replacements", [])
         + private.get("replacements", []),
         "drop_sections": private.get("drop_sections", []),
-        "banned_tokens": private.get("banned_tokens", []),
-        "forbidden": public.get("forbidden", []),
-        "exclude_paths": public.get("exclude_paths", []),
-        "public_submodule_paths": public.get("public_submodule_paths", []),
-        "allowed_binaries": public.get("allowed_binaries", {}),
-        "submodule_note_path": public["submodule_note_path"],
-        "workflow_path": public["workflow_path"],
+        "banned_tokens": banned_tokens,
+        "forbidden": forbidden,
+        "exclude_paths": overlay.get("exclude_paths", public.get("exclude_paths", [])),
+        # Submodule allowlists are target-specific: the workspace public
+        # paths must not mark a client submodule public. An overlay carries
+        # its own list (empty unless the target reviews its own).
+        "public_submodule_paths": (
+            overlay.get("public_submodule_paths", [])
+            if overlay_path is not None
+            else public.get("public_submodule_paths", [])
+        ),
+        "allowed_binaries": overlay.get(
+            "allowed_binaries", public.get("allowed_binaries", {})
+        ),
+        "single_commit": overlay.get("single_commit", False),
+        "single_commit_message": overlay.get("single_commit_message", ""),
+        "stub_files": dict(overlay.get("stub_files", {})),
     }
+    if "submodule_note_path" in public:
+        policy["submodule_note_path"] = public["submodule_note_path"]
+    if "workflow_path" in public:
+        policy["workflow_path"] = public["workflow_path"]
+    # Targets with their own file inventory keep their own license files: the
+    # workspace license applies only with no overlay, or when the overlay
+    # redefines it (same suppression rule as the generated workflow/note).
+    license_source = public
+    if overlay_path is not None:
+        license_source = overlay if "license_path" in overlay else None
+    if license_source is not None:
+        if "license_path" in license_source:
+            policy["license_path"] = license_source["license_path"]
+        if "license_text" in license_source:
+            policy["license_text"] = license_source["license_text"]
+    if overlay.get("allowed_workflows") is not None:
+        policy["allowed_workflows"] = list(overlay["allowed_workflows"])
+        # A target with its own workflow inventory keeps its own workflows:
+        # suppress the inherited generated workflow/note unless redefined.
+        if "submodule_note_path" not in overlay:
+            policy.pop("submodule_note_path", None)
+        else:
+            policy["submodule_note_path"] = overlay["submodule_note_path"]
+        if "workflow_path" not in overlay:
+            policy.pop("workflow_path", None)
+        else:
+            policy["workflow_path"] = overlay["workflow_path"]
+    return policy
 
 
 def path_matches(rel, patterns):
@@ -521,10 +681,6 @@ def build_payload(files, gitlinks, symlinks, specials, gitmodules, policy):
     )
     rules = policy["replacements"] + sub_rewrite
     forbidden = policy["forbidden"] + sub_gate
-    note_path = policy.get("submodule_note_path", "SUBMODULES.md")
-    workflow_path = policy.get(
-        "workflow_path", ".github/workflows/public-export-check.yml"
-    )
     banned_tokens = policy.get("banned_tokens", [])
     excluded = policy["exclude_paths"]
     payload, applied = {}, {}
@@ -548,6 +704,19 @@ def build_payload(files, gitlinks, symlinks, specials, gitmodules, policy):
             payload[rel] = ("file", data, mode)
         for rule_id, n in counts.items():
             applied[rule_id] = applied.get(rule_id, 0) + n
+    # Stubs publish a public replacement for an excluded private original
+    # (excludes above already dropped the original); they join the payload
+    # before the scans and workflow inventory so both still cover them.
+    for rel, content in policy.get("stub_files", {}).items():
+        payload[rel] = ("file", content.encode("utf-8"), 0o644)
+    # The sterile tree carries the public license verbatim, replacing any
+    # source LICENSE before the scans so they still cover the shipped text.
+    license_path = policy.get("license_path")
+    if license_path is not None:
+        license_text = policy.get("license_text")
+        if license_text is None:
+            raise SystemExit("license path without license text: failing closed")
+        payload[license_path] = ("file", license_text.encode("utf-8"), 0o644)
     scan_texts = {}
     for rel, entry in payload.items():
         text, _ = decode_text(entry[1])
@@ -569,14 +738,30 @@ def build_payload(files, gitlinks, symlinks, specials, gitmodules, policy):
     for rel in sorted(specials):
         if not path_matches(rel, excluded):
             dropped_specials.append(rel)
-    scan_texts[note_path] = render_submodule_note(gitlinks, dropped_links)
-    scan_texts[workflow_path] = render_workflow()
-    payload[note_path] = ("file", scan_texts[note_path].encode("utf-8"), 0o644)
-    payload[workflow_path] = ("file", scan_texts[workflow_path].encode("utf-8"), 0o644)
+    note_path = policy.get("submodule_note_path")
+    workflow_path = policy.get("workflow_path")
+    allowed_workflows = policy.get("allowed_workflows")
+    if note_path is not None:
+        scan_texts[note_path] = render_submodule_note(gitlinks, dropped_links)
+    if workflow_path is not None:
+        scan_texts[workflow_path] = render_workflow()
+    if note_path is not None:
+        payload[note_path] = ("file", scan_texts[note_path].encode("utf-8"), 0o644)
+    if workflow_path is not None:
+        payload[workflow_path] = (
+            "file",
+            scan_texts[workflow_path].encode("utf-8"),
+            0o644,
+        )
     for rel, target in kept_links.items():
         payload[rel] = ("link", target)
+    expected_workflows = (
+        sorted(allowed_workflows)
+        if allowed_workflows is not None
+        else ([workflow_path] if workflow_path is not None else None)
+    )
     workflows = sorted(r for r in payload if r.startswith(".github/workflows/"))
-    if workflows != [workflow_path]:
+    if expected_workflows is not None and workflows != expected_workflows:
         raise SystemExit(f"unexpected workflow inventory in export: {workflows}")
     findings = scan_payload_paths(payload, forbidden, banned_tokens)
     findings += scan_suppression_names(payload)
@@ -653,8 +838,15 @@ def scan_export_payload(payload, config):
         if text is None:
             continue
         findings += scan_text(rel, text, config["forbidden"])
+    allowed_workflows = config.get("allowed_workflows")
+    if allowed_workflows is not None:
+        expected = sorted(allowed_workflows)
+    elif config.get("workflow_path") is not None:
+        expected = [config["workflow_path"]]
+    else:
+        expected = None
     workflows = sorted(r for r in payload if r.startswith(".github/workflows/"))
-    if workflows != [config["workflow_path"]]:
+    if expected is not None and workflows != expected:
         raise SystemExit(f"unexpected workflow inventory in export: {workflows}")
     return findings
 
@@ -685,6 +877,103 @@ def write_output(out, payload):
         target.write_bytes(entry[1])
         if entry[2] & 0o111:
             target.chmod(0o755)
+
+
+def commit_tree(root, message, date):
+    """Turn an export directory into a single-commit git tree; return the SHA.
+
+    The commit is assembled with plumbing (hash-object --no-filters,
+    update-index --index-info, write-tree, commit-tree) so staged bytes equal
+    the on-disk payload regardless of core.autocrlf/core.eol, attribute files
+    on this machine, or a .gitattributes shipped inside the payload. The repo
+    is initialized with a pinned SHA-1 object format so GIT_DEFAULT_HASH (or
+    an equivalent local default) cannot change the commit ID. Identity
+    and timestamps are pinned to the given source commit date, so the same
+    source SHA always yields the same commit id.
+    """
+    root = Path(root)
+    # An explicitly empty template: the caller's template directory (or its
+    # configured equivalent) must not copy private hooks/files into the
+    # output .git after the payload scans.
+    with tempfile.TemporaryDirectory(prefix="export-git-template-") as template:
+        run_git(root, "init", "-q", "--object-format=sha1", f"--template={template}")
+    rels = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if ".git" not in path.relative_to(root).parts
+        and (path.is_file() or path.is_symlink())
+    )
+    index_lines = []
+    for rel in rels:
+        target = root / rel
+        if target.is_symlink():
+            blob = (
+                run_git(
+                    root,
+                    "hash-object",
+                    "-t",
+                    "blob",
+                    "-w",
+                    "--stdin",
+                    input=os.readlink(target).encode("utf-8"),
+                )
+                .stdout.decode()
+                .strip()
+            )
+            mode = "120000"
+        else:
+            blob = (
+                run_git(
+                    root, "hash-object", "-t", "blob", "-w", "--no-filters", "--", rel
+                )
+                .stdout.decode()
+                .strip()
+            )
+            mode = "100755" if target.stat().st_mode & 0o111 else "100644"
+        # C-quote paths with specials so --index-info parses exactly one
+        # entry per line (payload names with spaces hit this in practice).
+        if re.search(r'[\s"\\]', rel):
+            quoted = (
+                '"'
+                + rel.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+                .replace("\t", "\\t")
+                + '"'
+            )
+        else:
+            quoted = rel
+        index_lines.append(f"{mode} {blob}\t{quoted}")
+    run_git(
+        root,
+        "update-index",
+        "--index-info",
+        input="".join(line + "\n" for line in index_lines).encode("utf-8"),
+    )
+    tree = run_git(root, "write-tree").stdout.decode().strip()
+    commit = (
+        run_git(
+            root,
+            "-c",
+            "i18n.commitEncoding=UTF-8",
+            "commit-tree",
+            tree,
+            "-m",
+            message,
+            env={
+                "GIT_AUTHOR_NAME": "blockfield-export",
+                "GIT_AUTHOR_EMAIL": "export@localhost",
+                "GIT_COMMITTER_NAME": "blockfield-export",
+                "GIT_COMMITTER_EMAIL": "export@localhost",
+                "GIT_AUTHOR_DATE": date,
+                "GIT_COMMITTER_DATE": date,
+            },
+        )
+        .stdout.decode()
+        .strip()
+    )
+    run_git(root, "update-ref", "HEAD", commit)
+    return commit
 
 
 def ensure_gitleaks():
@@ -726,9 +1015,14 @@ def ensure_gitleaks():
 
 
 def export_tree(
-    ref, out, config_path=CONFIG_DEFAULT, private_path=PRIVATE_DEFAULT, repo=ROOT
+    ref,
+    out,
+    config_path=CONFIG_DEFAULT,
+    private_path=PRIVATE_DEFAULT,
+    repo=ROOT,
+    overlay_path=None,
 ):
-    policy = load_policy(config_path, private_path)
+    policy = load_policy(config_path, private_path, overlay_path)
     for pin in ("checkout", "setup-python"):
         if not re.fullmatch(r"[0-9a-f]{40}", WORKFLOW_PINS[pin]):
             raise SystemExit(f"workflow pin is not a full commit SHA: {pin}")
@@ -813,9 +1107,25 @@ def read_disk_payload(root):
     return payload
 
 
-def check_tree(root, config_path=CONFIG_DEFAULT):
+def check_tree(root, config_path=CONFIG_DEFAULT, overlay_path=None):
     """Public re-check: generic gates only, no private literals anywhere."""
     config = load_config(config_path)
+    if overlay_path is not None:
+        overlay = json.loads(Path(overlay_path).read_text(encoding="utf-8"))
+        forbidden = [dict(rule) for rule in config.get("forbidden", [])]
+        for rule in forbidden:
+            patch = (overlay.get("rule_patches") or {}).get(rule["id"])
+            if not patch:
+                continue
+            for key in ("except_paths", "allow_exact"):
+                if patch.get(key):
+                    rule[key] = list(rule.get(key, [])) + list(patch[key])
+        config = dict(config)
+        config["forbidden"] = forbidden
+        if overlay.get("allowed_workflows") is not None:
+            config["allowed_workflows"] = list(overlay["allowed_workflows"])
+        if overlay.get("allowed_binaries") is not None:
+            config["allowed_binaries"] = dict(overlay["allowed_binaries"])
     payload = read_disk_payload(Path(root))
     verify_allowed_binaries(payload, config.get("allowed_binaries", {}))
     findings = scan_export_payload(payload, config)
@@ -827,27 +1137,8 @@ def check_tree(root, config_path=CONFIG_DEFAULT):
     return {"tree_files": len(payload), "tree_digest": tree_digest(payload)}
 
 
-def main(argv=None, repo=ROOT):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ref", default="origin/main")
-    parser.add_argument("--out", default=None)
-    parser.add_argument("--config", default=str(CONFIG_DEFAULT))
-    parser.add_argument("--private", default=str(PRIVATE_DEFAULT))
-    parser.add_argument(
-        "--check", default=None, help="public re-check of an export tree"
-    )
-    args = parser.parse_args(argv)
-    if args.check is not None:
-        summary = check_tree(Path(args.check), args.config)
-        print(
-            f"public re-check clean: {summary['tree_files']} files, "
-            f"tree sha256: {summary['tree_digest']}"
-        )
-        return
-    if not args.out:
-        raise SystemExit("--out is required for export mode")
-    out = Path(args.out).resolve()
-    summary = export_tree(args.ref, out, args.config, args.private, repo=repo)
+def run_gitleaks_scan(out, repo):
+    """Pinned-scanner gate over an export directory; returns the process result."""
     binary = ensure_gitleaks()
     scan_env = {
         key: value
@@ -859,7 +1150,7 @@ def main(argv=None, repo=ROOT):
         trusted_config.write_text(GITLEAKS_TRUSTED_CONFIG, encoding="utf-8")
         empty_ignore = Path(trusted) / "no-ignore"
         empty_ignore.mkdir()
-        result = subprocess.run(
+        return subprocess.run(
             [
                 str(binary),
                 "detect",
@@ -881,6 +1172,9 @@ def main(argv=None, repo=ROOT):
             stderr=subprocess.STDOUT,
             text=True,
         )
+
+
+def report_export(summary):
     print(f"export ref {summary['ref']} = {summary['sha']}")
     print(
         f"files: {summary['tree_files']} in output, "
@@ -894,15 +1188,86 @@ def main(argv=None, repo=ROOT):
     for rule_id in sorted(summary["applied"]):
         print(f"  {rule_id}: {summary['applied'][rule_id]} replacement(s)")
     print(f"tree sha256: {summary['tree_digest']}")
+
+
+def fail_gitleaks(out, result):
+    print(f"gitleaks exit={result.returncode} (output redacted, values withheld):")
+    print(result.stdout[-4000:])
+    try:
+        shutil.rmtree(out)
+        print("removed unscanned export output after gitleaks failure")
+    except OSError as error:
+        print(f"warning: could not remove unscanned output: {error}")
+    raise SystemExit(f"gitleaks gate failed on export (exit {result.returncode})")
+
+
+def main(argv=None, repo=ROOT):
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv[:1] == ["export"]:
+        if len(argv) != 4:
+            raise SystemExit("usage: public_export.py export <target> <sha> <outdir>")
+        _, name, sha, outdir = argv
+        target_repo, config, private, overlay = resolve_target(name)
+        out = Path(outdir).resolve()
+        summary = export_tree(
+            sha,
+            out,
+            str(config),
+            str(private),
+            repo=target_repo,
+            overlay_path=str(overlay) if overlay is not None else None,
+        )
+        result = run_gitleaks_scan(out, target_repo)
+        report_export(summary)
+        if result.returncode != 0:
+            fail_gitleaks(out, result)
+        print("gitleaks: no leaks found in export")
+        policy = load_policy(
+            str(config),
+            str(private),
+            str(overlay) if overlay is not None else None,
+        )
+        if policy.get("single_commit"):
+            date = (
+                run_git(target_repo, "show", "-s", "--format=%cI", summary["sha"])
+                .stdout.decode()
+                .strip()
+            )
+            head = commit_tree(
+                out,
+                policy["single_commit_message"].format(sha=summary["sha"]),
+                date,
+            )
+            print(f"single commit: {head}")
+        return
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ref", default="origin/main")
+    parser.add_argument("--out", default=None)
+    parser.add_argument("--config", default=str(CONFIG_DEFAULT))
+    parser.add_argument("--private", default=str(PRIVATE_DEFAULT))
+    parser.add_argument(
+        "--check", default=None, help="public re-check of an export tree"
+    )
+    parser.add_argument(
+        "--overlay", default=None, help="client overlay for --check of a client tree"
+    )
+    args = parser.parse_args(argv)
+    if args.check is not None:
+        summary = check_tree(Path(args.check), args.config, args.overlay)
+        print(
+            f"public re-check clean: {summary['tree_files']} files, "
+            f"tree sha256: {summary['tree_digest']}"
+        )
+        return
+    if not args.out:
+        raise SystemExit("--out is required for export mode")
+    out = Path(args.out).resolve()
+    summary = export_tree(args.ref, out, args.config, args.private, repo=repo)
+    result = run_gitleaks_scan(out, repo)
+    report_export(summary)
     if result.returncode != 0:
-        print(f"gitleaks exit={result.returncode} (output redacted, values withheld):")
-        print(result.stdout[-4000:])
-        try:
-            shutil.rmtree(out)
-            print("removed unscanned export output after gitleaks failure")
-        except OSError as error:
-            print(f"warning: could not remove unscanned output: {error}")
-        raise SystemExit(f"gitleaks gate failed on export (exit {result.returncode})")
+        fail_gitleaks(out, result)
     print("gitleaks: no leaks found in export")
 
 

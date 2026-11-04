@@ -50,7 +50,19 @@ class Plan(unittest.TestCase):
 
     def test_single_side_keeps_contract(self):
         kind, order = release.plan({"server": True}, {"server": PROD}, PROD)
+        # Server-only is tag-only: the tag run deploys Game automatically,
+        # so the dry-run text must not instruct a manual deploy dispatch.
         self.assertEqual((kind, order), ("server-only", [("tag", "server")]))
+        kind, order = release.plan({"client": True}, {"client": PROD}, PROD)
+        self.assertEqual((kind, order), ("client-only", [("tag", "client")]))
+
+    def test_server_only_dry_run_has_no_manual_deploy(self):
+        tags = {"server": "v2.79.4"}
+        lines = release.tag_lines([("tag", "server")], tags, "release/server-v2.79.4")
+        self.assertFalse(
+            [line for line in lines if "dispatches" in line or "deploy.yml" in line],
+            lines,
+        )
 
     def test_independent_pair_tags_server_first(self):
         compat = {"client": PROD, "server": PROD}
@@ -234,21 +246,53 @@ class Ship(unittest.TestCase):
         with self.assertRaises(SystemExit):
             release.cmd_ship(self.ship_args(confirmed_by_owner=False))
 
-    def test_single_side_still_requires_full_tag_run_success(self):
-        for side in release.SIDES:
-            calls = []
-            tags = {side: "v2.77.0"}
-            patches = self.base_patches(
-                calls, (tags, f"{side}-only", [("tag", side)], "")
+    def test_client_only_still_requires_full_tag_run_success(self):
+        calls = []
+        tags = {"client": "v2.77.0"}
+        patches = self.base_patches(
+            calls, (tags, "client-only", [("tag", "client")], "")
+        )
+        self.assertTrue(
+            self.run_patches(
+                patches, lambda: release.cmd_ship(self.ship_args(only="client"))
             )
-            self.assertTrue(
-                self.run_patches(
-                    patches, lambda: release.cmd_ship(self.ship_args(only=side))
-                )
+        )
+        self.assertIn(("watched", "client"), calls)
+        self.assertFalse(any(c[0] == "published" for c in calls))
+        self.assertFalse(any(c[0] == "deploy" for c in calls))
+
+    def test_server_only_ships_game_without_workshop(self):
+        calls = []
+        tags = {"server": "v2.77.0"}
+        patches = self.base_patches(
+            calls, (tags, "server-only", [("tag", "server")], "")
+        )
+        self.assertTrue(
+            self.run_patches(
+                patches, lambda: release.cmd_ship(self.ship_args(only="server"))
             )
-            self.assertIn(("watched", side), calls)
-            self.assertNotIn(("published", side), calls)
-            self.assertFalse(any(c[0] == "deploy" for c in calls))
+        )
+        staged = [
+            c
+            for c in calls
+            if c[0] in ("tag", "run", "published", "watched", "deploy", "probes", "pin")
+        ]
+        # A plain tag, then the automatic tag-run deploys Game on its own:
+        # no Workshop staging (published), no explicit Workshop move
+        # (approve), no manual Game deploy.
+        self.assertEqual(
+            staged,
+            [
+                ("tag", "server"),
+                ("run", "server"),
+                ("watched", "server"),
+                ("probes", "server"),
+                ("pin",),
+            ],
+        )
+        self.assertFalse(any(c[0] == "published" for c in calls))
+        self.assertFalse(any(c[0] == "approve" for c in calls))
+        self.assertFalse(any(c[0] == "deploy" for c in calls))
 
     def test_wait_until_returns_first_truthy_and_times_out(self):
         self.assertEqual(release.wait_until("x", 60, 0, lambda: "done"), "done")
@@ -275,6 +319,111 @@ class Ship(unittest.TestCase):
             ]
             self.assertEqual(release.pr_checks("R", 1), "pending")
             self.rollup = []
+            self.assertEqual(release.pr_checks("R", 1), "pending")
+
+    def test_pr_checks_status_context_states(self):
+        for state, expected in (
+            ("SUCCESS", "green"),
+            ("FAILURE", "red"),
+            ("ERROR", "red"),
+            ("PENDING", "pending"),
+            ("EXPECTED", "pending"),
+        ):
+            rollup = [
+                {
+                    "__typename": "CheckRun",
+                    "name": "tests",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "bot-review",
+                    "state": state,
+                },
+            ]
+            with (
+                self.subTest(state=state),
+                mock.patch.object(
+                    release,
+                    "gh",
+                    return_value=json.dumps({"statusCheckRollup": rollup}),
+                ),
+            ):
+                self.assertEqual(release.pr_checks("R", 1), expected)
+                self.assertEqual(
+                    release.pr_checks("R", 1, required_jobs=("tests", "bot-review")),
+                    expected,
+                )
+                if state == "SUCCESS":
+                    self.assertEqual(
+                        release.pr_checks("R", 1, required_jobs=("missing",)), "pending"
+                    )
+
+    def test_pr_checks_required_job_latest_skip_is_not_green(self):
+        # Bot-gate shape after the job-level `if:` fix: a COMMENTED review
+        # leaves a SKIPPED run, an APPROVED review a SUCCESS run, both on the
+        # same head SHA. A skip is never green, and a later skip must not mask
+        # an earlier green one.
+        def fake_gh(*args):
+            if "headRefOid,statusCheckRollup" in args:
+                return json.dumps({"statusCheckRollup": self.rollup})
+            raise AssertionError(args)
+
+        with mock.patch.object(release, "gh", side_effect=fake_gh):
+            self.rollup = [
+                {
+                    "__typename": "CheckRun",
+                    "name": "check",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-11-03T14:45:35Z",
+                    "completedAt": "2026-11-03T14:46:00Z",
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "check",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                    "startedAt": "2026-11-03T14:47:00Z",
+                    "completedAt": "2026-11-03T14:47:05Z",
+                },
+            ]
+            self.assertEqual(
+                release.pr_checks("R", 1, required_jobs=("check",)), "green"
+            )
+            self.rollup = [
+                {
+                    "__typename": "CheckRun",
+                    "name": "check",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                    "startedAt": "2026-11-03T14:47:00Z",
+                    "completedAt": "2026-11-03T14:47:05Z",
+                },
+            ]
+            self.assertEqual(
+                release.pr_checks("R", 1, required_jobs=("check",)), "pending"
+            )
+            # No required jobs: an all-skipped comment-review run is not green.
+            self.assertEqual(release.pr_checks("R", 1), "pending")
+            # A successful commit status (e.g. bot-review) with no successful
+            # CI check run is not green either: statuses never prove CI ran.
+            self.rollup = [
+                {
+                    "__typename": "StatusContext",
+                    "context": "bot-review",
+                    "state": "SUCCESS",
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "check",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                    "startedAt": "2026-11-03T14:47:00Z",
+                    "completedAt": "2026-11-03T14:47:05Z",
+                },
+            ]
             self.assertEqual(release.pr_checks("R", 1), "pending")
 
     def test_ship_polls_every_five_seconds_by_default(self):
@@ -407,7 +556,7 @@ class Ship(unittest.TestCase):
             mock.patch.object(
                 release,
                 "push_tag",
-                side_effect=lambda side, tag, dry, expected_sha=None: (
+                side_effect=lambda side, tag, dry, expected_sha=None, *a, **k: (
                     calls.append(("tag", side)) or shas[side]
                 ),
             ),
@@ -462,6 +611,18 @@ class Ship(unittest.TestCase):
                 "verify_pair",
                 side_effect=lambda *args: calls.append(("verify",)),
             ),
+            mock.patch.object(
+                release,
+                "require_rc_gate",
+                side_effect=lambda tags, *a, **k: calls.append(("rc-gate",)) or True,
+            ),
+            mock.patch.object(
+                release,
+                "post_deploy_probes",
+                side_effect=lambda tags, *a, **k: (
+                    calls.append(("probes", next(iter(tags)))) or True
+                ),
+            ),
         )
 
     def run_patches(self, patches, func):
@@ -483,6 +644,7 @@ class Ship(unittest.TestCase):
         self.assertEqual(
             kinds,
             [
+                "rc-gate",
                 "green",
                 "merge",
                 "tag",
@@ -494,6 +656,7 @@ class Ship(unittest.TestCase):
                 "watched",
                 "run",
                 "watched",
+                "probes",
                 "pin",
                 "green",
                 "merge",
@@ -532,6 +695,7 @@ class Ship(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                ("rc-gate",),
                 ("green", release.REPO["client"]),
                 ("merge", release.REPO["client"], "a" * 40),
                 ("tag", "client"),
@@ -545,7 +709,9 @@ class Ship(unittest.TestCase):
                 ("published", "server"),
                 ("prerelease", tags["client"], True),
                 ("deploy", "server", {"client_tag": tags["client"], "dry": False}),
+                ("probes", "server"),
                 ("deploy", "client", {"dry": False}),
+                ("probes", "client"),
                 ("verify",),
                 ("pin",),
                 ("green", release.WORKSPACE_REPO),
@@ -577,6 +743,7 @@ class Ship(unittest.TestCase):
             mock.patch.object(release, "prepare_all", return_value=prepared),
             mock.patch.object(release, "say"),
             mock.patch.object(release, "mod_published", return_value=True),
+            mock.patch.object(release, "require_rc_gate", return_value=True),
             mock.patch.object(
                 release,
                 "wait_pr_green",
@@ -667,6 +834,103 @@ class Ship(unittest.TestCase):
             "green workspace pin-PR",
         ):
             self.assertIn(expected, text)
+        self.assertNotIn("move-approved-tag", text)
+
+    def test_server_only_dry_run_prints_game_only_plan(self):
+        tags = {"server": "v2.77.0"}
+        _, order = release.plan({"server": True}, {"server": PROD}, PROD)
+        said = []
+        with (
+            mock.patch.object(release, "mod_published", return_value=True),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=(tags, "server-only", order, "release/server-2.77.0"),
+            ),
+            mock.patch.object(release, "say", side_effect=said.append),
+            mock.patch.object(
+                release, "ship_mutate", side_effect=AssertionError("no mutations")
+            ),
+            mock.patch.object(
+                release, "ship_tag_side", side_effect=AssertionError("no tag")
+            ),
+            mock.patch.object(
+                release, "dispatch_deploy", side_effect=AssertionError("no dispatch")
+            ),
+            mock.patch.object(release, "cmd_pin", side_effect=AssertionError("no pin")),
+        ):
+            self.assertTrue(
+                release.cmd_ship(self.ship_args(dry_run=True, confirmed_by_owner=False))
+            )
+        text = "\n".join(said)
+        # Game ships alone: tag, then the automatic tag-run Deploy (no manual
+        # dispatch: real ship never runs deploy.yml for server-only); the
+        # Workshop is never staged, moved or mentioned.
+        self.assertNotIn("deploy.yml/dispatches", text)
+        self.assertIn("automatic Deploy ships", text)
+        self.assertIn("no manual dispatch", text)
+        self.assertIn("green workspace pin-PR", text)
+        self.assertNotIn("workshop", text.lower())
+        self.assertNotIn("move-approved-tag", text)
+
+    def test_publication_accepts_expected_compatibility_refusal(self):
+        # A server-only tag run whose automatic Deploy fails closed at the
+        # client-gate step still publishes: Game ships without the Workshop.
+        jobs = [
+            {"name": "prepare", "conclusion": "success"},
+            {"name": "release", "conclusion": "success"},
+            {
+                "name": "deploy / deploy",
+                "conclusion": "failure",
+                "steps": [
+                    {
+                        "name": "Validate target and remember previous pair",
+                        "conclusion": "failure",
+                    }
+                ],
+            },
+        ]
+        data = {
+            "jobs": jobs,
+            "status": "completed",
+            "conclusion": "failure",
+            "url": "run-url",
+        }
+        with (
+            mock.patch.object(
+                release,
+                "gh",
+                side_effect=lambda *a: (
+                    "log Server gates on another client than the served one: "
+                    "rerun Deploy server with client_tag"
+                    if "--log-failed" in a
+                    else json.dumps(data)
+                ),
+            ),
+            mock.patch.object(
+                release, "verify_publication", return_value="manifest"
+            ) as verify,
+        ):
+            self.assertEqual(
+                release.wait_publication("server", "v2.77.0", 1, 1, 0),
+                "manifest",
+            )
+            verify.assert_called_once_with("server", "v2.77.0")
+        with (
+            mock.patch.object(
+                release,
+                "gh",
+                side_effect=lambda *a: (
+                    "log some other failure"
+                    if "--log-failed" in a
+                    else json.dumps(data)
+                ),
+            ),
+            mock.patch.object(release, "verify_publication") as verify,
+        ):
+            with self.assertRaises(RuntimeError):
+                release.wait_publication("server", "v2.77.0", 1, 1, 0)
+            verify.assert_not_called()
 
 
 class PairGates(unittest.TestCase):
@@ -796,7 +1060,7 @@ class PairGates(unittest.TestCase):
                 publish_only=True,
             )
         self.assertEqual(merge.call_args.args[-2:], ("--match-head-commit", head))
-        tag.assert_called_once_with("client", "v2.77.0", False, merged)
+        tag.assert_called_once_with("client", "v2.77.0", False, merged, None, None)
 
     def test_tag_rejects_unrelated_main(self):
         with (
@@ -805,7 +1069,9 @@ class PairGates(unittest.TestCase):
             mock.patch.object(release, "preflight") as preflight,
         ):
             with self.assertRaisesRegex(RuntimeError, "differs from the merged commit"):
-                release.push_tag("client", "v2.77.0", False, "b" * 40)
+                release.push_tag(
+                    "client", "v2.77.0", False, "b" * 40, gate_waiver="test"
+                )
         preflight.assert_not_called()
         self.assertFalse(any(c.args[1] in ("tag", "push") for c in git.call_args_list))
 
@@ -1032,7 +1298,7 @@ class PairGates(unittest.TestCase):
                 ) as git,
             ):
                 with self.assertRaises(RuntimeError):
-                    release.push_tag("server", "v2.77.0", False)
+                    release.push_tag("server", "v2.77.0", False, gate_waiver="test")
             self.assertFalse(
                 any(c.args[1] in ("tag", "push") for c in git.call_args_list)
             )
@@ -1077,6 +1343,160 @@ class PairGates(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     release.wait_publication(side, "v2.78.0", 1, 0, 0)
                 verify.assert_not_called()
+
+    def test_resume_pair_refuses_changed_trees_and_server_tag(self):
+        args = SimpleNamespace(
+            resume_client_published=["v2.79.1", "v2.79.4", "a" * 40, "b" * 40]
+        )
+        for client_tree, server_tree, tagged in (
+            ("a" * 40, "b" * 40, False),
+            ("c" * 40, "b" * 40, False),
+            ("a" * 40, "c" * 40, False),
+            ("a" * 40, "b" * 40, True),
+        ):
+
+            def git(repo, *cmd):
+                if cmd[0] == "ls-remote":
+                    return "tagged" if tagged else ""
+                if cmd[0] == "rev-parse":
+                    return client_tree if repo == "client" else server_tree
+                return ""
+
+            with (
+                mock.patch.object(release, "repo_dir", side_effect=lambda s: s),
+                mock.patch.object(release, "git", side_effect=git),
+            ):
+                if client_tree == "a" * 40 and server_tree == "b" * 40 and not tagged:
+                    self.assertEqual(
+                        release.resume_pair(args)[0],
+                        {"client": "v2.79.1", "server": "v2.79.4"},
+                    )
+                else:
+                    with self.assertRaises(SystemExit):
+                        release.resume_pair(args)
+
+    def test_candidate_tree_guard_precedes_any_candidate_change(self):
+        with (
+            mock.patch.object(release, "repo_dir", return_value=Path("server")),
+            mock.patch.object(release, "git", return_value="c" * 40),
+            mock.patch.object(
+                release, "worktree", return_value=contextlib.nullcontext(Path("server"))
+            ),
+            mock.patch.object(release, "set_candidate") as mutate,
+        ):
+            with self.assertRaisesRegex(SystemExit, "server tree changed"):
+                release.cmd_candidate(
+                    SimpleNamespace(
+                        branch="release/server-2.79.4",
+                        tag="v2.79.1",
+                        dry_run=False,
+                        expected_tree="b" * 40,
+                    )
+                )
+            mutate.assert_not_called()
+
+    def test_client_stage_evidence_binds_workflow_tag_and_no_promotion(self):
+        data = {
+            "event": "workflow_dispatch",
+            "path": ".github/workflows/deploy.yml",
+            "head_branch": "main",
+            "status": "completed",
+            "conclusion": "success",
+        }
+        jobs = {
+            "jobs": [
+                {
+                    "name": "deploy",
+                    "conclusion": "success",
+                    "steps": [
+                        {
+                            "name": "Mark the deployed client as latest",
+                            "conclusion": "skipped",
+                        }
+                    ],
+                }
+            ]
+        }
+        for log, event, promotion, allowed in (
+            ("Client v2.79.1 staged invisibly;", "workflow_dispatch", "skipped", True),
+            ("Client v2.79.0 staged invisibly;", "workflow_dispatch", "skipped", False),
+            ("Client v2.79.1 staged invisibly;", "push", "skipped", False),
+            ("Client v2.79.1 staged invisibly;", "workflow_dispatch", "success", False),
+        ):
+            data["event"] = event
+            jobs["jobs"][0]["steps"][0]["conclusion"] = promotion
+            with mock.patch.object(
+                release, "gh", side_effect=[json.dumps(data), json.dumps(jobs), log]
+            ):
+                if allowed:
+                    self.assertTrue(release.verify_client_stage("v2.79.1", 42))
+                else:
+                    with self.assertRaises(RuntimeError):
+                        release.verify_client_stage("v2.79.1", 42)
+
+    def test_external_stage_accepts_skipped_not_failed_automatic_deploy(self):
+        data = {
+            "status": "completed",
+            "conclusion": "success",
+            "url": "tag-run",
+            "jobs": [
+                {"name": "check", "conclusion": "success"},
+                {"name": "deploy", "conclusion": "skipped"},
+            ],
+        }
+        with (
+            mock.patch.object(release, "gh", side_effect=lambda *a: json.dumps(data)),
+            mock.patch.object(release, "verify_client_stage", return_value=True),
+            mock.patch.object(release, "verify_publication", return_value="verified"),
+        ):
+            self.assertEqual(
+                release.wait_publication(
+                    "client", "v2.79.1", 1, 0, 0, client_stage_run=42
+                ),
+                "verified",
+            )
+            data["jobs"][-1]["conclusion"] = "failure"
+            with self.assertRaises(RuntimeError):
+                release.wait_publication(
+                    "client", "v2.79.1", 1, 0, 0, client_stage_run=42
+                )
+
+    def test_publication_allows_only_ancillary_skips(self):
+        for name, conclusion, allowed in (
+            ("bot-gate", "skipped", True),
+            ("release-text", "neutral", True),
+            ("bot-gate", "failure", False),
+            ("check", "skipped", False),
+            ("check", "neutral", False),
+        ):
+            data = {
+                "status": "completed",
+                "conclusion": "success",
+                "url": "tag-run",
+                "jobs": [
+                    {"name": "check", "conclusion": "success"},
+                    {"name": "deploy / deploy", "conclusion": "success"},
+                ],
+            }
+            if name == "check":
+                data["jobs"][0]["conclusion"] = conclusion
+            else:
+                data["jobs"].append({"name": name, "conclusion": conclusion})
+            with (
+                self.subTest(name=name, conclusion=conclusion),
+                mock.patch.object(release, "gh", return_value=json.dumps(data)),
+                mock.patch.object(
+                    release, "verify_publication", return_value="verified"
+                ),
+            ):
+                if allowed:
+                    self.assertEqual(
+                        release.wait_publication("client", "v2.79.1", 1, 0, 0),
+                        "verified",
+                    )
+                else:
+                    with self.assertRaises(RuntimeError):
+                        release.wait_publication("client", "v2.79.1", 1, 0, 0)
 
     def test_release_created_before_notes_is_not_publication(self):
         data = {"draft": False, "tag_name": "v2.78.0", "assets": []}
@@ -1217,15 +1637,17 @@ class PairGates(unittest.TestCase):
             }
 
             def gh(*args):
-                return json.dumps(data) if args[0] == "api" else ""
+                if args[0] == "api":
+                    return json.dumps(data)
+                if args[:2] == ("release", "download"):
+                    destination = Path(args[args.index("-D") + 1])
+                    for name in ("build.json", "SHA256SUMS"):
+                        shutil.copyfile(root / name, destination / name)
+                return ""
 
             with (
                 mock.patch.object(release, "gh", side_effect=gh),
-                mock.patch.object(
-                    release.tempfile,
-                    "TemporaryDirectory",
-                    return_value=contextlib.nullcontext(tmp),
-                ),
+                mock.patch.object(release, "CACHE", root / "fresh" / "cache"),
             ):
                 self.assertEqual(release.verify_publication("client", "v2.77.0"), meta)
                 for changed in ("digest", "manifest", "missing", "draft"):
@@ -1450,6 +1872,486 @@ class PendingServerPins(unittest.TestCase):
             self.assertLess(events.index(merge), events.index(("preflight",)))
             self.assertEqual(preflight.call_args.args[3], "file:///candidate")
             self.assertTrue(pr.call_args.args[0])
+
+
+class RcGateTest(unittest.TestCase):
+    def record(self, releases, checks):
+        return {
+            "format": release.RC_RECORD_FORMAT,
+            "battery": "just scenario rc",
+            "releases": releases,
+            "checks": checks,
+        }
+
+    def levels(self, tags, record):
+        with mock.patch.object(release, "say"):
+            return [level for level, _ in release.check_rc_record(tags, record)]
+
+    def test_pass_pair_exact_versions(self):
+        tags = {"client": "v2.80.0", "server": "v2.80.1"}
+        checks = [
+            {
+                "name": "versions loaded match pins",
+                "result": "PASS",
+                "evidence": "1.57.0",
+            },
+            {"name": "first-shot after deploy", "result": "PASS", "evidence": "ok"},
+        ]
+        self.assertEqual(self.levels(tags, self.record(tags, checks)), ["ok", "ok"])
+
+    def test_releases_must_match_exactly(self):
+        tags = {"client": "v2.80.0", "server": "v2.80.1"}
+        good = [{"name": "x", "result": "PASS", "evidence": ""}]
+        for releases in (
+            {"client": "v2.80.0"},
+            {"client": "v2.80.0", "server": "v2.80.1", "extra": "v1.0.0"},
+            {"client": "v2.80.0", "server": "v2.80.2"},
+            None,
+        ):
+            self.assertEqual(
+                self.levels(tags, self.record(releases, good)), ["FAIL"], releases
+            )
+
+    def test_fail_check_blocks(self):
+        tags = {"server": "v2.80.1"}
+        checks = [{"name": "hitreg smoke", "result": "FAIL", "evidence": "0/10"}]
+        self.assertEqual(self.levels(tags, self.record(tags, checks)), ["FAIL"])
+
+    def test_skip_second_client_only_on_server_only(self):
+        skipped = [
+            {
+                "name": "long-range kill hamburg",
+                "result": "SKIP",
+                "evidence": "no client",
+            },
+            {
+                "name": "tdm death/respawn at BASE",
+                "result": "SKIP",
+                "evidence": "no client",
+            },
+        ]
+        self.assertEqual(
+            self.levels(
+                {"server": "v2.80.1"}, self.record({"server": "v2.80.1"}, skipped)
+            ),
+            ["ok", "ok"],
+        )
+        pair = {"client": "v2.80.0", "server": "v2.80.1"}
+        self.assertIn("FAIL", self.levels(pair, self.record(pair, skipped)))
+        other = [{"name": "first-shot after deploy", "result": "SKIP", "evidence": ""}]
+        self.assertEqual(
+            self.levels(
+                {"server": "v2.80.1"}, self.record({"server": "v2.80.1"}, other)
+            ),
+            ["FAIL"],
+        )
+
+    def test_empty_or_missing_checks_fail(self):
+        tags = {"server": "v2.80.1"}
+        for checks in ([], None, "PASS"):
+            self.assertEqual(
+                self.levels(tags, self.record(tags, checks)), ["FAIL"], checks
+            )
+
+    def test_load_rejects_unreadable_and_non_object(self):
+        with self.assertRaises(RuntimeError):
+            release.load_rc_record("/nonexistent/rc.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rc.json"
+            path.write_text("[1, 2]")
+            with self.assertRaises(RuntimeError):
+                release.load_rc_record(path)
+
+    def test_require_refuses_without_record_or_waiver(self):
+        with mock.patch.object(release, "say"):
+            with self.assertRaises(SystemExit):
+                release.require_rc_gate({"server": "v2.80.1"})
+            with self.assertRaises(SystemExit):
+                release.require_rc_gate(
+                    {"server": "v2.80.1"}, rc_record="/nonexistent/rc.json"
+                )
+
+    def test_require_passes_with_record_and_waiver(self):
+        tags = {"server": "v2.80.1"}
+        record = self.record(
+            tags,
+            [{"name": "versions loaded match pins", "result": "PASS", "evidence": ""}],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rc.json"
+            path.write_text(json.dumps(record))
+            with mock.patch.object(release, "say"):
+                self.assertTrue(release.require_rc_gate(tags, path))
+                self.assertTrue(
+                    release.require_rc_gate(tags, gate_waiver="RC cancelled by owner")
+                )
+
+    def test_push_tag_refuses_without_gate(self):
+        with mock.patch.object(release, "say"):
+            with self.assertRaises(SystemExit):
+                release.push_tag("server", "v2.80.1", False)
+            with mock.patch.object(
+                release, "repo_dir", side_effect=RuntimeError("past the gate")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "past the gate"):
+                    release.push_tag("server", "v2.80.1", False, gate_waiver="test")
+
+
+class PostDeployProbesTest(unittest.TestCase):
+    def run_probes(self, tags, prod, client=None, timeout=1, interval=0):
+        said = []
+        with (
+            mock.patch.object(release, "prod_state", return_value=dict(prod)),
+            mock.patch.object(release, "say", side_effect=said.append),
+            mock.patch.object(
+                release,
+                "entry_probe",
+                return_value=("REQUIRED", "manual: proxy gate Game backend open"),
+            ),
+        ):
+            result = release.post_deploy_probes(tags, client, timeout, interval)
+        return result, said
+
+    def test_rooms_and_contract_pass_with_required_manuals(self):
+        tags = {"client": "v2.80.0", "server": "v2.80.1"}
+        prod = {
+            "build": "v2.80.0",
+            "server_build": "v2.80.1",
+            "compatibility": MOVED,
+            "client": "digest",
+        }
+        ok, said = self.run_probes(tags, prod, {"compatibility": MOVED})
+        self.assertTrue(ok)
+        text = "\n".join(said)
+        self.assertIn("/api/rooms serves client v2.80.0, server v2.80.1", text)
+        self.assertIn("build.json contract", text)
+        for needle in ("server.properties", "proxy gate"):
+            self.assertIn(needle, text)
+        self.assertIn("REQUIRED", text)
+        # The Workshop is never ship's business: no Workshop READY probe, and
+        # the entry probe names the Game backend only.
+        self.assertNotIn("Workshop READY", text)
+        self.assertNotIn("both backends", text)
+        self.assertIn("manual: proxy gate Game backend open", text)
+
+    def test_client_only_skips_server_manuals(self):
+        prod = {"build": "v2.80.0", "compatibility": MOVED}
+        ok, said = self.run_probes({"client": "v2.80.0"}, prod)
+        self.assertTrue(ok)
+        text = "\n".join(said)
+        self.assertIn("proxy gate", text)
+        self.assertNotIn("server.properties", text)
+        self.assertNotIn("Workshop READY", text)
+
+    def test_contract_mismatch_fails(self):
+        tags = {"server": "v2.80.1"}
+        prod = {"build": "v2.80.0", "server_build": "v2.80.1", "compatibility": PROD}
+        with (
+            mock.patch.object(release, "prod_state", return_value=prod),
+            mock.patch.object(release, "say"),
+        ):
+            with self.assertRaises(RuntimeError):
+                release.post_deploy_probes(tags, {"compatibility": MOVED}, 1, 0)
+
+    def test_waits_for_rooms_then_probes_and_retries_transient_errors(self):
+        prod = {"build": "v2.80.0", "server_build": "v2.80.1", "compatibility": MOVED}
+        states = [OSError("down"), dict(prod, server_build="v2.80.0"), prod]
+        with (
+            mock.patch.object(
+                release, "prod_state", side_effect=list(states)
+            ) as prod_state,
+            mock.patch.object(release, "say"),
+            mock.patch.object(
+                release, "entry_probe", return_value=("ok", "synthetic entry alive")
+            ),
+        ):
+            self.assertTrue(
+                release.post_deploy_probes({"server": "v2.80.1"}, None, 60, 0)
+            )
+        self.assertEqual(prod_state.call_count, 3)
+
+    def test_timeout_raises_without_retry(self):
+        prod = {"build": "v2.80.0", "server_build": "v2.80.0", "compatibility": MOVED}
+        with (
+            mock.patch.object(release, "prod_state", return_value=prod),
+            mock.patch.object(release, "say"),
+        ):
+            with self.assertRaises(RuntimeError):
+                release.post_deploy_probes({"server": "v2.80.1"}, None, 0, 0)
+
+    def test_automated_entry_probe_replaces_the_manual_gate(self):
+        prod = {"build": "v2.80.0", "compatibility": MOVED}
+        ok, said = self.run_probes({"client": "v2.80.0"}, prod)
+        self.assertTrue(ok)
+        self.assertIn("proxy gate", "\n".join(said))
+        with (
+            mock.patch.object(release, "prod_state", return_value=dict(prod)),
+            mock.patch.object(release, "say", side_effect=lambda m: said.append(m)),
+            mock.patch.object(
+                release, "entry_probe", return_value=("FAIL", "synthetic entry dead")
+            ),
+        ):
+            with self.assertRaises(RuntimeError):
+                release.post_deploy_probes({"client": "v2.80.0"}, None, 1, 0)
+
+    def test_entry_probe_without_checkout_stays_manual(self):
+        with mock.patch.object(Path, "is_file", lambda self: False):
+            level, text = release.entry_probe("v2.80.0")
+        self.assertEqual(level, "REQUIRED")
+        self.assertIn("proxy gate", text)
+
+    def test_client_leg_never_expects_the_client_tag(self):
+        # /api/rooms build is the server build: after a client deploy the
+        # probe must expect the server tag, or skip the build comparison.
+        prod = {"build": "v2.80.0", "server_build": "v2.80.1", "compatibility": MOVED}
+        seen = []
+        with (
+            mock.patch.object(release, "prod_state", return_value=dict(prod)),
+            mock.patch.object(release, "say"),
+            mock.patch.object(
+                release,
+                "entry_probe",
+                side_effect=lambda tag: seen.append(tag) or ("ok", "probe"),
+            ),
+        ):
+            self.assertTrue(
+                release.post_deploy_probes({"client": "v2.80.0"}, None, 1, 0)
+            )
+            self.assertTrue(
+                release.post_deploy_probes({"server": "v2.80.1"}, None, 1, 0)
+            )
+        self.assertEqual(seen, [None, "v2.80.1"])
+
+    def test_entry_probe_without_tag_skips_build_comparison(self):
+        good = subprocess.CompletedProcess([], 0, "entry alive", "")
+        new_help = subprocess.CompletedProcess(
+            [], 0, "usage: entry_liveness.py [--game-only]", ""
+        )
+        with (
+            mock.patch.object(Path, "is_file", lambda self: True),
+            mock.patch.object(
+                release.subprocess, "run", side_effect=[new_help, good]
+            ) as run,
+        ):
+            self.assertEqual(release.entry_probe(None)[0], "ok")
+            argv = run.call_args.args[0]
+            self.assertIn("--game-only", argv)
+            self.assertNotIn("--tag", argv)
+
+    def test_entry_probe_maps_exit_codes(self):
+        good = subprocess.CompletedProcess([], 0, "entry alive", "")
+        bad = subprocess.CompletedProcess([], 1, "FAIL tcp_game", "")
+        old_help = subprocess.CompletedProcess([], 0, "usage: entry_liveness.py", "")
+        new_help = subprocess.CompletedProcess(
+            [], 0, "usage: entry_liveness.py [--game-only]", ""
+        )
+        with (
+            mock.patch.object(Path, "is_file", lambda self: True),
+            mock.patch.object(
+                release.subprocess, "run", side_effect=[old_help, good]
+            ) as run,
+        ):
+            self.assertEqual(release.entry_probe("v2.80.0")[0], "ok")
+            argv = run.call_args.args[0]
+            self.assertIn("workshop.blockfield.pro", argv)
+            self.assertIn("--workshop-host", argv)
+            self.assertNotIn("--game-only", argv)
+        with (
+            mock.patch.object(Path, "is_file", lambda self: True),
+            mock.patch.object(
+                release.subprocess, "run", side_effect=[new_help, good]
+            ) as run,
+        ):
+            self.assertEqual(release.entry_probe("v2.80.0")[0], "ok")
+            self.assertIn("--game-only", run.call_args.args[0])
+        with (
+            mock.patch.object(Path, "is_file", lambda self: True),
+            mock.patch.object(release.subprocess, "run", side_effect=[new_help, bad]),
+        ):
+            level, text = release.entry_probe("v2.80.0")
+            self.assertEqual(level, "FAIL")
+            self.assertIn("tcp_game", text)
+
+
+class ForkPinOnly(unittest.TestCase):
+    """prepare_side must release fork-pin-only content: unreleased commits
+    vs the newest tag count even when mod/decor pins match origin/main."""
+
+    def prepare_args(self, *extra):
+        return release.parser().parse_args(
+            ["prepare", "--mod", "v1.57.0", "--dry-run", *extra]
+        )
+
+    def side_patches(self, tree, git):
+        return (
+            mock.patch.object(release, "repo_dir", return_value=tree),
+            mock.patch.object(release, "fetch_main"),
+            mock.patch.object(
+                release, "remote_tags", return_value={"v2.76.4": "b" * 40}
+            ),
+            mock.patch.object(release, "show_pack", return_value="2.76.4"),
+            mock.patch.object(release, "git", side_effect=git),
+            mock.patch.object(
+                release, "worktree", return_value=contextlib.nullcontext(tree)
+            ),
+            mock.patch.object(release, "pin_jar", return_value="mods/mod.pw.toml"),
+            mock.patch.object(release, "set_version"),
+            mock.patch.object(release, "refresh_index"),
+            mock.patch.object(
+                release, "preflight", return_value=([], {"compatibility": PROD})
+            ),
+            mock.patch.object(release, "open_pr"),
+        )
+
+    def run_patches(self, patches, func):
+        with contextlib.ExitStack() as stack:
+            mocks = [stack.enter_context(patch) for patch in patches]
+            return func(*mocks[-2:])
+
+    def test_unreleased_commits_release_despite_unchanged_pins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            events = []
+
+            def git(repo, *args):
+                events.append(args)
+                if args[0] == "diff":
+                    return ""
+                if args[0] == "log":
+                    self.assertEqual(args[1:3], ("--no-merges", "--format=%h"))
+                    return "abc1234 Pin SBW bf26\n"
+                return ""
+
+            patches = self.side_patches(tree, git)
+            got, preflight, pr = self.run_patches(
+                patches,
+                lambda preflight, pr: (
+                    release.prepare_side(
+                        "client", self.prepare_args(), {}, None, False
+                    ),
+                    preflight,
+                    pr,
+                ),
+            )
+            self.assertEqual(got[0], "v2.76.5")
+            self.assertEqual(got[1], {"compatibility": PROD})
+            fetch = ("fetch", "-q", "origin", "tag", "v2.76.4")
+            log = next(args for args in events if args[0] == "log")
+            self.assertIn(fetch, events)
+            self.assertLess(events.index(fetch), events.index(log))
+            message = pr.call_args.args[5]
+            self.assertIn("fork pins since v2.76.4", message)
+
+    def test_no_tags_still_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            events = []
+
+            def git(repo, *args):
+                events.append(args)
+                return ""
+
+            patches = (
+                mock.patch.object(release, "repo_dir", return_value=tree),
+                mock.patch.object(release, "fetch_main"),
+                mock.patch.object(release, "remote_tags", return_value={}),
+                mock.patch.object(release, "show_pack", return_value="2.76.4"),
+                mock.patch.object(release, "git", side_effect=git),
+                mock.patch.object(
+                    release, "worktree", return_value=contextlib.nullcontext(tree)
+                ),
+                mock.patch.object(release, "pin_jar", return_value="mods/mod.pw.toml"),
+                mock.patch.object(release, "set_version"),
+                mock.patch.object(release, "refresh_index"),
+                mock.patch.object(release, "preflight"),
+                mock.patch.object(release, "open_pr"),
+            )
+            with contextlib.ExitStack() as stack:
+                mocks = [stack.enter_context(patch) for patch in patches]
+                preflight, pr = mocks[-2:]
+                self.assertIsNone(
+                    release.prepare_side("client", self.prepare_args(), {}, None, False)
+                )
+            self.assertFalse([args for args in events if args[0] == "log"], events)
+            preflight.assert_not_called()
+            pr.assert_not_called()
+
+    def test_no_unreleased_commits_still_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            events = []
+
+            def git(repo, *args):
+                events.append(args)
+                return ""
+
+            patches = self.side_patches(tree, git)
+            with contextlib.ExitStack() as stack:
+                mocks = [stack.enter_context(patch) for patch in patches]
+                preflight, pr = mocks[-2:]
+                self.assertIsNone(
+                    release.prepare_side("client", self.prepare_args(), {}, None, False)
+                )
+            self.assertTrue(any(args[0] == "log" for args in events), events)
+            preflight.assert_not_called()
+            pr.assert_not_called()
+
+    def test_server_merge_merges_branches_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            events = []
+            shas = iter(["a" * 40, "b" * 40])
+
+            def git(repo, *args):
+                events.append(args)
+                if args[0] == "rev-parse":
+                    return next(shas)
+                if args[:2] == ("diff", "origin/main"):
+                    return "mods/sbw.pw.toml"
+                return ""
+
+            args = self.prepare_args("--server-merge", "pins/fork-a,pins/fork-b")
+            patches = (
+                mock.patch.object(release, "repo_dir", return_value=tree),
+                mock.patch.object(release, "fetch_main"),
+                mock.patch.object(
+                    release, "remote_tags", return_value={"v2.76.4": "b" * 40}
+                ),
+                mock.patch.object(release, "show_pack", return_value="2.76.4"),
+                mock.patch.object(release, "git", side_effect=git),
+                mock.patch.object(
+                    release, "worktree", return_value=contextlib.nullcontext(tree)
+                ),
+                mock.patch.object(release, "run", return_value=""),
+                mock.patch.object(release, "set_version"),
+                mock.patch.object(release, "refresh_index"),
+                mock.patch.object(
+                    release, "preflight", return_value=([], {"compatibility": PROD})
+                ),
+                mock.patch.object(release, "open_pr"),
+            )
+            with contextlib.ExitStack() as stack:
+                mocks = [stack.enter_context(patch) for patch in patches]
+                pr = mocks[-1]
+                got = release.prepare_side("server", args, {}, None, False)
+            self.assertEqual(got[0], "v2.76.5")
+            ops = [
+                args
+                for args in events
+                if args[0] in ("fetch", "merge") or args[:2] == ("diff", "origin/main")
+            ]
+            self.assertEqual(
+                ops,
+                [
+                    ("fetch", "-q", "origin", "refs/heads/pins/fork-a"),
+                    ("merge", "--no-ff", "--no-edit", "a" * 40),
+                    ("fetch", "-q", "origin", "refs/heads/pins/fork-b"),
+                    ("merge", "--no-ff", "--no-edit", "b" * 40),
+                    ("diff", "origin/main", "--name-only"),
+                ],
+            )
+            self.assertIn("merge pins/fork-a " + "a" * 7, pr.call_args.args[5])
+            self.assertIn("merge pins/fork-b " + "b" * 7, pr.call_args.args[5])
 
 
 if __name__ == "__main__":

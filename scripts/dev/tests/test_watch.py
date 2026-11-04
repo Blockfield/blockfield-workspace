@@ -15,6 +15,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "watch.py"
 spec = importlib.util.spec_from_file_location("watch", SCRIPT)
 watch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(watch)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import toolchain  # noqa: E402 - pinned JDK, mocked below.
 
 
 def make_jar(path, entries):
@@ -46,6 +48,7 @@ class RebuildCommand(unittest.TestCase):
     def test_gradle_build_uses_the_project_resource_limits(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
+            patch.object(toolchain, "java_home", return_value=Path(tmp) / "jdk"),
             patch.object(
                 watch.subprocess, "run", return_value=SimpleNamespace(returncode=0)
             ) as run,

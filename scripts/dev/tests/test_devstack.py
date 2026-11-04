@@ -1,7 +1,9 @@
 """Pure-logic checks for dev/devstack.py; nothing here starts a game."""
 
+import hashlib
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -39,6 +41,33 @@ class ClientNatives(unittest.TestCase):
 
 
 class ServerProperties(unittest.TestCase):
+    def test_direct_start_restores_proxy_mods_left_by_via_proxy(self):
+        # A --via-proxy run moves the proxy-only mods into mods/; the next
+        # plain start must move them back, or direct connects are refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fabric-server-launch.jar").write_bytes(b"fixture")
+            (root / "mods").mkdir()
+            (root / "mods" / "FabricProxy-Lite.jar").write_bytes(b"proxy")
+            (root / "mods" / "blockfield.jar").write_bytes(b"game")
+            log = root / "server.out"
+            log.write_text("Done (0.1s)!")
+            args = SimpleNamespace(xms="512M", xmx="1536M", debug=False, gate=False)
+            with (
+                patch.dict(devstack.os.environ, {}, clear=True),
+                patch.object(devstack, "SERVER", root),
+                patch.object(devstack, "LOG", log),
+                patch.object(devstack, "server_pid", side_effect=(None, 77)),
+                patch.object(devstack, "port_open", return_value=False),
+                patch.object(devstack, "java_exe", return_value="/fixture/java"),
+                patch.object(devstack, "stand_preflight", return_value=None),
+                patch.object(devstack, "start_process", return_value=(77, {})),
+            ):
+                devstack.server_start(args)
+            self.assertFalse((root / "mods" / "FabricProxy-Lite.jar").exists())
+            self.assertTrue((root / "mods-off" / "FabricProxy-Lite.jar").exists())
+            self.assertTrue((root / "mods" / "blockfield.jar").exists())
+
     def test_playtest_map_root_is_not_overwritten_when_starting_an_owned_server(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -57,6 +86,7 @@ class ServerProperties(unittest.TestCase):
                     patch.object(devstack, "server_pid", side_effect=(None, 77)),
                     patch.object(devstack, "port_open", return_value=False),
                     patch.object(devstack, "java_exe", return_value="/fixture/java"),
+                    patch.object(devstack, "stand_preflight", return_value=None),
                     patch.object(
                         devstack, "start_process", return_value=(77, {})
                     ) as start,
@@ -69,6 +99,38 @@ class ServerProperties(unittest.TestCase):
                     self.assertIn(
                         f"-DBLOCKFIELD_MAPS_DIR={maps}", start.call_args.args[0]
                     )
+
+    def test_extra_jvm_opts_reach_the_server_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fabric-server-launch.jar").write_bytes(b"fixture")
+            log = root / "server.out"
+            log.write_text("Done (0.1s)!")
+            args = SimpleNamespace(
+                xms="1G",
+                xmx="4G",
+                debug=False,
+                gate=False,
+                jvm_opt=["-XX:MaxGCPauseMillis=100", "-Xlog:gc:file=gc.log"],
+            )
+            with (
+                patch.dict(devstack.os.environ, {}, clear=True),
+                patch.object(devstack, "SERVER", root),
+                patch.object(devstack, "LOG", log),
+                patch.object(devstack, "server_pid", side_effect=(None, 77)),
+                patch.object(devstack, "port_open", return_value=False),
+                patch.object(devstack, "java_exe", return_value="/fixture/java"),
+                patch.object(devstack, "stand_preflight", return_value=None),
+                patch.object(devstack, "start_process", return_value=(77, {})) as start,
+            ):
+                devstack.server_start(args)
+                command = start.call_args.args[0]
+                self.assertIn("-XX:MaxGCPauseMillis=100", command)
+                self.assertIn("-Xlog:gc:file=gc.log", command)
+                self.assertLess(
+                    command.index("-XX:+UseG1GC"),
+                    command.index("-XX:MaxGCPauseMillis=100"),
+                )
 
     def test_stack_ports_are_explicit_and_checked_before_runtime_access(self):
         with patch.dict(
@@ -109,6 +171,68 @@ class ServerProperties(unittest.TestCase):
         self.assertEqual(written["rcon.password"], "leaks")  # appended
 
 
+class StandPreflight(unittest.TestCase):
+    def test_xmx_parses_heap_cap_units(self):
+        self.assertEqual(devstack._xmx_gib(("-Xmx3G",)), 3.0)
+        self.assertEqual(devstack._xmx_gib(("-Xmx512M",)), 0.5)
+        self.assertEqual(devstack._xmx_gib(()), 0.0)
+        self.assertEqual(devstack._xmx_gib(("-Xmxbogus", "-jar", "app.jar")), 0.0)
+
+    def _preflight(self, new, running, mem):
+        records = {
+            path: (
+                {"live": True, "command": ["java", f"-Xmx{cap}"]}
+                if cap is not None
+                else None
+            )
+            for path, cap in running.items()
+        }
+        with (
+            patch.object(devstack, "PID_FILE", Path("server.pid")),
+            patch.object(
+                devstack, "client_pid_file", side_effect=lambda n: Path(f"c{n}.pid")
+            ),
+            patch.object(devstack, "process_record", side_effect=lambda p: records[p]),
+            patch.object(devstack, "_total_memory_gib", return_value=mem),
+        ):
+            devstack.stand_preflight(new)
+
+    def test_rc_layout_that_thrashed_is_refused_on_a_large_vm(self):
+        # 2026-10-31: 3G + 4G + 4G stalled all JVMs for 60 s (swap, watchdog).
+        with self.assertRaisesRegex(SystemExit, "over-commits RAM"):
+            self._preflight(
+                4.0,
+                {Path("server.pid"): "3G", Path("c1.pid"): "4G", Path("c2.pid"): None},
+                15.6,
+            )
+
+    def test_reduced_two_client_layout_fits_a_large_vm(self):
+        self._preflight(
+            3.0,
+            {Path("server.pid"): "3G", Path("c1.pid"): "3G", Path("c2.pid"): None},
+            15.6,
+        )
+
+    def test_live_records_without_a_heap_cap_do_not_block_small_hosts(self):
+        # 7.7 GiB CI runner: a lone client start must reach later checks.
+        with patch.object(devstack, "process_record") as record:
+            record.return_value = {"live": True}
+            with patch.object(devstack, "_total_memory_gib", return_value=7.7):
+                devstack.stand_preflight(3.0)
+
+    def test_server_start_runs_the_preflight_first(self):
+        with (
+            patch.object(devstack, "server_pid", return_value=None),
+            patch.object(
+                devstack, "stand_preflight", side_effect=SystemExit("nope")
+            ) as gate,
+        ):
+            args = SimpleNamespace(xms="1G", xmx="3G", debug=False, gate=False)
+            with self.assertRaisesRegex(SystemExit, "nope"):
+                devstack.server_start(args)
+            gate.assert_called_once_with(3.0)
+
+
 class GameJobs(unittest.TestCase):
     def test_jobs_preserve_existing_evidence_and_other_sessions(self):
         with (
@@ -143,6 +267,49 @@ class PinnedJar(unittest.TestCase):
             self.assertEqual(
                 devstack.pinned_jar_name(Path(tmp), "server"),
                 "blockfield-server-1.2.3+mc1.21.1.jar",
+            )
+
+
+class BotProfiles(unittest.TestCase):
+    def test_scenario_bots_are_cached_offline_and_other_players_kept(self):
+        # Java: UUID.nameUUIDFromBytes("OfflinePlayer:Notch".getBytes(UTF_8)).
+        self.assertEqual(
+            devstack.offline_uuid("Notch"), "b50ad385-829d-3141-a216-7e7d7539ba7f"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "usercache.json"
+            stale = {
+                "name": "bot01",
+                "uuid": "x",
+                "expiresOn": "2020-01-01 00:00:00 +0000",
+            }
+            owner = {
+                "name": "Owner",
+                "uuid": "y",
+                "expiresOn": "2026-12-01 00:00:00 +0000",
+            }
+            cache.write_text(json.dumps([stale, owner]), encoding="utf-8")
+            devstack.seed_bot_profiles(cache)
+            devstack.seed_bot_profiles(cache)  # idempotent
+            entries = json.loads(cache.read_text(encoding="utf-8"))
+        by_name = {e["name"]: e for e in entries}
+        self.assertEqual(len(entries), 1 + len(devstack.SCENARIO_BOTS))
+        self.assertEqual(by_name["Owner"], owner)
+        self.assertEqual(by_name["bot01"]["uuid"], devstack.offline_uuid("bot01"))
+        self.assertEqual(by_name["hitbot"]["uuid"], devstack.offline_uuid("hitbot"))
+        self.assertEqual(
+            by_name["TabletBot"]["uuid"], devstack.offline_uuid("TabletBot")
+        )
+        self.assertTrue(by_name["bot30"]["expiresOn"].startswith("2099-"))
+
+    def test_unreadable_cache_is_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "usercache.json"
+            cache.write_text("{not json", encoding="utf-8")
+            devstack.seed_bot_profiles(cache)
+            self.assertEqual(
+                len(json.loads(cache.read_text(encoding="utf-8"))),
+                len(devstack.SCENARIO_BOTS),
             )
 
 
@@ -190,6 +357,159 @@ class Bot(unittest.TestCase):
         self.assertIn("127.0.0.1:1", str(raised.exception))
 
 
+class SecondClient(unittest.TestCase):
+    def test_per_client_files_dirs_and_ports(self):
+        self.assertEqual(devstack.client_pid_file(1), devstack.HOME / "client.pid")
+        self.assertEqual(devstack.client_pid_file(2), devstack.HOME / "client2.pid")
+        self.assertEqual(devstack.client_cmd_file(2), devstack.HOME / "client2.cmd")
+        self.assertEqual(devstack.client_log_file(2), devstack.HOME / "client2.out")
+        self.assertEqual(devstack.default_game_dir(2), devstack.HOME / "play2")
+        self.assertEqual(devstack.BOT_PORTS[2], 47778)
+        self.assertEqual(devstack.CLIENT_DEBUG_PORTS[2], 5007)
+        self.assertEqual(devstack.client_number(SimpleNamespace(client=2)), 2)
+        self.assertEqual(devstack.client_number(SimpleNamespace()), 1)
+        with self.assertRaises(SystemExit):
+            devstack.client_number(SimpleNamespace(client=3))
+
+    def test_testbot_default_port_follows_the_client(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp)
+            (game_dir / "mods").mkdir()
+            (game_dir / "mods" / "bftestbot.jar").write_bytes(b"fake")
+            with patch.dict(devstack.BOT_PORTS, {1: 47777, 2: 47778}, clear=True):
+                for client, port in ((1, "47777"), (2, "47778")):
+                    args = SimpleNamespace(
+                        client=client,
+                        testbot=None,
+                        testbot_port=None,
+                        no_testbot=False,
+                    )
+                    self.assertEqual(devstack.install_testbot(args, game_dir), port)
+
+    def test_second_client_reuses_stack_testbot_without_flags(self):
+        # rc-final6: `just play --client 2` without --testbot silently skipped
+        # the testbot (no jar in play2/mods), so bot port 47778 refused and the
+        # RC degraded to SKIP cascades. `just setup --testbot` must equip every
+        # stack client automatically; --no-testbot still opts out.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "play" / "mods").mkdir(parents=True)
+            (home / "play" / "mods" / "bftestbot.jar").write_bytes(b"stack-bot")
+            game2 = home / "play2"
+            (game2 / "mods").mkdir(parents=True)
+            args = SimpleNamespace(
+                client=2,
+                testbot=None,
+                testbot_port=None,
+                no_testbot=False,
+            )
+            with (
+                patch.object(devstack, "HOME", home),
+                patch.dict(devstack.BOT_PORTS, {1: 47777, 2: 47778}, clear=True),
+            ):
+                self.assertTrue(devstack.testbot_enabled(args, game2))
+                self.assertEqual(devstack.install_testbot(args, game2), "47778")
+                self.assertEqual(
+                    (game2 / "mods" / "bftestbot.jar").read_bytes(), b"stack-bot"
+                )
+                # A stale second-client jar converges to the refreshed stack jar
+                # on a plain run (blockfield-bot review on the rc-final7 PR).
+                (home / "play" / "mods" / "bftestbot.jar").write_bytes(b"fresh-bot")
+                (game2 / "mods" / "bftestbot.jar").write_bytes(b"stale-bot")
+                self.assertEqual(devstack.install_testbot(args, game2), "47778")
+                self.assertEqual(
+                    (game2 / "mods" / "bftestbot.jar").read_bytes(), b"fresh-bot"
+                )
+                # An explicit bare `--testbot` is a build request: it must build
+                # instead of silently reusing the installed stack jar.
+                root = home / "root"
+                libs = root / "scripts" / "dev" / "testbot" / "build" / "libs"
+                libs.mkdir(parents=True)
+
+                def fake_build(args):
+                    (libs / "bftestbot-9.9.9.jar").write_bytes(b"fresh-build")
+
+                args = SimpleNamespace(
+                    client=2,
+                    testbot=True,
+                    testbot_port=None,
+                    no_testbot=False,
+                )
+                with (
+                    patch.object(devstack, "HOME", home),
+                    patch.object(devstack, "ROOT", root),
+                    patch.object(devstack, "build_testbot", side_effect=fake_build),
+                    patch.dict(devstack.BOT_PORTS, {1: 47777, 2: 47778}, clear=True),
+                ):
+                    self.assertEqual(devstack.install_testbot(args, game2), "47778")
+                    self.assertEqual(
+                        (game2 / "mods" / "bftestbot.jar").read_bytes(), b"fresh-build"
+                    )
+            args = SimpleNamespace(
+                client=2,
+                testbot=None,
+                testbot_port=None,
+                no_testbot=True,
+            )
+            with (
+                patch.object(devstack, "HOME", home),
+                patch.dict(devstack.BOT_PORTS, {1: 47777, 2: 47778}, clear=True),
+            ):
+                self.assertFalse(devstack.testbot_enabled(args, game2))
+                self.assertIsNone(devstack.install_testbot(args, game2))
+
+    def test_setup_disables_skinrestorer_join_autofetch_on_stands(self):
+        # rc-final6 log-scan FAIL: stands join with throwaway offline names, so
+        # SkinRestorer's join auto-fetch logs "Failed to fetch skin" WARNs.
+        # Stands must not fetch (prod keeps fetching for real players).
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config" / "skinrestorer" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "join": {
+                            "autoFetch": {
+                                "enabled": True,
+                                "providers": ["blockfield"],
+                            }
+                        },
+                        "other": 1,
+                    }
+                )
+            )
+            with patch.object(devstack, "SERVER", Path(tmp)):
+                devstack.patch_dev_skinrestorer()
+            patched = json.loads(config.read_text())
+            self.assertFalse(patched["join"]["autoFetch"]["enabled"])
+            self.assertEqual(patched["other"], 1)
+            with patch.object(devstack, "SERVER", Path(tmp)):
+                devstack.patch_dev_skinrestorer()
+            config.unlink()
+            with patch.object(devstack, "SERVER", Path(tmp)):
+                devstack.patch_dev_skinrestorer()
+
+    def test_client_stop_keeps_the_shared_display_until_the_last_client(self):
+        with (
+            patch.object(devstack, "stop_process") as stop,
+            patch.object(devstack, "recorded_pid", return_value=None),
+        ):
+            devstack.client_stop(2)
+        self.assertEqual(
+            [call.args[0] for call in stop.call_args_list],
+            [devstack.HOME / "client2.pid", devstack.HOME / "display.pid"],
+        )
+        with (
+            patch.object(devstack, "stop_process") as stop,
+            patch.object(devstack, "recorded_pid", side_effect=[123, 123]),
+        ):
+            devstack.client_stop(1)
+        self.assertEqual(
+            [call.args[0] for call in stop.call_args_list],
+            [devstack.HOME / "client.pid"],
+        )
+
+
 class GameDir(unittest.TestCase):
     def test_default_uses_selected_workspace_stack(self):
         self.assertEqual(devstack.default_game_dir(), devstack.HOME / "play")
@@ -225,6 +545,7 @@ class ClientStartup(unittest.TestCase):
                 patch.object(
                     devstack, "client_pid", side_effect=[None, 321, 321, 321, 321]
                 ),
+                patch.object(devstack, "stand_preflight", return_value=None),
                 patch.object(devstack, "prepare_client", return_value=(home, ["java"])),
                 patch.object(devstack, "start_process", return_value=(321, None)),
                 patch.object(devstack, "client_environment", return_value={}),
@@ -281,6 +602,16 @@ class BuiltOverlay(unittest.TestCase):
             mods.mkdir(parents=True)
             for side in ("server", "music"):
                 (mods / f"blockfield-{side}-1.jar").touch()
+            attempts = []
+
+            def gh(command, **kwargs):
+                # The first repo fails; the fallback repo delivers the client jar.
+                attempts.append(command)
+                if len(attempts) == 1:
+                    return SimpleNamespace(returncode=1)
+                (mods / "blockfield-client-1.jar").touch()
+                return SimpleNamespace(returncode=0)
+
             with (
                 patch.object(devstack, "local_jars", return_value={}),
                 patch.object(
@@ -291,10 +622,7 @@ class BuiltOverlay(unittest.TestCase):
                 patch.object(
                     devstack.subprocess,
                     "run",
-                    side_effect=[
-                        SimpleNamespace(returncode=1),
-                        SimpleNamespace(returncode=0),
-                    ],
+                    side_effect=gh,
                 ) as download,
             ):
                 devstack.fetch_mod_jars(pack, client_pack=pack)
@@ -306,6 +634,35 @@ class BuiltOverlay(unittest.TestCase):
                 command = call.args[0]
                 self.assertEqual(command[command.index("--repo") + 1], repo)
                 self.assertEqual(call.kwargs["cwd"], pack)
+
+    def test_stale_jar_under_the_pin_name_is_downloaded_again(self):
+        # 2026-10-30: a 1.55.3 build sat in files/mods named blockfield-server-1.57.0.
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            mods = pack / "files/mods"
+            mods.mkdir(parents=True)
+            (pack / "mods").mkdir()
+            good = b"published"
+            for side in ("client", "server", "music"):
+                (pack / "mods" / f"blockfield-{side}.pw.toml").write_text(
+                    f'filename = "blockfield-{side}-1.jar"\n[download]\n'
+                    f'hash-format = "sha1"\nhash = "{hashlib.sha1(good).hexdigest()}"\n'
+                )
+                (mods / f"blockfield-{side}-1.jar").write_bytes(good)
+            (mods / "blockfield-server-1.jar").write_bytes(b"stale build")
+
+            def gh(command, **kwargs):
+                (mods / "blockfield-server-1.jar").write_bytes(good)
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(devstack, "local_jars", return_value={}),
+                patch.object(devstack.subprocess, "run", side_effect=gh) as download,
+            ):
+                devstack.fetch_mod_jars(pack, client_pack=pack)
+            self.assertEqual(download.call_count, 1)
+            self.assertIn("blockfield-server-1.jar", download.call_args.args[0])
+            self.assertEqual((mods / "blockfield-server-1.jar").read_bytes(), good)
 
     def test_fetch_skips_mod_covered_by_local_build(self):
         real = devstack.local_jars
@@ -393,6 +750,11 @@ class BuildMods(unittest.TestCase):
                 patch.object(devstack, "LOCALMODS", directory.parent),
                 patch.object(devstack, "load_mapping", return_value=mapping),
                 patch.object(devstack, "java_exe"),
+                # The pinned-JDK wrapper is covered in test_jdk_auto; here it
+                # returns a fresh minimal env so the test stays hermetic.
+                patch.object(
+                    devstack, "jdk_env", side_effect=lambda: {"PATH": "test-tools"}
+                ),
                 patch.object(devstack, "run") as run,
             ):
                 args = SimpleNamespace(names=["recipe"])
@@ -671,6 +1033,27 @@ class InstallClientMod(unittest.TestCase):
             self.assertEqual(config.read_text(), original + "menu.vanilla=true\n")
             devstack.patch_client_settings(game)
             self.assertEqual(config.read_text(), original + "menu.vanilla=true\n")
+
+    def test_dev_settings_opt_out_pins_vanilla_off_for_pack_stands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            config = game / "config" / "blockfield-settings.properties"
+            with patch.dict(os.environ, {"BLOCKFIELD_MENU_VANILLA": "0"}):
+                devstack.patch_client_settings(game)
+                self.assertEqual(config.read_text(), "menu.vanilla=false\n")
+                # A stale forced-true from an earlier stand is neutralized: last wins.
+                config.write_text("menu.vanilla=true\n")
+                devstack.patch_client_settings(game)
+                self.assertEqual(
+                    config.read_text(), "menu.vanilla=true\nmenu.vanilla=false\n"
+                )
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            config = game / "config" / "blockfield-settings.properties"
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("BLOCKFIELD_MENU_VANILLA", None)
+                devstack.patch_client_settings(game)
+                self.assertEqual(config.read_text(), "menu.vanilla=true\n")
 
     def test_replaces_published_jar_and_syncs_server_marker(self):
         real_jar, real_server = devstack.blockfield_jar, devstack.SERVER

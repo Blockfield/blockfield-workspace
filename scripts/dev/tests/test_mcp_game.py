@@ -26,6 +26,9 @@ NAMES = [
     "bf_use_attack",
     "bf_weapon",
     "bf_menu_action",
+    "bf_killfeed",
+    "bf_markers",
+    "bf_use_state",
     "bf_chat",
     "bf_screen",
     "bf_raw_input",
@@ -762,13 +765,20 @@ class GameJob(unittest.TestCase):
             game.client_settings({}, 2)
         second = self.root / "second stack"
         second.mkdir()
-        (second / "client.cmd").write_text(
+        (second / "client2.cmd").write_text(
             json.dumps({"game_dir": str(second / "play")}), encoding="utf-8"
         )
         self.assertEqual(
             game.client_settings({"clients": {"2": {"home": str(second)}}}, 2),
-            (second / "client.pid", second / "play"),
+            (second / "client2.pid", second / "play"),
         )
+
+    def test_second_client_defaults_to_its_own_files_in_the_stack_home(self):
+        path, game_dir = game.client_settings(
+            {"clients": {"2": {"home": str(self.home)}}}, 2
+        )
+        self.assertEqual(path, self.home / "client2.pid")
+        self.assertEqual(game_dir, self.home / "play2")
 
     def test_objective_and_permission_scoped_teleport_use_real_map_data(self):
         point = {"name": "A", "x": 10, "y": 63, "z": 0}

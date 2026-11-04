@@ -448,7 +448,7 @@ class PartialEvidence(ProbeFiles):
                     else SimpleNamespace()
                 )
             self.assertEqual(
-                launch.call_args.args[0].xmx, "2G" if failure == "escape" else "4G"
+                launch.call_args.args[0].xmx, "2G" if failure == "escape" else "3G"
             )
             proof = json.loads(
                 (self.home / "headless-proof.json").read_text(encoding="utf-8")

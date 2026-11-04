@@ -192,6 +192,19 @@ def child_env():
     return env
 
 
+def jdk_env():
+    """Env with the pinned Temurin 21 first: every Gradle/Java entrypoint uses
+    this instead of inheriting whatever java the host PATH happens to carry."""
+    environment = child_env()
+    sdk = str(java_home())
+    environment["JAVA_HOME"] = sdk
+    entries = [str(Path(sdk) / "bin"), *environment.get("PATH", "").split(os.pathsep)]
+    environment["PATH"] = os.pathsep.join(
+        dict.fromkeys(part for part in entries if part)
+    )
+    return environment
+
+
 def native(name):
     java_tool = Path(name).name.lower()
     if java_tool in (

@@ -24,7 +24,7 @@
   "lr-tactical": {
     "repo": "Blockfield/lr-tactical",
     "both": "lrtactical-fabric.pw.toml",
-    "jar": "files/mods/lrtactical-1.21.1-0.4.1-bf2.jar"
+    "jar": "files/mods/lrtactical-1.21.1-0.4.1-bf3.jar"
   },
   "tacz-refabricated": {
     "repo": "Blockfield/tacz-refabricated",

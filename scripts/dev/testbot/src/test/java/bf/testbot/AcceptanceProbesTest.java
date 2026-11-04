@@ -173,6 +173,17 @@ public final class AcceptanceProbesTest {
         check(
                 holder.property().equals("COSMETIC_PROP") && holder.data().equals(true),
                 "cosmetic panel request is idempotent");
+        check(
+                ((Map<?, ?>) TestBot.frames(new String[] {"frames"})).containsKey("samples"),
+                "bare frames reads instead of crashing");
+        check(
+                ((Map<?, ?>) TestBot.frames(new String[] {"frames", "start"}))
+                        .get("ok")
+                        .equals(true),
+                "frames start still starts");
+        check(
+                TestBot.soundlog(null, new String[] {"soundlog"}) instanceof List,
+                "bare soundlog reads instead of crashing");
         System.out.println("Acceptance probe checks passed");
     }
 }

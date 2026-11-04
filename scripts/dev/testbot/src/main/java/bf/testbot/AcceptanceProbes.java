@@ -112,7 +112,23 @@ public final class AcceptanceProbes {
     }
 
     public static void positionApplied(Minecraft mc) {
+        if (mc.player != null) {
+            positionPackets++;
+            if (POSITION_LOG.size() >= 4096) POSITION_LOG.removeFirst();
+            POSITION_LOG.addLast(Map.of("ns", System.nanoTime(), "pos", position(mc)));
+        }
         if (nudge != null && mc.player != null) nudge.corrected(position(mc));
+    }
+
+    private static final java.util.ArrayDeque<Map<String, Object>> POSITION_LOG =
+            new java.util.ArrayDeque<>();
+    private static long positionPackets;
+
+    /** Every server position correction this client applied, with its nanoTime, then cleared. */
+    static Map<String, Object> positionPackets() {
+        var out = Map.of("total", positionPackets, "log", List.copyOf(POSITION_LOG));
+        POSITION_LOG.clear();
+        return out;
     }
 
     static final class Nudge {

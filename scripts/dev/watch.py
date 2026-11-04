@@ -206,16 +206,31 @@ def deploy_built_jar(side, built_jar, server_mods, game_dir):
 
 def remap_jar(mod_dir, side, java_home=None):
     """`gradlew :side:remapJar` in a submodule; returns the built jar or None."""
+    # Path-derived: works for standalone `import watch` too.
+    scripts = str(Path(__file__).resolve().parents[1])
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from toolchain import java_home as pinned_home
+    from toolchain import jdk_env
+
+    # Sanitized env (child_env strips JVM option injections); an explicit
+    # java_home still wins for hand-rolled use.
+    env = jdk_env()
+    if java_home is None:
+        java_home = str(pinned_home())
+    elif java_home != env["JAVA_HOME"]:
+        env["JAVA_HOME"] = java_home
+        env["PATH"] = os.pathsep.join(
+            dict.fromkeys(
+                [str(Path(java_home) / "bin"), *env["PATH"].split(os.pathsep)]
+            )
+        )
     wrapper = mod_dir / ("gradlew.bat" if sys.platform == "win32" else "gradlew")
     task = f":{side}:remapJar"
     cmd = (
         [str(wrapper), task] if sys.platform == "win32" else ["sh", str(wrapper), task]
     )
     cmd += ["-Dorg.gradle.daemon.idletimeout=600000", "--max-workers=2"]
-    env = dict(os.environ)
-    if java_home:
-        env["JAVA_HOME"] = java_home
-        env["PATH"] = str(Path(java_home) / "bin") + os.pathsep + env.get("PATH", "")
     result = subprocess.run(
         cmd, cwd=mod_dir, capture_output=True, text=True, env=env, timeout=600
     )

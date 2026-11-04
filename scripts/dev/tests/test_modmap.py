@@ -157,6 +157,37 @@ class LocalJars(unittest.TestCase):
                 "blockfield-server-1.0+mc.jar",
             )
 
+    def test_newer_workshop_jar_never_wins_game_server_scan(self):
+        import tempfile
+
+        # mod#262 trap: server/build/libs holds a thin blockfield-workshop jar
+        # beside the game jar; newest-by-mtime picked the Workshop jar and the
+        # Game server booted into NoClassDefFoundError: AnimationResourceGate.
+        mapping = {"blockfield-mod": {"server": "blockfield-server.pw.toml"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            libs = root / "localmods" / "blockfield-mod" / "server" / "build" / "libs"
+            libs.mkdir(parents=True)
+            game = libs / "blockfield-server-1.0+mc.jar"
+            game.write_bytes(b"PK-game")
+            os.utime(game, (1_000_000_000, 1_000_000_000))
+            workshop = libs / "blockfield-workshop-1.0+mc.jar"
+            workshop.write_bytes(b"PK-workshop")
+            os.utime(workshop, (2_000_000_000, 2_000_000_000))
+            jars = modmap.local_jars(root, mapping)
+            self.assertEqual(
+                jars["blockfield-server.pw.toml"].name,
+                "blockfield-server-1.0+mc.jar",
+            )
+            self.assertEqual(
+                modmap.newest_jar(libs).name, "blockfield-server-1.0+mc.jar"
+            )
+            # Explicit opt-in still selects the Workshop jar for a Workshop profile.
+            self.assertEqual(
+                modmap.newest_jar(libs, "blockfield-workshop-").name,
+                "blockfield-workshop-1.0+mc.jar",
+            )
+
 
 class RecipeJars(unittest.TestCase):
     def test_exact_pair_ignores_newer_old_upstream_and_gradle_jars_in_both_packs(self):
@@ -164,8 +195,8 @@ class RecipeJars(unittest.TestCase):
             (
                 "lr-tactical",
                 "lrtactical-fabric.pw.toml",
+                "lrtactical-1.21.1-0.4.1-bf3.jar",
                 "lrtactical-1.21.1-0.4.1-bf2.jar",
-                "lrtactical-1.21.1-0.4.1-bf1.jar",
                 "lrtactical-1.21.1-0.4.1.jar",
             ),
             (
@@ -395,12 +426,24 @@ class Classify(unittest.TestCase):
             source, _ = modmap.classify(root, "fork", mapping["fork"])
             self.assertEqual(source, modmap.LOCAL)
 
-    def test_missing_tag_builds_local(self):
+    def test_missing_tag_uses_the_pin(self):
+        # A stale clone without the pin tag must not offer its old build as the pin.
         with tempfile.TemporaryDirectory() as tmp:
             root, directory, mapping = fork_tree(tmp, pin="bf-missing")
             source, reason = modmap.classify(root, "fork", mapping["fork"])
-            self.assertEqual(source, modmap.LOCAL)
+            self.assertEqual(source, modmap.PIN)
             self.assertIn("not in local clone", reason)
+
+    def test_missing_tag_is_fetched_from_origin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, directory, mapping = fork_tree(tmp)
+            origin = Path(tmp) / "origin.git"
+            git(directory, "clone", "-q", "--bare", ".", str(origin))
+            git(directory, "remote", "add", "origin", str(origin))
+            git(directory, "tag", "-d", "bf1")
+            source, reason = modmap.classify(root, "fork", mapping["fork"])
+            self.assertEqual(source, modmap.PIN)
+            self.assertIn("HEAD is pin bf1", reason)
 
     def test_tag_sharing_a_branch_name_resolves_the_tag(self):
         with tempfile.TemporaryDirectory() as tmp:

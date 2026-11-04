@@ -49,6 +49,26 @@ boat *args:
     sys.argv = ["scripts/quality.py", "run", "boat", "--no-update", *sys.argv[1:]]
     runpy.run_path("scripts/quality.py", run_name="__main__")
 
+boat-build *args:
+    import runpy, sys
+    sys.argv = ["scripts/dev/boat_build.py", *sys.argv[1:]]
+    runpy.run_path("scripts/dev/boat_build.py", run_name="__main__")
+
+agent-preflight *args:
+    import runpy, sys
+    sys.argv = ["scripts/dev/agent_preflight.py", *sys.argv[1:]]
+    runpy.run_path("scripts/dev/agent_preflight.py", run_name="__main__")
+
+await *args:
+    import runpy, sys
+    sys.argv = ["scripts/dev/await.py", *sys.argv[1:]]
+    runpy.run_path("scripts/dev/await.py", run_name="__main__")
+
+pr-ship repo branch *args:
+    import runpy, sys
+    sys.argv = ["scripts/dev/pr_ship.py", sys.argv[1], sys.argv[2], *sys.argv[3:]]
+    runpy.run_path("scripts/dev/pr_ship.py", run_name="__main__")
+
 assets *args:
     import runpy, sys
     sys.argv = ["server/scripts/toolchain.py", "server/scripts/publish-assets.py", *sys.argv[1:]]
@@ -102,6 +122,11 @@ server *args:
 play *args:
     import runpy, sys
     sys.argv = ["bf.py", *["play", *sys.argv[1:]]]
+    runpy.run_path("bf.py", run_name="__main__")
+
+proxy *args:
+    import runpy, sys
+    sys.argv = ["bf.py", *["proxy", *sys.argv[1:]]]
     runpy.run_path("bf.py", run_name="__main__")
 
 client *args:

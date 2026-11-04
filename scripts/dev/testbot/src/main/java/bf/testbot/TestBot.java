@@ -91,8 +91,17 @@ public final class TestBot implements ClientModInitializer {
      */
     private static net.minecraft.world.phys.Vec3 aimAt(
             Minecraft mc, LocalPlayer p, net.minecraft.world.entity.Entity target) {
+        return aimAt(mc, p, target, 0);
+    }
+
+    private static net.minecraft.world.phys.Vec3 aimAt(
+            Minecraft mc, LocalPlayer p, net.minecraft.world.entity.Entity target, double lead) {
         float partial = mc.getTimer().getGameTimeDeltaPartialTick(true);
         net.minecraft.world.phys.Vec3 renderPos = target.getPosition(partial);
+        net.minecraft.world.phys.Vec3 motion =
+                new net.minecraft.world.phys.Vec3(
+                        target.getX() - target.xo, 0, target.getZ() - target.zo);
+        if (motion.lengthSqr() > 1e-8) renderPos = renderPos.add(motion.normalize().scale(lead));
         net.minecraft.world.phys.Vec3 aimPoint =
                 new net.minecraft.world.phys.Vec3(
                         renderPos.x, renderPos.y + target.getEyeHeight() * 0.9, renderPos.z);
@@ -100,6 +109,12 @@ public final class TestBot implements ClientModInitializer {
         double dx = aimPoint.x - eye.x, dy = aimPoint.y - eye.y, dz = aimPoint.z - eye.z;
         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
         float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+        if (mc.options.getCameraType().isFirstPerson() && mc.getCameraEntity() == p) {
+            // ShootRotationSync adds this tilt to the shot; keep the scripted ray on its target.
+            float[] tilt = cameraOverhaulTilt();
+            pitch -= tilt[0];
+            yaw -= tilt[1];
+        }
         p.setYRot(yaw);
         p.setXRot(pitch);
         p.setYHeadRot(yaw);
@@ -190,17 +205,17 @@ public final class TestBot implements ClientModInitializer {
                     if (mc.player != null) sample(mc);
                 });
         ClientTickEvents.START_CLIENT_TICK.register(Parkour::tick);
-        // "track <name>": keep the crosshair on the target every tick, before this tick's movement
-        // packet is sent,
-        // like a player following an enemy with the mouse (shots then go through "tacz shoot").
-        ClientTickEvents.START_CLIENT_TICK.register(
-                mc -> {
-                    if (trackName == null || mc.player == null || mc.level == null) return;
-                    net.minecraft.world.entity.Entity target = findTarget(mc, trackName);
-                    if (target != null) aimAt(mc, mc.player, target);
-                });
+        // "track <name>": keep the crosshair on the target where every frame drew it, like a
+        // player following an enemy with the mouse (shots then go through "tacz shoot").
         net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents.LAST.register(
-                ctx -> sampleFrame(ctx.tickCounter().getGameTimeDeltaPartialTick(true)));
+                ctx -> {
+                    Minecraft mc = Minecraft.getInstance();
+                    if (trackName != null && mc.player != null && mc.level != null) {
+                        net.minecraft.world.entity.Entity target = findTarget(mc, trackName);
+                        if (target != null) aimAt(mc, mc.player, target);
+                    }
+                    sampleFrame(ctx.tickCounter().getGameTimeDeltaPartialTick(true));
+                });
         int port = Integer.getInteger("bf.testbot.port", 47777);
         Thread t = new Thread(() -> serve(port), "bf-testbot");
         t.setDaemon(true);
@@ -340,6 +355,53 @@ public final class TestBot implements ClientModInitializer {
         return Map.of("samples", new ArrayList<>(WATCH));
     }
 
+    // Bare `frames`/`soundlog` read instead of throwing AIOOBE: only an explicit
+    // `start` starts, anything else (including no argument) is the getter.
+    static Object frames(String[] a) {
+        if (a.length > 1 && "start".equals(a[1])) {
+            FRAMES.clear();
+            framesOn = true;
+            return Map.of("ok", true);
+        }
+        framesOn = false;
+        return Map.of("samples", new ArrayList<>(FRAMES));
+    }
+
+    static Object soundlog(Minecraft mc, String[] a) {
+        // Every sound the client starts (SoundEventListener): short ones that "sounds"
+        // misses between polls.
+        // A category at volume 0 skips the listener: use opt sound <category> 0.01 for
+        // silent logging.
+        if (a.length > 1 && "start".equals(a[1])) {
+            if (!soundListener) {
+                mc.getSoundManager()
+                        .addListener(
+                                (sound, events, range) -> {
+                                    synchronized (SOUND_LOG) {
+                                        SOUND_LOG.add(
+                                                Map.of(
+                                                        "tick",
+                                                        tick,
+                                                        "id",
+                                                        String.valueOf(sound.getLocation()),
+                                                        "source",
+                                                        sound.getSource().getName(),
+                                                        "relative",
+                                                        sound.isRelative()));
+                                    }
+                                });
+                soundListener = true;
+            }
+            synchronized (SOUND_LOG) {
+                SOUND_LOG.clear();
+            }
+            return Map.of("ok", true);
+        }
+        synchronized (SOUND_LOG) {
+            return new ArrayList<>(SOUND_LOG);
+        }
+    }
+
     private static synchronized void remember(String line) {
         MESSAGES.addLast(line);
         while (MESSAGES.size() > 200) MESSAGES.removeFirst();
@@ -451,6 +513,58 @@ public final class TestBot implements ClientModInitializer {
                     return Map.of("attacked", a[1]);
                 }
 
+            case "bftablet":
+                {
+                    Map<String, Object> result = new LinkedHashMap<>();
+                    result.put("frame", frame);
+                    result.put(
+                            "window",
+                            List.of(mc.getWindow().getWidth(), mc.getWindow().getHeight()));
+                    result.put("guiScale", mc.options.guiScale().get());
+                    result.put("actualScale", mc.getWindow().getGuiScale());
+                    result.put(
+                            "screen",
+                            mc.screen == null ? null : mc.screen.getClass().getSimpleName());
+                    try {
+                        Class<?> tablet =
+                                Class.forName("com.lunares.blockfield.client.gui.tablet.Tablet");
+                        for (String name : List.of("open", "tab", "menuId", "deployment")) {
+                            var field = tablet.getDeclaredField(name);
+                            field.setAccessible(true);
+                            Object value = field.get(null);
+                            result.put(
+                                    name,
+                                    value == null
+                                            ? null
+                                            : name.equals("deployment")
+                                                    ? value.getClass().getSimpleName()
+                                                    : value);
+                        }
+                        var tabs = tablet.getDeclaredMethod("visibleTabs");
+                        tabs.setAccessible(true);
+                        result.put("tabs", tabs.invoke(null));
+                        Class<?> target =
+                                Class.forName(
+                                        "com.lunares.blockfield.client.gui.tablet.TabletScreenTarget");
+                        result.put(
+                                "booting",
+                                target.getMethod("booting", long.class)
+                                        .invoke(null, System.nanoTime()));
+                    } catch (ReflectiveOperationException e) {
+                        throw new IllegalStateException("tablet diagnostic schema changed", e);
+                    }
+                    return result;
+                }
+            case "uisize":
+                {
+                    if (a.length != 3)
+                        throw new IllegalArgumentException("uisize <width> <height>");
+                    int width = Integer.parseInt(a[1]), height = Integer.parseInt(a[2]);
+                    if (width < 640 || width > 3840 || height < 360 || height > 2160)
+                        throw new IllegalArgumentException("uisize bounds 640..3840 by 360..2160");
+                    GLFW.glfwSetWindowSize(mc.getWindow().getWindow(), width, height);
+                    return Map.of("requested", List.of(width, height));
+                }
             case "bfmenu":
                 {
                     Object screen = blockfieldScreen(mc);
@@ -530,6 +644,16 @@ public final class TestBot implements ClientModInitializer {
                         Map<String, Object> result = new LinkedHashMap<>();
                         result.put("layout", method.invoke(screen, -1d, -1d));
                         result.put("screen", screen.getClass().getSimpleName());
+                        var focus =
+                                screen.getClass()
+                                        .getDeclaredField(
+                                                screen.getClass()
+                                                                .getSimpleName()
+                                                                .equals("MenuScreen")
+                                                        ? "focusedAction"
+                                                        : "focusedId");
+                        focus.setAccessible(true);
+                        result.put("focus", focus.get(screen));
                         result.put(
                                 "gui",
                                 List.of(
@@ -995,9 +1119,18 @@ public final class TestBot implements ClientModInitializer {
                                 op.getClass().getMethod("reload").invoke(op);
                                 return Map.of("ok", true);
                             case "aim":
-                                op.getClass()
-                                        .getMethod("aim", boolean.class)
-                                        .invoke(op, Boolean.parseBoolean(a[2]));
+                                renewRawInputLease(mc);
+                                boolean wantAim = Boolean.parseBoolean(a[2]);
+                                op.getClass().getMethod("aim", boolean.class).invoke(op, wantAim);
+                                // TaCZ defaults to hold-to-aim: without the held aim key its
+                                // per-tick input cancels the operator aim above. Hold it like a
+                                // player holding RMB (standard 200-tick cap, re-assert to extend).
+                                KeyMapping aimKey = mappingOf(mc, "key.tacz.aim.desc");
+                                if (wantAim) hold(aimKey, RawInputState.HOLD_TICKS);
+                                else {
+                                    aimKey.setDown(false);
+                                    HELD_MAPPINGS.remove(aimKey);
+                                }
                                 return Map.of("ok", true);
                             // TACZ's own melee/inspect client paths, independent of whether a key
                             // is bound.
@@ -1137,19 +1270,78 @@ public final class TestBot implements ClientModInitializer {
                     // LR Tactical starts melee swings from raw GLFW mouse events, not KeyMapping
                     // clicks:
                     // lr mouse <button 0|1> <action 1 press|0 release> calls its own
-                    // AttackKeys.onMousePre.
+                    // AttackKeys.onMousePre, which needs a focused window (its isInGame gate reads
+                    // the OS focus/mouse-grab state, so headless stands with two clients silently
+                    // drop the edge). lr attack <left|right> runs LR's own triggerIfReady instead,
+                    // the exact method the press edge calls: same isReady/cooldown/animation/packet
+                    // path, only the OS-focus gate is bypassed.
                     requirePlayer(p);
-                    if (a.length != 4 || !a[1].equals("mouse"))
-                        throw new IllegalArgumentException("lr mouse <button> <action>");
+                    if (a.length == 4 && a[1].equals("mouse")) {
+                        try {
+                            Object consumed =
+                                    Class.forName("me.xjqsh.lrtactical.client.input.AttackKeys")
+                                            .getMethod("onMousePre", int.class, int.class)
+                                            .invoke(
+                                                    null,
+                                                    Integer.parseInt(a[2]),
+                                                    Integer.parseInt(a[3]));
+                            return Map.of("consumed", String.valueOf(consumed));
+                        } catch (ReflectiveOperationException e) {
+                            throw new IllegalStateException("lrtactical не загружен: " + e);
+                        }
+                    }
+                    if (a.length != 3 || !a[1].equals("attack"))
+                        throw new IllegalArgumentException(
+                                "lr mouse <button> <action> | lr attack <left|right>");
                     try {
-                        Object consumed =
+                        String animation = InputCommands.lrAttackAnimation(a);
+                        boolean left = animation.equals("attack_left");
+                        Class<?> actionType =
+                                Class.forName("me.xjqsh.lrtactical.api.melee.MeleeAction");
+                        Object action = null;
+                        for (Object constant : actionType.getEnumConstants())
+                            if (((Enum<?>) constant).name().equals(left ? "LEFT" : "RIGHT"))
+                                action = constant;
+                        if (action == null)
+                            throw new IllegalStateException("MeleeAction без LEFT/RIGHT");
+                        java.lang.reflect.Method trigger =
                                 Class.forName("me.xjqsh.lrtactical.client.input.AttackKeys")
-                                        .getMethod("onMousePre", int.class, int.class)
-                                        .invoke(
-                                                null,
-                                                Integer.parseInt(a[2]),
-                                                Integer.parseInt(a[3]));
-                        return Map.of("consumed", String.valueOf(consumed));
+                                        .getDeclaredMethod(
+                                                "triggerIfReady",
+                                                Minecraft.class,
+                                                actionType,
+                                                String.class);
+                        trigger.setAccessible(true);
+                        Object properties =
+                                Class.forName(
+                                                "me.xjqsh.lrtactical.capability.CombatPropertiesProvider")
+                                        .getMethod(
+                                                "get",
+                                                net.minecraft.world.entity.player.Player.class)
+                                        .invoke(null, p);
+                        java.lang.reflect.Method count =
+                                properties.getClass().getMethod("getActionCount", actionType);
+                        java.lang.reflect.Method cooldown =
+                                properties.getClass().getMethod("getCoolDownTick");
+                        int before = ((Number) count.invoke(properties, action)).intValue();
+                        int cooldownBefore = ((Number) cooldown.invoke(properties)).intValue();
+                        trigger.invoke(null, mc, action, animation);
+                        int after = ((Number) count.invoke(properties, action)).intValue();
+                        // Only LR's accepted preAttack increments the count; the void trigger's
+                        // return alone also covers screen, draw, cooldown and exhaustion refusals.
+                        return Map.of(
+                                "attack",
+                                a[2],
+                                "accepted",
+                                after > before,
+                                "countBefore",
+                                before,
+                                "countAfter",
+                                after,
+                                "cooldownBefore",
+                                cooldownBefore,
+                                "cooldownAfter",
+                                cooldown.invoke(properties));
                     } catch (ReflectiveOperationException e) {
                         throw new IllegalStateException("lrtactical не загружен: " + e);
                     }
@@ -1191,6 +1383,14 @@ public final class TestBot implements ClientModInitializer {
                     Object payload;
                     try {
                         switch (kind) {
+                            case "tacz_sync":
+                                // Deliberately desync the clocks; the next shot requests recovery.
+                                payload =
+                                        Class.forName(
+                                                        "com.tacz.guns.network.message.ClientMessageSyncBaseTimestamp")
+                                                .getField("INSTANCE")
+                                                .get(null);
+                                break;
                             case "parcool_stamina":
                                 {
                                     // forge parcool_stamina <uuid> <value> [max=2000]
@@ -1325,7 +1525,7 @@ public final class TestBot implements ClientModInitializer {
                             default:
                                 throw new IllegalArgumentException(
                                         "forge"
-                                            + " use_block|parcool_stamina|parcool_action|sbw_melee|sbw_vehicle_fire|sbw_lunge|sbw_skin|sbw_laser"
+                                            + " use_block|tacz_sync|parcool_stamina|parcool_action|sbw_melee|sbw_vehicle_fire|sbw_lunge|sbw_skin|sbw_laser"
                                             + " ...");
                         }
                     } catch (ReflectiveOperationException e) {
@@ -1369,41 +1569,7 @@ public final class TestBot implements ClientModInitializer {
             case "sounds":
                 return sounds(mc, a.length > 1 ? a[1] : "");
             case "soundlog":
-                {
-                    // Every sound the client starts (SoundEventListener): short ones that "sounds"
-                    // misses between polls.
-                    // A category at volume 0 skips the listener: use opt sound <category> 0.01 for
-                    // silent logging.
-                    if ("start".equals(a[1])) {
-                        if (!soundListener) {
-                            mc.getSoundManager()
-                                    .addListener(
-                                            (sound, events, range) -> {
-                                                synchronized (SOUND_LOG) {
-                                                    SOUND_LOG.add(
-                                                            Map.of(
-                                                                    "tick",
-                                                                    tick,
-                                                                    "id",
-                                                                    String.valueOf(
-                                                                            sound.getLocation()),
-                                                                    "source",
-                                                                    sound.getSource().getName(),
-                                                                    "relative",
-                                                                    sound.isRelative()));
-                                                }
-                                            });
-                            soundListener = true;
-                        }
-                        synchronized (SOUND_LOG) {
-                            SOUND_LOG.clear();
-                        }
-                        return Map.of("ok", true);
-                    }
-                    synchronized (SOUND_LOG) {
-                        return new ArrayList<>(SOUND_LOG);
-                    }
-                }
+                return soundlog(mc, a);
             case "opt":
                 {
                     // Runtime options the lightweight start (lowmem) pins: render N | fps N | sound
@@ -1437,15 +1603,7 @@ public final class TestBot implements ClientModInitializer {
                                 Double.parseDouble(a[3]))
                         : FrameRecorder.status();
             case "frames":
-                {
-                    if ("start".equals(a[1])) {
-                        FRAMES.clear();
-                        framesOn = true;
-                        return Map.of("ok", true);
-                    }
-                    framesOn = false;
-                    return Map.of("samples", new ArrayList<>(FRAMES));
-                }
+                return frames(a);
             case "watch":
                 return watch(a[1]); // watch start|get: per-tick sprint/FastRun/FOV samples
             case "entities":
@@ -1481,18 +1639,41 @@ public final class TestBot implements ClientModInitializer {
                     trackName = a[1].equals("off") ? null : a[1];
                     return Map.of("track", String.valueOf(trackName));
                 }
+            case "combatview":
+                try {
+                    return Class.forName("com.lunares.blockfield.client.combat.ClientCombatScene")
+                            .getMethod("debugSnapshot")
+                            .invoke(null);
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException("combatview " + e, e);
+                }
+            case "poseoverlay":
+                try {
+                    // "poseoverlay dump <path>": the mod's per-frame offset log as NDJSON.
+                    return Map.of(
+                            "rows",
+                            Class.forName("com.lunares.blockfield.client.combat.PoseDebugOverlay")
+                                    .getMethod("dump", String.class)
+                                    .invoke(null, a[2]));
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException("poseoverlay " + e, e);
+                }
+            case "positions":
+                return AcceptanceProbes.positionPackets();
             case "aimshoot":
                 {
                     // One round trip instead of "entities" + "lookat" + "tacz shoot": aim at the
                     // named
                     // entity's *rendered* chest this exact frame, then fire immediately - no extra
                     // client/network round trip can go stale between reading the target and
-                    // shooting.
+                    // shooting. Optional second argument: metres ahead along its drawn motion.
                     requirePlayer(p);
                     String name = a[1];
                     net.minecraft.world.entity.Entity target = findTarget(mc, name);
                     if (target == null) return Map.of("error", "no entity named " + name);
-                    net.minecraft.world.phys.Vec3 aimPoint = aimAt(mc, p, target);
+                    double lead = a.length > 2 ? Double.parseDouble(a[2]) : 0;
+                    net.minecraft.world.phys.Vec3 aimPoint = aimAt(mc, p, target, lead);
+                    renewRawInputLease(mc);
                     try {
                         Object op =
                                 Class.forName(
@@ -1515,6 +1696,12 @@ public final class TestBot implements ClientModInitializer {
                 return AcceptanceProbes.command(mc, a);
             case "playergeometry":
                 return RenderedPlayerGeometry.command(mc, a);
+            case "killfeed":
+                return killfeed();
+            case "markers":
+                return markers();
+            case "usestate":
+                return useState(mc);
             default:
                 return Map.of(
                         "error",
@@ -1531,7 +1718,7 @@ public final class TestBot implements ClientModInitializer {
                             + " [state|blueprint|status|draft|generate|apply|cancel|undo|audio]"
                             + " playergeometry select <UUID>|state|clear hitboxes on|off|state"
                             + " nudge <dx> <dy> <dz> skinparts [mask] uniform"
-                            + " state|open|cosmetics|toggle|take|insert");
+                            + " state|open|cosmetics|toggle|take|insert killfeed markers usestate");
         }
     }
 
@@ -1692,6 +1879,11 @@ public final class TestBot implements ClientModInitializer {
                 && RAW_INPUT.active(mc.getWindow().getWindow(), System.nanoTime());
     }
 
+    static void renewRawInputLease(Minecraft mc) {
+        if (mc != null && mc.getWindow() != null)
+            RAW_INPUT.activate(mc.getWindow().getWindow(), System.nanoTime());
+    }
+
     public static int[] rawCursor(long window) {
         Minecraft mc = Minecraft.getInstance();
         if (mc == null || mc.getWindow() == null || window != mc.getWindow().getWindow())
@@ -1798,6 +1990,109 @@ public final class TestBot implements ClientModInitializer {
         result.put("ok", true);
         result.put("leaseMillis", RawInputState.LEASE_NANOS / 1_000_000);
         result.put("tick", tick);
+        return result;
+    }
+
+    /**
+     * SBW killfeed lines as this client holds them (RoomKillFeed delivers per room on the server):
+     * attacker/target display names, headshot flag, client tick. Reflection only: the bot builds
+     * without SBW or blockfield on its classpath.
+     */
+    private static Object killfeed() {
+        try {
+            Class<?> handler =
+                    Class.forName("com.atsuishio.superbwarfare.event.KillMessageHandler");
+            Object instance = handler.getField("INSTANCE").get(null);
+            Object queue = handler.getMethod("getQUEUE").invoke(instance);
+            List<Map<String, Object>> entries = new ArrayList<>();
+            for (Object record : new ArrayList<>((java.util.Collection<?>) queue)) {
+                Class<?> type = record.getClass();
+                Object attacker = type.getMethod("getAttacker").invoke(record);
+                Object target = type.getMethod("getTarget").invoke(record);
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put(
+                        "attacker",
+                        attacker == null
+                                ? null
+                                : ((net.minecraft.world.entity.Entity) attacker)
+                                        .getName()
+                                        .getString());
+                entry.put(
+                        "target",
+                        target == null
+                                ? null
+                                : ((net.minecraft.world.entity.Entity) target)
+                                        .getName()
+                                        .getString());
+                entry.put("headshot", type.getMethod("getHeadshot").invoke(record));
+                entry.put("tick", type.getMethod("getTick").invoke(record));
+                entries.add(entry);
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("entries", entries);
+            return result;
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("killfeed is unavailable: " + e, e);
+        }
+    }
+
+    /**
+     * Capture-point marker state plus the own-map context the HUD derives from the same UI packet:
+     * deployment flag, team, points and minimap visibility. Reflection only: the bot builds without
+     * blockfield on its classpath.
+     */
+    private static Object markers() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        try {
+            Class<?> hud = Class.forName("com.lunares.blockfield.client.render.HudRenderer");
+            result.put("deployed", hud.getMethod("isDeployed").invoke(null));
+            result.put("hudActive", hud.getMethod("isHudActive").invoke(null));
+            result.put("playerTeam", hud.getMethod("playerTeam").invoke(null));
+            Object ui = hud.getMethod("uiData").invoke(null);
+            result.put("ui", ui == null ? null : ui.toString());
+            Class<?> points =
+                    Class.forName("com.lunares.blockfield.client.render.PointMarkerRenderer");
+            List<Map<String, Object>> list = new ArrayList<>();
+            for (Object marker : (java.util.List<?>) points.getMethod("markers").invoke(null)) {
+                Class<?> type = marker.getClass();
+                Map<String, Object> point = new LinkedHashMap<>();
+                for (String field :
+                        List.of("x", "y", "z", "name", "letter", "ownerColor", "progress"))
+                    point.put(field, type.getMethod(field).invoke(marker));
+                list.add(point);
+            }
+            result.put("points", list);
+            Object dimension = points.getMethod("dimension").invoke(null);
+            result.put("dimension", dimension == null ? null : dimension.toString());
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("markers are unavailable: " + e, e);
+        }
+        try {
+            Class<?> minimap = Class.forName("com.lunares.blockfield.client.render.MinimapHud");
+            int[] rect = (int[]) minimap.getMethod("rect").invoke(null);
+            result.put(
+                    "minimap", rect == null ? null : List.of(rect[0], rect[1], rect[2], rect[3]));
+        } catch (ReflectiveOperationException e) {
+            result.put("minimap", "unavailable: " + e);
+        }
+        return result;
+    }
+
+    /**
+     * Held-item use state for cook checks: which item is being used, for how many ticks, and how
+     * long the use lasts. Lets a scenario prove the victim died mid-cook before asserting the
+     * grenade death-drop.
+     */
+    private static Object useState(Minecraft mc) {
+        LocalPlayer p = mc.player;
+        if (p == null) throw new IllegalStateException("not in a world");
+        Map<String, Object> result = new LinkedHashMap<>();
+        boolean using = p.isUsingItem();
+        result.put("using", using);
+        if (!using) return result;
+        result.put("item", BuiltInRegistries.ITEM.getKey(p.getUseItem().getItem()).toString());
+        result.put("ticksUsing", p.getTicksUsingItem());
+        result.put("duration", p.getUseItem().getItem().getUseDuration(p.getUseItem(), p));
         return result;
     }
 

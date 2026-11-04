@@ -36,7 +36,7 @@ class Ownership(unittest.TestCase):
         ):
             devstack.main()
         self.assertIsNone(exit_status.exception.code)
-        stop.assert_called_once_with()
+        stop.assert_called_once_with(1)
         pid.assert_not_called()
         build.assert_not_called()
         start.assert_not_called()

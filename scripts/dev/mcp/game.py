@@ -238,18 +238,24 @@ def client_settings(config, client):
     if client == 2 and not settings.get("home"):
         raise RuntimeError("client 2 needs its own registered stack home in job.json")
     home = Path(settings.get("home", devstack.HOME)).expanduser().resolve()
-    command_file = home / "client.cmd"
+    pid_name = devstack.CLIENTS[client]["pid"]
+    command_file = home / pid_name.replace("pid", "cmd")
     command = (
         json.loads(command_file.read_text(encoding="utf-8"))
         if command_file.exists()
         else {}
     )
     game_dir = (
-        Path(settings.get("game_dir", command.get("game_dir", home / "play")))
+        Path(
+            settings.get(
+                "game_dir",
+                command.get("game_dir", home / devstack.CLIENTS[client]["game"]),
+            )
+        )
         .expanduser()
         .resolve()
     )
-    return home / "client.pid", game_dir
+    return home / pid_name, game_dir
 
 
 class ConnectionOwnershipError(RuntimeError):
@@ -446,6 +452,23 @@ simple(
         }
     },
     ["action"],
+)
+
+
+simple(
+    "bf_killfeed",
+    "SBW killfeed lines held by this client: attacker, target, headshot.",
+    lambda a: "killfeed",
+)
+simple(
+    "bf_markers",
+    "Capture-point markers, deployment flag, team and minimap visibility.",
+    lambda a: "markers",
+)
+simple(
+    "bf_use_state",
+    "Held-item use state: item, ticks used, full duration (cook checks).",
+    lambda a: "usestate",
 )
 
 

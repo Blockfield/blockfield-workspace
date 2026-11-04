@@ -8,6 +8,8 @@
     "scripts/public_export_private.json"
   ],
   "public_submodule_paths": [
+    "client",
+    "localmods/blockfield-mod",
     "localmods/create-fabric",
     "localmods/parcool-fabric",
     "localmods/simplebedrockmodel-fabric",
@@ -18,6 +20,8 @@
   },
   "submodule_note_path": "SUBMODULES.md",
   "workflow_path": ".github/workflows/public-export-check.yml",
+  "license_path": "LICENSE",
+  "license_text": "Copyright (c) 2026 Blockfield. All rights reserved.\n",
   "replacements": [
     {
       "id": "net-r2-endpoint",
@@ -80,7 +84,8 @@
       "id": "f-app-suffix",
       "paths": ["**"],
       "regex": true,
-      "pattern": "(?i)blockfield-(?:proxy|server|workshop|web|errors)-[a-z0-9]{6}(?![a-z0-9])"
+      "pattern": "(?i)blockfield-(?:proxy|server|workshop|web|errors)-[a-z0-9]{6}(?![a-z0-9])",
+      "allow_exact": ["blockfield-proxy-\u0061bc123", "blockfield-proxy-\u0064ef456"]
     },
     {
       "id": "f-app-random",
@@ -98,7 +103,8 @@
       "id": "f-email-no-tld",
       "paths": ["**"],
       "regex": true,
-      "pattern": "[\\w.+-]+@(?!(?:[0-9a-f]{4,64}|localhost|example|test|invalid|sha256|sha512|md5)(?![\\w.]))[A-Za-z0-9-]+(?![\\w.])"
+      "pattern": "[\\w.+-]+@(?!(?:[0-9a-f]{4,64}|localhost|example|test|invalid|sha256|sha512|md5)(?![\\w.]))[A-Za-z0-9-]+(?![\\w.])",
+      "allow_exact": ["checkout@v4", "t@t", "return@createContext"]
     },
     {
       "id": "f-ssh",

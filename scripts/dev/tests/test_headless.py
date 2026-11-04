@@ -48,6 +48,8 @@ class Headless(unittest.TestCase):
                     "owner": "other",
                 },
             ),
+            # Unit tests must not depend on host RAM: stub the memory source.
+            patch.object(devstack, "_total_memory_gib", return_value=16.0),
             patch.object(devstack, "prepare_client") as prepare,
             patch.object(devstack, "start_process") as start,
             self.assertRaisesRegex(SystemExit, "own local server"),
@@ -192,6 +194,8 @@ class Headless(unittest.TestCase):
                     patch.object(devstack, "CLIENT_CMD_FILE", home / "client.cmd"),
                     patch.object(devstack, "process_owner", return_value="current"),
                     patch.object(devstack, "client_pid", return_value=None),
+                    # Unit tests must not depend on host RAM: stub the source.
+                    patch.object(devstack, "_total_memory_gib", return_value=16.0),
                     patch.object(devstack, "check_agent_server"),
                     patch.object(
                         devstack, "prepare_client", return_value=(home, ["java"])

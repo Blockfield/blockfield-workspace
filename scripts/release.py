@@ -5,6 +5,13 @@ Never creates or pushes tags and never starts Deploy, except through
 owner, so ship refuses to run without --confirmed-by-owner. Other mutating
 commands go through mutate() and honour --dry-run; ship's own merges and tags
 go through ship_mutate(), which has the same dry-run behaviour.
+
+Game and Workshop deploy independently: a server release never stages, moves,
+waits for or consults the Workshop, and ship never dispatches move-approved-tag.
+A Workshop release is a separate explicit dispatch, one line, e.g.:
+  gh api --method POST repos/Blockfield/blockfield-server/actions/workflows/move-approved-tag.yml/dispatches \
+    -H 'X-GitHub-Api-Version: 2022-11-28' -f ref=main -F return_run_details=true \
+    -f 'inputs[digest]=sha256:...'
 """
 
 import argparse
@@ -40,6 +47,9 @@ RELEASES = {
     "server": f"{ORG}/blockfield-server",
 }
 WORKFLOW = {"client": "client.yml", "server": "release.yml"}
+# A server release never stages, waits for or consults the Workshop: Game and
+# Workshop deploy independently (the Workshop deploys via an explicit
+# move-approved-tag dispatch). No workshop-first annotation exists anymore.
 PROD_BUILD = "https://blockfield.pro/build.json"
 PROD_ROOMS = "https://blockfield.pro/api/rooms"
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
@@ -121,6 +131,13 @@ def plan(changed, compat, prod):
     moved = {s for s in sides if compat.get(s) != prod}
     if not moved:
         order = [("tag", s) for s in ("server", "client") if s in sides]
+        if sides == ["server"]:
+            # Server-only hotfix: tag, then the automatic tag-run Game deploy.
+            # The Workshop is never staged or moved: it deploys separately via
+            # an explicit move-approved-tag dispatch. No ("deploy", "server")
+            # step: the dry-run text would otherwise instruct a manual
+            # deploy.yml dispatch that real ship never performs.
+            order = [("tag", "server")]
         return ("independent" if len(sides) == 2 else f"{sides[0]}-only"), order
     if moved == set(SIDES) and compat["client"] == compat["server"]:
         return "pair", [
@@ -450,6 +467,77 @@ def show(res):
     return not any(level == "FAIL" for level, _ in res)
 
 
+# RC record written by `just scenario rc --record <path>` (or by hand in the
+# same shape while the battery has no --record writer; PR #168 is not merged).
+RC_RECORD_FORMAT = "blockfield-rc-record/1"
+# SKIP is allowed only for these checks (they need a second client) and only
+# on server-only releases; every other SKIP fails the gate like a FAIL.
+SECOND_CLIENT_CHECKS = ("long-range kill", "tdm death/respawn at BASE")
+
+
+def load_rc_record(path):
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"RC record {path} is unreadable: {error}") from error
+    if not isinstance(data, dict):
+        raise RuntimeError(f"RC record {path} is not a JSON object")
+    return data
+
+
+def check_rc_record(tags, record):
+    """Validate an RC record against exactly the release builds. Returns [(level, text)]."""
+    releases = record.get("releases") if isinstance(record, dict) else None
+    if releases != tags:
+        return [("FAIL", f"RC record covers {releases!r}, release needs {tags!r}")]
+    checks = record.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return [("FAIL", "RC record has no checks")]
+    res, server_only = [], set(tags) == {"server"}
+    for entry in checks:
+        name = entry.get("name", "?") if isinstance(entry, dict) else "?"
+        result = entry.get("result") if isinstance(entry, dict) else None
+        result = str(result or "?").upper()
+        detail = (entry.get("evidence") or "") if isinstance(entry, dict) else ""
+        if result == "PASS":
+            res.append(("ok", f"RC {name}: PASS"))
+        elif (
+            result == "SKIP"
+            and server_only
+            and str(name).startswith(SECOND_CLIENT_CHECKS)
+        ):
+            res.append(("ok", f"RC {name}: SKIP without a second client"))
+        else:
+            res.append(("FAIL", f"RC {name}: {result} {detail}"[:160]))
+    return res
+
+
+def require_rc_gate(tags, rc_record=None, gate_waiver=None):
+    """G0: refuse to tag without a passing RC record; a waiver names the skipped gate."""
+    if gate_waiver:
+        say(f"  [WARN] release gate WAIVED: {gate_waiver}")
+        return True
+    if not rc_record:
+        raise SystemExit(
+            "refusing to tag: no RC record (--rc-record <path>, from `just scenario rc`); "
+            'or pass --gate-waiver "<reason>" to waive visibly'
+        )
+    try:
+        record = load_rc_record(rc_record)
+    except RuntimeError as error:
+        raise SystemExit(f"refusing to tag: {error}") from error
+    res = check_rc_record(tags, record)
+    if not show(res):
+        raise SystemExit(
+            f"refusing to tag: RC record {rc_record} does not pass the gate"
+        )
+    say(
+        "  RC record passes for "
+        + ", ".join(f"{side} {tag}" for side, tag in tags.items())
+    )
+    return True
+
+
 def pin_jar(tree, key, tag):
     repo, stem, meta, title, side, algo, plus = PINS[key]
     with tempfile.TemporaryDirectory(dir=CACHE) as tmp:
@@ -566,10 +654,12 @@ def pr_branch(side, tag):
 def prepare_side(side, args, prod, manifest, repin):
     repo = repo_dir(side)
     fetch_main(repo)
-    version = next_version(
-        newest(remote_tags(repo)), show_pack(repo, "origin/main"), args.bump
-    )
+    tags = remote_tags(repo)
+    last = newest(tags)
+    version = next_version(last, show_pack(repo, "origin/main"), args.bump)
     tag, branch = f"v{version}", pr_branch(side, f"v{version}")
+    waiver = getattr(args, "gate_waiver", None)
+    body = f"Release-gate waiver: {waiver}\n" if waiver else ""
     if git(repo, "ls-remote", "--heads", "origin", branch):
         raise SystemExit(
             f"{branch} already exists on origin; delete or reuse it manually"
@@ -578,11 +668,14 @@ def prepare_side(side, args, prod, manifest, repin):
     with worktree(repo, "origin/main", branch, side) as tree:
         files, parts = [], []
         if side == "server" and args.server_merge:
-            git(tree, "fetch", "-q", "origin", f"refs/heads/{args.server_merge}")
-            sha = git(tree, "rev-parse", "FETCH_HEAD")
-            say(f"  merge server {args.server_merge} ({sha}) into release branch")
-            git(tree, "merge", "--no-ff", "--no-edit", sha)
-            parts.append(f"merge {args.server_merge} {sha[:7]}")
+            for name in (piece.strip() for piece in args.server_merge.split(",")):
+                if not name:
+                    continue
+                git(tree, "fetch", "-q", "origin", f"refs/heads/{name}")
+                sha = git(tree, "rev-parse", "FETCH_HEAD")
+                say(f"  merge server {name} ({sha}) into release branch")
+                git(tree, "merge", "--no-ff", "--no-edit", sha)
+                parts.append(f"merge {name} {sha[:7]}")
         if side == "client":
             files.append(pin_jar(tree, "mod", args.mod))
         else:
@@ -592,8 +685,19 @@ def prepare_side(side, args, prod, manifest, repin):
             files.append(pin_jar(tree, "decor", args.decor))
             parts.append(f"decor {args.decor}")
         if not git(tree, "diff", "origin/main", "--name-only"):
-            say("  pins unchanged: nothing to release on this side")
-            return None
+            # Fork-pin-only path: mod/decor pins match origin/main, but the
+            # tree may still carry unreleased content vs the newest tag
+            # (client main, or the merged server branch). Release then.
+            if not last:
+                say("  pins unchanged: nothing to release on this side")
+                return None
+            # The tag object may be unknown locally (ls-remote only lists
+            # it; a burnt tag can point at an unmerged release branch).
+            git(tree, "fetch", "-q", "origin", "tag", last)
+            if not git(tree, "log", "--no-merges", "--format=%h", f"{last}..HEAD"):
+                say("  pins unchanged: nothing to release on this side")
+                return None
+            parts.append(f"fork pins since {last}")
         if repin:
             set_candidate(tree, "v" + prod["client_version"])
             parts.append(f"client candidate v{prod['client_version']}")
@@ -609,6 +713,7 @@ def prepare_side(side, args, prod, manifest, repin):
             branch,
             f"Release {side} {version}",
             f"Release {side} {version}: {', '.join(parts)}",
+            body,
         )
     return tag, meta
 
@@ -617,6 +722,11 @@ def tag_lines(order, tags, branch):
     lines = []
     for action, side in order:
         tag = tags.get(side)
+        if action == "tag":
+            lines.append(
+                f"release gate: RC record for {side} {tag} passes "
+                "(or a named --gate-waiver); release.push_tag refuses without one"
+            )
         if action == "tag":
             lines.append(
                 f"wait for green {side} PR checks at pinned head"
@@ -641,6 +751,13 @@ def tag_lines(order, tags, branch):
                         else "continue without waiting for automatic Deploy; any observed red must match the known compatibility refusal"
                     )
                 )
+            elif side == "server":
+                # Server-only: the tag push run deploys Game on its own; real
+                # ship performs no manual deploy.yml dispatch for this step.
+                lines.append(
+                    "watch the tag push run: its automatic Deploy ships "
+                    f"{tags['server']} (no manual dispatch)"
+                )
         elif action == "candidate":
             lines.append(
                 f"just release candidate {tags['client']} --branch {branch}   # preflight, push; wait for NEW server CI"
@@ -655,7 +772,7 @@ def tag_lines(order, tags, branch):
             )
         else:
             lines.append(
-                shlex.join(deploy_command("client", tags["client"]))
+                shlex.join(deploy_command(side, tags[side]))
                 + "   # wait for this new dispatch run to succeed"
             )
     return lines
@@ -715,11 +832,27 @@ def cmd_candidate(args):
     repo = repo_dir("server")
     git(repo, "fetch", "-q", "origin", args.branch)
     with worktree(repo, f"origin/{args.branch}", args.branch, "server") as tree:
+        expected = getattr(args, "expected_tree", None)
+        if expected and git(tree, "rev-parse", "HEAD^{tree}") != expected:
+            raise SystemExit(
+                "candidate refused: server tree changed since resume guard"
+            )
         set_candidate(tree, args.tag)
         tag = "v" + pack_version((tree / "pack.toml").read_text())
         res, _ = preflight("server", tag, tree)
         if not show(res):
             raise SystemExit("preflight failed: nothing was pushed")
+        if expected:
+            changed = git(tree, "diff", "--name-only", "HEAD").splitlines()
+            before = json.loads(git(tree, "show", "HEAD:client-compatibility.json"))
+            after = json.loads((tree / "client-compatibility.json").read_text())
+            before.pop("client_candidate", None)
+            after.pop("client_candidate", None)
+            if changed != ["client-compatibility.json"] or before != after:
+                raise SystemExit(
+                    "candidate refused: changes extend beyond client_candidate"
+                )
+            say(git(tree, "diff", "--stat", "HEAD"))
         git(tree, "add", "-u")
         say(f"+ git commit -m 'Pin client candidate {args.tag}'   [in {tree}]")
         git(tree, "commit", "-q", "-m", f"Pin client candidate {args.tag}")
@@ -973,6 +1106,14 @@ def pr_number(repo, branch):
     return items[0]["number"] if items else None
 
 
+def _check_success(check):
+    """A completed SUCCESS CheckRun or a SUCCESS StatusContext; anything else
+    (including SKIPPED) is not green."""
+    if check.get("__typename") == "StatusContext":
+        return check.get("state") == "SUCCESS"
+    return check.get("status") == "COMPLETED" and check.get("conclusion") == "SUCCESS"
+
+
 def pr_checks(repo, number, expected_head=None, required_jobs=()):
     """'green' when every check succeeded, 'red' on any failure, else 'pending'."""
     data = json.loads(
@@ -994,23 +1135,33 @@ def pr_checks(repo, number, expected_head=None, required_jobs=()):
         return "pending"
     if any(
         c.get("conclusion") in ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED")
+        or c.get("state") in ("FAILURE", "ERROR")
         for c in rollup
     ):
         return "red"
     for name in required_jobs:
-        jobs = [c for c in rollup if c.get("name") == name]
+        jobs = [c for c in rollup if (c.get("name") or c.get("context")) == name]
         if not jobs:
             return "pending"
-        if any(c.get("conclusion") in ("SKIPPED", "NEUTRAL") for c in jobs):
-            return "red"
-        if not all(
-            c.get("status") == "COMPLETED" and c.get("conclusion") == "SUCCESS"
-            for c in jobs
-        ):
-            return "pending"
+        # A skip is never green and never vetoes: the job is satisfied by any
+        # completed SUCCESS on this head, so a later skipped run (a
+        # non-approving review after the job-level `if:` fix) can neither pass
+        # nor mask an earlier green one.
+        if any(_check_success(c) for c in jobs):
+            continue
+        return "pending"
     if all(
-        c.get("status") == "COMPLETED"
+        c.get("state") == "SUCCESS"
+        if c.get("__typename") == "StatusContext"
+        else c.get("status") == "COMPLETED"
         and c.get("conclusion") in ("SUCCESS", "SKIPPED", "NEUTRAL")
+        for c in rollup
+    ) and any(
+        # A commit status (e.g. bot-review) never proves CI ran: green needs a
+        # successful CI check run on the head.
+        c.get("__typename") != "StatusContext"
+        and c.get("status") == "COMPLETED"
+        and c.get("conclusion") == "SUCCESS"
         for c in rollup
     ):
         return "green"
@@ -1094,7 +1245,14 @@ def merge_pr(repo, number, dry, expected_head=None):
     return sha
 
 
-def push_tag(side, tag, dry, expected_sha=None):
+def push_tag(
+    side,
+    tag,
+    dry,
+    expected_sha=None,
+    rc_record=None,
+    gate_waiver=None,
+):
     """Tag the merged origin/main and push it. Returns the tagged commit sha."""
     if dry:
         say(
@@ -1102,6 +1260,7 @@ def push_tag(side, tag, dry, expected_sha=None):
             f"-m {tag} origin/main && git -C {side} push origin {tag}"
         )
         return "(dry run)"
+    require_rc_gate({side: tag}, rc_record, gate_waiver)
     repo = repo_dir(side)
     git(repo, "fetch", "-q", "origin", "main")
     sha = git(repo, "rev-parse", "origin/main")
@@ -1249,6 +1408,7 @@ def verify_publication(side, tag):
         )
     if side == "server":
         return
+    CACHE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=CACHE) as tmp:
         gh(
             "release",
@@ -1282,8 +1442,45 @@ def verify_publication(side, tag):
         return meta
 
 
-def wait_publication(side, tag, run_id, timeout_s, interval_s):
+def verify_client_stage(tag, run_id):
+    """Accept only a completed manual staging run, with promotion positively skipped."""
+    data = json.loads(gh("api", f"repos/{REPO['client']}/actions/runs/{run_id}"))
+    if (
+        data.get("event") != "workflow_dispatch"
+        or data.get("path") != ".github/workflows/deploy.yml"
+        or data.get("head_branch") != "main"
+        or data.get("status") != "completed"
+        or data.get("conclusion") != "success"
+    ):
+        raise RuntimeError(
+            "client stage evidence is not a successful main Deploy client dispatch"
+        )
+    jobs = json.loads(
+        gh("run", "view", str(run_id), "--repo", REPO["client"], "--json", "jobs")
+    )["jobs"]
+    if not jobs or any(job.get("conclusion") != "success" for job in jobs):
+        raise RuntimeError("client stage jobs did not succeed")
+    promotion = [
+        step
+        for job in jobs
+        for step in job.get("steps", [])
+        if step.get("name") == "Mark the deployed client as latest"
+    ]
+    if len(promotion) != 1 or promotion[0].get("conclusion") != "skipped":
+        raise RuntimeError("client stage evidence must skip Latest promotion")
+    log = gh("run", "view", str(run_id), "--repo", REPO["client"], "--log")
+    if f"Client {tag} staged invisibly;" not in log:
+        raise RuntimeError("client stage evidence does not stage the requested tag")
+    return True
+
+
+def wait_publication(side, tag, run_id, timeout_s, interval_s, client_stage_run=None):
     """Pair tags publish first; their automatic Deploy cannot switch the old pair."""
+    staged = (
+        side == "client"
+        and client_stage_run is not None
+        and verify_client_stage(tag, client_stage_run)
+    )
     required = {"check"} if side == "client" else {"prepare", "release"}
     refusal_step = "Validate target and remember previous pair"
     refusal = "Server gates on another client than the served one: rerun Deploy server with client_tag"
@@ -1307,13 +1504,20 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s):
         ]
         jobs = {j["name"]: j for j in data.get("jobs", []) if j not in deploy}
         for job in jobs.values():
-            if job.get("conclusion") and job["conclusion"].lower() != "success":
+            allowed = (
+                {"success"}
+                if job["name"] in required
+                else {"success", "skipped", "neutral"}
+            )
+            if job.get("conclusion") and job["conclusion"].lower() not in allowed:
                 raise RuntimeError(
                     f"{side} publication job {job['name']} {job['conclusion']}: {data['url']}"
                 )
         for job in deploy:
             conclusion = job.get("conclusion")
-            if conclusion in (None, "", "success"):
+            if conclusion in (None, "", "success") or (
+                staged and conclusion == "skipped"
+            ):
                 continue
             if side == "client":
                 raise RuntimeError(
@@ -1339,7 +1543,13 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s):
         if data.get("conclusion") not in (None, "", "success", "failure"):
             raise RuntimeError(f"{side} tag run {data['conclusion']}: {data['url']}")
         if not required <= jobs.keys() or any(
-            j.get("conclusion") != "success" for j in jobs.values()
+            j.get("conclusion")
+            not in (
+                {"success"}
+                if j["name"] in required
+                else {"success", "skipped", "neutral"}
+            )
+            for j in jobs.values()
         ):
             if data["status"] == "completed":
                 raise RuntimeError(
@@ -1347,7 +1557,12 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s):
                 )
             return False
         if side == "client" and (
-            not deploy or any(j.get("conclusion") != "success" for j in deploy)
+            not deploy
+            or any(
+                j.get("conclusion")
+                not in ({"success", "skipped"} if staged else {"success"})
+                for j in deploy
+            )
         ):
             if data["status"] == "completed":
                 raise RuntimeError(
@@ -1427,10 +1642,155 @@ def verify_pair(tags, client, timeout_s, interval_s):
     say("  production pair verified (public build.json and /api/rooms)")
 
 
+def entry_probe(tag):
+    """Synthetic entry check via the server checkout (no credentials): the
+    proxy's composed gate (file + CP lease) must leave Game entry open, the
+    RakNet listener must answer, and /api/rooms must serve the tag. The
+    Workshop legs are skipped (Game-only gate): a down, asleep or
+    mid-transition Workshop never fails a Game release. /api/rooms build is
+    the server build, so a client leg passes no tag and checks the entry
+    shape only (tag=None omits --tag, which the probe documents for exactly
+    this: entry-shape checks when the Game build is unchanged)."""
+    script = ROOT / "server" / "scripts" / "entry_liveness.py"
+    if not script.is_file():
+        return (
+            "REQUIRED",
+            "manual: proxy gate Game backend open — join via the Game entry "
+            "(server checkout missing, probe skipped)",
+        )
+    probe = [
+        sys.executable,
+        "-I",
+        str(script),
+    ]
+    if tag is not None:
+        probe += ["--tag", tag]
+    probe += [
+        "--proxy-host",
+        "play.blockfield.pro",
+        "--workshop-host",
+        "workshop.blockfield.pro",
+    ]
+    try:
+        helps = subprocess.run(
+            [sys.executable, "-I", str(script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        helps = None
+    if helps is not None and helps.returncode == 0 and "--game-only" in helps.stdout:
+        # The pinned server knows the Game-only gate: skip the Workshop legs.
+        # Older pins predate the flag and keep the full gate until the pin bump.
+        probe.append("--game-only")
+    try:
+        result = subprocess.run(
+            probe,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return (
+            "REQUIRED",
+            f"manual: entry probe could not run ({error}); join via the Game entry",
+        )
+    if result.returncode == 0:
+        return (
+            "ok",
+            f"synthetic entry alive after {tag} (proxy gate + RakNet + rooms)"
+            if tag is not None
+            else "synthetic entry alive (proxy gate + RakNet + rooms shape, no build check)",
+        )
+    tail = (result.stdout + result.stderr).strip().splitlines()
+    return (
+        "FAIL",
+        f"synthetic entry dead after {tag}: {'; '.join(tail[-4:])}"[:300]
+        if tag is not None
+        else f"synthetic entry shape dead: {'; '.join(tail[-4:])}"[:300],
+    )
+
+
+def post_deploy_probes(tags, client=None, timeout_s=1800, interval_s=5):
+    """G5 probes after a deploy: automated where the tool has a read path,
+    REQUIRED manual checks where it has none. Raises on automated failure."""
+    want = dict(tags)
+
+    def ready():
+        try:
+            prod = prod_state()
+        except (OSError, ValueError):
+            return None  # transient fetch failure: keep polling within the bound
+        for side, tag in want.items():
+            if prod.get("build" if side == "client" else "server_build") != tag:
+                return None
+        return prod
+
+    prod = wait_until(
+        "production running "
+        + ", ".join(f"{side} {tag}" for side, tag in want.items()),
+        timeout_s,
+        interval_s,
+        ready,
+    )
+    res = [
+        (
+            "ok",
+            "/api/rooms serves "
+            + ", ".join(f"{side} {tag}" for side, tag in want.items()),
+        )
+    ]
+    if client is not None:
+        res.append(
+            (
+                "ok"
+                if prod.get("compatibility") == client.get("compatibility")
+                else "FAIL",
+                f"build.json contract {str(prod.get('compatibility'))[:12]} "
+                f"{'==' if prod.get('compatibility') == client.get('compatibility') else '!='} "
+                f"released {str(client.get('compatibility'))[:12]}",
+            )
+        )
+    else:
+        res.append(
+            ("ok", f"build.json contract {str(prod.get('compatibility'))[:12]} live")
+        )
+    # No read path from this tool: print the exact check, mark it REQUIRED.
+    if "server" in want:
+        res.append(
+            (
+                "REQUIRED",
+                "manual: prod server.properties view-distance/simulation-distance/"
+                f"broadcast-* equal the intended values for {want['server']} "
+                "(prod drifted silently in 2.79.0; compare the Dokploy Game "
+                "service config against the tagged release)",
+            )
+        )
+    res.append(
+        # /api/rooms build is the server build: the client leg has no server
+        # tag in want, so it checks the entry shape only (tag=None).
+        entry_probe(tags.get("server")),
+    )
+    if not show(res):
+        raise RuntimeError("post-deploy contract probe failed")
+    return True
+
+
 def ship_tag_side(
-    args, side, tag, timeout_s, interval_s, publish_only=False, expected_head=None
+    args,
+    side,
+    tag,
+    timeout_s,
+    interval_s,
+    publish_only=False,
+    expected_head=None,
 ):
     """Merge, preflight, tag and wait; pair publication returns the client manifest."""
+    rc_record, gate_waiver = (
+        getattr(args, "rc_record", None),
+        getattr(args, "gate_waiver", None),
+    )
     if args.dry_run:
         say(
             f"dry run: merge/preflight/tag {side} {tag}; wait for publication"
@@ -1448,13 +1808,56 @@ def ship_tag_side(
         args.dry_run,
         head,
     )
-    sha = push_tag(side, tag, args.dry_run, merged)
+    sha = push_tag(
+        side,
+        tag,
+        args.dry_run,
+        merged,
+        rc_record,
+        gate_waiver,
+    )
     say(f"  {side} {tag} -> {sha[:7]}")
     found = wait_release_run(side, sha, timeout_s, interval_s, tag)
     if publish_only:
         return wait_publication(side, tag, found["databaseId"], timeout_s, interval_s)
     wait_run_success(side, found["databaseId"], timeout_s, interval_s)
     return sha
+
+
+def resume_pair(args):
+    """Resume only before candidate: immutable client tag and exact server RC tree."""
+    client, server, client_tree, server_tree = args.resume_client_published
+    for value in (client, server):
+        if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", value):
+            raise SystemExit("resume requires exact release tags")
+    for value in (client_tree, server_tree):
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise SystemExit("resume requires full expected tree SHAs")
+    tags = {"client": client, "server": server}
+    branch = pr_branch("server", server)
+    for side, ref, expected in (
+        ("client", f"refs/tags/{client}", client_tree),
+        ("server", f"refs/heads/{branch}", server_tree),
+    ):
+        repo = repo_dir(side)
+        git(repo, "fetch", "-q", "origin", ref)
+        if git(repo, "rev-parse", "FETCH_HEAD^{tree}") != expected:
+            raise SystemExit(
+                f"resume refused: {side} tree differs from expected RC tree"
+            )
+    if git(repo_dir("server"), "ls-remote", "--tags", "origin", f"refs/tags/{server}"):
+        raise SystemExit("resume refused: server tag already exists")
+    return (
+        tags,
+        "pair",
+        [
+            ("candidate", "server"),
+            ("tag", "server"),
+            ("deploy-pair", "server"),
+            ("deploy", "client"),
+        ],
+        branch,
+    )
 
 
 def cmd_ship(args):
@@ -1472,7 +1875,12 @@ def cmd_ship(args):
         lambda: mod_published(args.mod),
     )
     say(f"  mod {args.mod} is published")
-    tags, kind, order, branch = prepare_all(args)
+    resume = getattr(args, "resume_client_published", None)
+    if getattr(args, "client_stage_run", None) and not resume:
+        raise SystemExit("--client-stage-run requires --resume-client-published")
+    if resume and (args.only or args.server_merge):
+        raise SystemExit("resume cannot be combined with --only or --server-merge")
+    tags, kind, order, branch = resume_pair(args) if resume else prepare_all(args)
     if kind in ("none", "mismatch") or not tags:
         raise SystemExit(f"ship stopped: release kind is {kind}")
     say(f"\nrelease kind: {kind}")
@@ -1489,15 +1897,34 @@ def cmd_ship(args):
             "dry run: prepare pushed nothing, so merge/tag/watch/pin steps above are not executed"
         )
         return True
+    require_rc_gate(
+        tags, getattr(args, "rc_record", None), getattr(args, "gate_waiver", None)
+    )
     if kind == "pair":
-        client = ship_tag_side(
-            args, "client", tags["client"], timeout_s, interval_s, publish_only=True
-        )
+        if resume:
+            sha = git(repo_dir("client"), "rev-parse", "FETCH_HEAD^{commit}")
+            found = wait_release_run(
+                "client", sha, timeout_s, interval_s, tags["client"]
+            )
+            client = wait_publication(
+                "client",
+                tags["client"],
+                found["databaseId"],
+                timeout_s,
+                interval_s,
+                client_stage_run=getattr(args, "client_stage_run", None),
+            )
+            check_client_release(tags["client"], True)
+        else:
+            client = ship_tag_side(
+                args, "client", tags["client"], timeout_s, interval_s, publish_only=True
+            )
         candidate_sha = cmd_candidate(
             argparse.Namespace(
                 tag=tags["client"],
                 branch=pr_branch("server", tags["server"]),
                 dry_run=dry,
+                expected_tree=resume[3] if resume else None,
             )
         )
         ship_tag_side(
@@ -1518,8 +1945,22 @@ def cmd_ship(args):
             client_tag=tags["client"],
             dry=dry,
         )
+        post_deploy_probes({"server": tags["server"]}, None, timeout_s, interval_s)
         dispatch_deploy("client", tags["client"], timeout_s, interval_s, dry=dry)
+        post_deploy_probes({"client": tags["client"]}, client, timeout_s, interval_s)
         verify_pair(tags, client, timeout_s, interval_s)
+    elif kind == "server-only":
+        # Server-only hotfix: a plain tag, then the automatic tag-run deploys
+        # Game on its own. The Workshop is never staged, moved or consulted;
+        # a Workshop release is a separate explicit move-approved-tag dispatch.
+        ship_tag_side(
+            args,
+            "server",
+            tags["server"],
+            timeout_s,
+            interval_s,
+        )
+        post_deploy_probes(tags, None, timeout_s, interval_s)
     elif len(tags) == 2:
         # Independent: server first; hold the client tag until the server
         # deploy job runs, so old clients stay locked out for less time.
@@ -1536,7 +1977,14 @@ def cmd_ship(args):
             dry,
             head,
         )
-        server_sha = push_tag("server", tags["server"], dry, server_merged)
+        server_sha = push_tag(
+            "server",
+            tags["server"],
+            dry,
+            server_merged,
+            getattr(args, "rc_record", None),
+            getattr(args, "gate_waiver", None),
+        )
         number, head = wait_pr_green(
             REPO["client"], client_branch, timeout_s, interval_s
         )
@@ -1550,7 +1998,14 @@ def cmd_ship(args):
             "server", server_sha, timeout_s, interval_s, tags["server"]
         )
         wait_deploy_started("server", server_run["databaseId"], timeout_s, interval_s)
-        client_sha = push_tag("client", tags["client"], dry, client_merged)
+        client_sha = push_tag(
+            "client",
+            tags["client"],
+            dry,
+            client_merged,
+            getattr(args, "rc_record", None),
+            getattr(args, "gate_waiver", None),
+        )
         wait_run_success("server", server_run["databaseId"], timeout_s, interval_s)
         wait_run_success(
             "client",
@@ -1560,9 +2015,11 @@ def cmd_ship(args):
             timeout_s,
             interval_s,
         )
+        post_deploy_probes(tags, None, timeout_s, interval_s)
     else:
         side = next(iter(tags))
         ship_tag_side(args, side, tags[side], timeout_s, interval_s)
+        post_deploy_probes(tags, None, timeout_s, interval_s)
     pin = cmd_pin(
         argparse.Namespace(
             client=tags.get("client"),
@@ -1652,12 +2109,35 @@ def parser():
         default=5,
         help="seconds between status polls (default 5)",
     )
+    s.add_argument(
+        "--rc-record",
+        metavar="PATH",
+        help="RC record JSON from `just scenario rc` covering exactly the release builds",
+    )
+    s.add_argument(
+        "--gate-waiver",
+        metavar='"reason"',
+        help="waive the release gate visibly; recorded in the log and the PR body",
+    )
+    s.add_argument(
+        "--resume-client-published",
+        nargs=4,
+        metavar=("CLIENT_TAG", "SERVER_TAG", "CLIENT_TREE", "SERVER_TREE"),
+        help="resume a pair before candidate, guarded by the exact published client and server RC trees; never re-tag the client",
+    )
+    s.add_argument(
+        "--client-stage-run",
+        type=int,
+        metavar="RUN_ID",
+        help="successful main Deploy client staging run for resume when automatic tag Deploy was skipped",
+    )
     s.set_defaults(run=cmd_ship)
     for name in ("prepare", "ship"):
         sub.choices[name].add_argument(
             "--server-merge",
-            metavar="BRANCH",
-            help="merge this origin server branch into current main in the release PR before preflight (includes all its changes)",
+            metavar="BRANCH[,BRANCH]",
+            help="merge origin server branch(es) into current main in the release PR "
+            "before preflight, comma-separated in merge order (includes all their changes)",
         )
     for name in ("prepare", "candidate", "pin", "ship"):
         sub.choices[name].add_argument(

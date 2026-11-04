@@ -127,8 +127,8 @@ workspace фиксирует проверенные SHA.
 - [Разработка и диагностика](docs/DEVELOPING.md)
 - [Правила работы](AGENTS.md)
 - [Состояние аудита](docs/AUDIT-2026-09-30.md)
-- [Архитектура мода](<private-submodule>/blob/main/docs/AGENTS.md)
-- [Release notes](<private-submodule>/blob/main/docs/RELEASE-NOTES.md) и [порядок деплоя](<private-submodule>/blob/main/docs/DEPLOY.md)
+- [Архитектура мода](https://github.com/Blockfield/blockfield-mod/blob/main/docs/AGENTS.md)
+- [Release notes](https://github.com/Blockfield/blockfield-client/blob/main/docs/RELEASE-NOTES.md) и [порядок деплоя](<private-submodule>/blob/main/docs/DEPLOY.md)
 
 Теги клиента/сервера и ручной Deploy требуют отдельного подтверждения владельца:
 они запускают выпуск и прод-деплой.

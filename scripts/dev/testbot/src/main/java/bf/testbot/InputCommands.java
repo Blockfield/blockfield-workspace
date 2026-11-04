@@ -101,13 +101,25 @@ final class InputCommands {
         return ticks;
     }
 
+    /** LR attack animation for `lr attack <left|right>` (TestBot drives the press itself). */
+    static String lrAttackAnimation(String[] args) {
+        if (args.length != 3 || !args[1].equals("attack"))
+            throw new IllegalArgumentException("lr attack <left|right>");
+        if (args[2].equals("left")) return "attack_left";
+        if (args[2].equals("right")) return "attack_right";
+        throw new IllegalArgumentException("lr attack <left|right>, got " + args[2]);
+    }
+
     public static void main(String[] args) {
         double[] offsets = scrollOffsets(new String[] {"scroll", "0.25", "-1.5"});
         if (offsets[0] != 0.25
                 || offsets[1] != -1.5
                 || scrollOffsets(new String[] {"scroll", "4"})[1] != 0
                 || useTicks(new String[] {"use"}) != 2
-                || useTicks(new String[] {"use", "200"}) != 200)
+                || useTicks(new String[] {"use", "200"}) != 200
+                || !lrAttackAnimation(new String[] {"lr", "attack", "left"}).equals("attack_left")
+                || !lrAttackAnimation(new String[] {"lr", "attack", "right"})
+                        .equals("attack_right"))
             throw new AssertionError("input command parsing failed");
         for (String invalid :
                 new String[] {
@@ -119,16 +131,22 @@ final class InputCommands {
                     "use -1",
                     "use 201",
                     "use 0.25",
-                    "use 2 3"
+                    "use 2 3",
+                    "lr attack",
+                    "lr attack up",
+                    "lr attack left now",
+                    "lr mouse 1 1"
                 }) {
             try {
                 String[] parts = invalid.split(" ");
                 if (parts[0].equals("scroll")) scrollOffsets(parts);
-                else useTicks(parts);
+                else if (parts[0].equals("use")) useTicks(parts);
+                else lrAttackAnimation(parts);
                 throw new AssertionError("invalid input accepted: " + invalid);
             } catch (IllegalArgumentException expected) {
             }
         }
-        System.out.println("PASS fractional scroll axes, use duration and invalid input rejection");
+        System.out.println(
+                "PASS fractional scroll axes, use duration, lr attack and invalid input rejection");
     }
 }

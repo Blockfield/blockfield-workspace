@@ -1,0 +1,111 @@
+#!/bin/sh
+# Versioned pre-push gate: the fast checks CI runs, without Gradle.
+# Installed via `just setup` (git core.hooksPath). Bypass: git push --no-verify.
+set -eu
+cd "$(dirname "$0")/.."
+command -v just >/dev/null 2>&1 || {
+  echo "pre-push: 'just' not found on PATH; run just setup first" >&2
+  exit 1
+}
+just lint
+just format-check
+
+# Pinned secret scan (owner decision 2026-10-31): gitleaks 8.24.3 over exactly
+# what this push carries, plus the infrastructure-identifier shapes from the
+# public audit (app names with suffixes, R2 endpoint with account ID).
+# A checksum mismatch fails closed. Bypass: git push --no-verify.
+GITLEAKS_VERSION="8.24.3"
+GITLEAKS_CACHE=".cache/quality/gitleaks-$GITLEAKS_VERSION"
+GITLEAKS_BIN="$GITLEAKS_CACHE/gitleaks"
+# Read the push lines FIRST: gitleaks needs the original stdin, and later
+# commands must not consume it. (<local ref> <local sha> <remote ref> <remote sha>)
+if [ -t 0 ]; then
+  PUSH_INFO=""
+else
+  PUSH_INFO=$(cat)
+fi
+if [ ! -x "$GITLEAKS_BIN" ]; then
+  case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64)
+      GITLEAKS_ASSET="gitleaks_8.24.3_linux_x64.tar.gz"
+      GITLEAKS_SHA256="9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
+      ;;
+    Linux/aarch64)
+      GITLEAKS_ASSET="gitleaks_8.24.3_linux_arm64.tar.gz"
+      GITLEAKS_SHA256="5f2edbe1f49f7b920f9e06e90759947d3c5dfc16f752fb93aaafc17e9d14cf07"
+      ;;
+    Darwin/x86_64)
+      GITLEAKS_ASSET="gitleaks_8.24.3_darwin_x64.tar.gz"
+      GITLEAKS_SHA256="41c44ae8ad1d6eef57d4526ad0fd67d8129eee9a856f55c2b3b9395fd3d9ec0f"
+      ;;
+    Darwin/arm64)
+      GITLEAKS_ASSET="gitleaks_8.24.3_darwin_arm64.tar.gz"
+      GITLEAKS_SHA256="b90f13bb8c90ab72083d9b0c842e39dafb82c0e5c3f872f407366b7a58909013"
+      ;;
+    *)
+      echo "pre-push: no pinned gitleaks asset for $(uname -s)/$(uname -m); refusing push (bypass: --no-verify)" >&2
+      exit 1
+      ;;
+  esac
+  echo "pre-push: fetching pinned gitleaks $GITLEAKS_VERSION ..." >&2
+  mkdir -p "$GITLEAKS_CACHE"
+  GITLEAKS_TMP="$GITLEAKS_CACHE/$GITLEAKS_ASSET"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$GITLEAKS_TMP" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/$GITLEAKS_ASSET"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$GITLEAKS_TMP" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/$GITLEAKS_ASSET"
+  else
+    echo "pre-push: need curl or wget to fetch gitleaks" >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "$GITLEAKS_SHA256  $GITLEAKS_TMP" | sha256sum -c - >/dev/null || { echo "pre-push: gitleaks checksum mismatch; refusing push" >&2; exit 1; }
+  else
+    echo "$GITLEAKS_SHA256  $GITLEAKS_TMP" | shasum -a 256 -c - >/dev/null || { echo "pre-push: gitleaks checksum mismatch; refusing push" >&2; exit 1; }
+  fi
+  tar -xzf "$GITLEAKS_TMP" -C "$GITLEAKS_CACHE" gitleaks
+  chmod +x "$GITLEAKS_BIN"
+  rm -f "$GITLEAKS_TMP"
+fi
+# A tracked or inherited config must never weaken the scan: default rules only.
+# Each pushed ref is scanned with detect over its exact commit range.
+ZERO="0000000000000000000000000000000000000000"
+SCAN_FAIL=""
+ID_HIT=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ -z "$local_sha" ] && continue
+  [ "$local_sha" = "$ZERO" ] && continue
+  local_commit=$(git rev-parse "$local_sha^{commit}" 2>/dev/null) || continue
+  if [ "$remote_sha" = "$ZERO" ]; then
+    LOG_OPTS="$local_commit --not --remotes"
+    patch=$(git log -p --no-merges -U0 "$local_commit" --not --remotes 2>/dev/null || true)
+  elif remote_commit=$(git rev-parse "$remote_sha^{commit}" 2>/dev/null); then
+    LOG_OPTS="$remote_commit..$local_commit"
+    # The net diff hides identifiers added and removed again in the same
+    # push: scan every commit like the new-branch path does.
+    patch=$(git log -p --no-merges -U0 "$remote_commit..$local_commit" -- . 2>/dev/null || true)
+  else
+    # The remote tip is unknown locally (forced rewrite over unseen commits):
+    # never skip the ref, scan it as a new one instead of failing open.
+    LOG_OPTS="$local_commit --not --remotes"
+    patch=$(git log -p --no-merges -U0 "$local_commit" --not --remotes 2>/dev/null || true)
+  fi
+  # shellcheck disable=SC2086
+  if ! env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML "$GITLEAKS_BIN" detect --verbose --redact --log-opts="$LOG_OPTS"; then
+    SCAN_FAIL="yes"
+  fi
+  if printf '%s\n' "$patch" | grep -E '^\+[^+]' | grep -qE -e '[0-9a-f]{32}\.r2\.cloudflarestorage\.com' -e 'blockfield-(proxy|server|workshop|web|errors)-[a-z0-9]{6}([^a-z0-9]|$)'; then
+    ID_HIT="yes"
+  fi
+done <<EOF
+$PUSH_INFO
+EOF
+if [ -n "$SCAN_FAIL" ]; then
+  echo "pre-push: gitleaks found secrets in the pushed range; refusing push" >&2
+  exit 1
+fi
+if [ -n "$ID_HIT" ]; then
+  echo "pre-push: new infrastructure identifier in the pushed range; refusing push" >&2
+  exit 1
+fi
+echo "pre-push: secret and identifier scan clean" >&2

@@ -104,12 +104,27 @@ def runtime_jar_name(name):
     return not name.endswith(_NON_RUNTIME_CLASSIFIERS)
 
 
+# The thin Workshop jar (mod#262) shares build/libs/ with the game jars but is
+# never the Game server's runtime jar (boot fails with NoClassDefFoundError:
+# AnimationResourceGate). Game stands must never pick it by mtime.
+_WORKSHOP_JAR_PREFIX = "blockfield-workshop-"
+
+
 def newest_jar(directory, prefix=""):
-    """Newest runtime jar in a build/libs dir, ignoring *sources*/*dev* and classifier byproducts."""
+    """Newest runtime jar in a build/libs dir, ignoring *sources*/*dev* and classifier byproducts.
+
+    Workshop jars are excluded unless the caller asks for them explicitly
+    (prefix="blockfield-workshop-"): a newer Workshop rebuild must not win
+    the Game server's unprefixed scan by mtime.
+    """
+    want_workshop = prefix.startswith(_WORKSHOP_JAR_PREFIX)
     jars = [
         p
         for p in Path(directory).glob(f"{prefix}*.jar")
-        if "sources" not in p.name and "dev" not in p.name and runtime_jar_name(p.name)
+        if "sources" not in p.name
+        and "dev" not in p.name
+        and runtime_jar_name(p.name)
+        and (want_workshop or not p.name.startswith(_WORKSHOP_JAR_PREFIX))
     ]
     return max(jars, key=lambda p: p.stat().st_mtime, default=None)
 
@@ -222,6 +237,19 @@ def pin_commit(directory, tag):
     return out.strip() if out and out.strip() else None
 
 
+def fetch_pin_tag(directory, tag):
+    """Fetch one missing pin tag from origin; its commit, or None when unavailable."""
+    _git(
+        directory,
+        "fetch",
+        "--quiet",
+        "--no-recurse-submodules",
+        "origin",
+        f"refs/tags/{tag}:refs/tags/{tag}",
+    )
+    return pin_commit(directory, tag)
+
+
 def _dirty(directory):
     """Uncommitted changes, including untracked non-ignored files."""
     out = _git(directory, "status", "--porcelain")
@@ -281,9 +309,13 @@ def classify(root, dirname, entry):
     verdicts = []
     dirty = _dirty(directory)
     for metafile, tag in tags.items():
-        commit = pin_commit(directory, tag)
+        commit = pin_commit(directory, tag) or fetch_pin_tag(directory, tag)
         if not commit:
-            verdicts.append((metafile, LOCAL, f"pin tag {tag} not in local clone"))
+            # A clone without the pin tag is stale (golden VMs): its old build must not
+            # be installed under the pin's filename (2026-10-30: 1.55.3 shipped as 1.57.0).
+            verdicts.append(
+                (metafile, PIN, f"pin tag {tag} not in local clone or origin")
+            )
             continue
         if dirty:
             verdicts.append((metafile, LOCAL, "uncommitted changes"))
@@ -434,9 +466,16 @@ def write_stamp(home, dirname, directory, jars):
 
 
 def _default_runner(command, cwd):
+    # Path-derived: standalone `import modmap` has no scripts/ on PATH.
+    scripts = str(Path(__file__).resolve().parents[1])
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from toolchain import jdk_env
+
     completed = subprocess.run(
         [str(c) for c in command],
         cwd=cwd,
+        env=jdk_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

@@ -414,6 +414,8 @@ class PortablemcEnvironment(unittest.TestCase):
                     patch.object(devstack, "port_open", return_value=False),
                     patch.object(devstack, "java_exe", return_value="java"),
                     patch.dict(devstack.os.environ, {"BLOCKFIELD_DEV": "1"}),
+                    # Unit tests must not depend on host RAM: stub the source.
+                    patch.object(devstack, "_total_memory_gib", return_value=16.0),
                     patch.object(
                         devstack, "start_process", return_value=(1, None)
                     ) as start,

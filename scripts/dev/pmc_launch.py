@@ -7,6 +7,7 @@ username baked in and --quickPlayMultiplayer appended. Called by devstack.py pla
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ def main():
     parser.add_argument("--xmx", default="4G")
     parser.add_argument("--testbot-port", default=None)
     parser.add_argument("--debug-port", default=None)
+    parser.add_argument("--leak-paranoid", action="store_true")
     parser.add_argument("--resolution", default="1280x720")
     parser.add_argument("--server", default=None)
     args = parser.parse_args()
@@ -33,7 +35,12 @@ def main():
 
     ctx = Context(Path(args.main_dir), Path(args.game_dir))
     version = FabricVersion.with_fabric(args.minecraft, args.fabric, context=ctx)
-    java = shutil.which("java")
+    # JAVA_HOME is the pinned Temurin 21 under `just play` (boat-env.sh or the
+    # toolchain); PATH java is only the fallback for hand-rolled launches.
+    home = os.environ.get("JAVA_HOME", "")
+    java = shutil.which("java", path=str(Path(home) / "bin")) if home else None
+    if java is None:
+        java = shutil.which("java")
     if not java:
         parser.error("Java 21 is missing from PATH; launch through `just play`")
     version.jvm_path = Path(java)
@@ -48,6 +55,8 @@ def main():
         env.jvm_args.append(
             f"-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:{args.debug_port}"
         )
+    if args.leak_paranoid:
+        env.jvm_args.append("-Dio.netty.leakDetection.level=paranoid")
 
     natives = Path(args.natives_dir)
     shutil.rmtree(natives, ignore_errors=True)

@@ -14,6 +14,7 @@
     "KeyboardHandlerInvoker",
     "RawInputPollMixin",
     "RawInputFocusMixin",
+    "RawInputMouseGrabMixin",
     "RawModInputPollMixin",
     "RawClothInputPollMixin",
     "RawSbwCameraInputMixin",

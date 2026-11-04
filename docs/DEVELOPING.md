@@ -85,8 +85,17 @@ just test
 just dev --help
 ```
 
+Preflight запрещает основной checkout workspace по origin и Git metadata; linked worktrees и standalone clones других repo проходят. Без justfile: `python3 -I <worktree>/scripts/dev/agent_preflight.py`.
+`just agent-preflight [--source client=origin/main ...] [--mode upstream-main|pinned-candidate|task-branch]` показывает SHA источника, pin, fetched origin/main и behind каждого submodule.
+По умолчанию `upstream-main` предупреждает об отставшем pin и печатает `git -C <sub> show origin/main:<path>`; неразрешимый `--source` блокирует работу, checkout не меняется.
+`just pr-ship <repo> <branch>` использует rebase только до публикации ветки/PR; опубликованная ветка получает merge базы.
+Конфликт возвращает JSON `CONFLICT` с файлами без push; remote tip вне истории HEAD блокирует push, force-push запрещён.
+
 `lint` проверяет Python и workflows; `format-check` — формат отслеживаемого
 исходного кода и документации. `just format` применяет форматирование.
+`just setup` включает версионированный pre-push хук (`.githooks/pre-push` через
+`core.hooksPath`): каждый push запускает `just lint` и `just format-check` без Gradle
+(обход только через `--no-verify`).
 Общие правила LF, UTF-8, отступов и Windows-исключений закреплены в
 `.editorconfig` и `.gitattributes` каждого репозитория; подробности —
 [единый формат исходников](FORMATTING.md).
@@ -127,7 +136,7 @@ Rust — собственный кеш с разделением runner images. 
 Сайт использует собственные команды pnpm; бот — native Go. Они не входят
 в devstack workspace и не требуют Just.
 Серверные map/package/release checks доступны на обеих ОС. Контроллер мастерской
-и ZIP-validator выделены в [blockfield-workshop](https://github.com/Blockfield/blockfield-workshop);
+и ZIP-validator выделены в [blockfield-workshop](<private-repo>);
 server получает validator по полному SHA и checksum. Production Docker
 controller использует Linux и проверяется полным Linux CI. Его
 операционные команды на Windows завершаются явной ошибкой, без подмены результата.
@@ -138,7 +147,7 @@ zlib 1.3.2; проверяются версия сборки и runtime комп
 мастерской имеют собственный content hash и не являются пересборкой релиза.
 
 Для игрового мода сначала прочитайте целиком
-[`localmods/blockfield-mod/docs/AGENTS.md`](<private-submodule>/blob/main/docs/AGENTS.md).
+[`localmods/blockfield-mod/docs/AGENTS.md`](https://github.com/Blockfield/blockfield-mod/blob/main/docs/AGENTS.md).
 Его Java-проверки и тесты:
 
 ```sh
@@ -501,6 +510,20 @@ Watcher проверяет владельца процесса и не пере�
 
 ## Testbot и воспроизведение
 
+### Диагностика планшета
+
+На собственном headless-стенде с testbot: `just scenario tablet --team-map fields --dm-map dust2 --output .dev/tablet-run`.
+Команда проходит лобби, списки матчей/статистику, автоматическое назначение команды, класс,
+высадку, карту/меню в бою, смерть, reconnect, итог, голосование и следующий матч;
+проверяет Esc → M и сохраняет PNG + `manifest.json`. Отдельного выбора команды в текущем UI нет.
+Нужны карты с поддержкой `room` и `deathmatch`; FFA временно получает короткие правила,
+которые восстанавливаются, созданные комнаты закрываются. `--plan` показывает покрытие без игры.
+`--matrix` снимает каждое состояние при GUI 1–4 и 1280×720, 1366×768, 1920×1080,
+2560×1440, 3840×2160, 1024×768; фактический масштаб записан отдельно (Minecraft ограничивает его
+на малых окнах). `--current --matrix --output .dev/tablet-recheck` повторяет аудит открытого состояния.
+В матрице сервер временно заморожен; разрешение/GUI восстанавливаются. Результат требует осмотра
+текстовых областей с увеличением, само наличие PNG не подтверждает отсутствие обрезания.
+
 ```sh
 just setup --testbot
 just play
@@ -512,6 +535,23 @@ just server rcon "bf version"
 
 Перед `bot`, `scenario`, RCON и MCP подтвердите владельца процесса на соответствующем порту: сами TCP-команды не аутентифицируют принадлежность стенда сессии. Сценарии перечисляет команда
 `just scenario`; параметры каждой команды доступны через `--help`.
+Коды выхода сценариев: 0 — PASS, 1 — продуктовый FAIL, 2 — INCONCLUSIVE (сетап невалиден, а не продукт сломан: нет второго клиента, жертва не задеплоена, защита ещё активна, вердикт по бою не собран); INCONCLUSIVE никогда не считается продуктовым результатом.
+
+## RC check
+
+```sh
+just scenario rc [--map hamburg] [--hitreg-shots 10]
+```
+
+Батарея релиз-кандидата: сначала сверяет загруженный мод (`bf version`, логи
+клиента/сервера) с пинами `client/mods/blockfield-client.pw.toml` и
+`server/mods/blockfield-server.pw.toml` — расхождение останавливает прогон;
+дальше идут first-shot после деплоя, планшет в лобби, килл на дистанции,
+смерть/респаун TDM на `spawn:BASE`, дым hitreg, скан логов и `save-all`.
+Итог — одна таблица PASS/FAIL/SKIP на проверку с evidence-строками, выход
+ненулевой при любом FAIL. Второй клиент нужен только для килла и TDM
+(без него они SKIP, а не FAIL). Для релизного гейта (`docs/RELEASE-GATE.md`):
+`just scenario rc --record rc.json --tag-client vX --tag-server vY`.
 Для проверки оператора оружия используйте команды `tacz` testbot; для реальных
 клавиатурных и мышиных callbacks игры — `rawinput`. Обычный `press` посылает
 click keybinding и не заменяет удержание клавиши. Перед проверкой подтвердите версию/JAR,
@@ -1033,7 +1073,7 @@ Workspace не публикует игровой релиз. Теги `vX.Y.Z` *
 Изменение `side = "both"` требует согласованного парного выпуска, сервер первым.
 Клиентские конфиги/HUD не меняют этот контракт. Для каждой версии нужны release
 notes с `backfilled: false` и последней опубликованной `previous_version` линии.
-Подробности — [release notes](<private-submodule>/blob/main/docs/RELEASE-NOTES.md) и
+Подробности — [release notes](https://github.com/Blockfield/blockfield-client/blob/main/docs/RELEASE-NOTES.md) и
 [DEPLOY](<private-submodule>/blob/main/docs/DEPLOY.md); устаревшие инструкции монолитного modpack не применяются.
 
 ### `just release`: подготовка выпуска
@@ -1155,3 +1195,19 @@ worktrees и coordinator защищены. Живые PID-записи и про
 только через Linux `/proc`; недоступный процесс того же пользователя
 также запрещает очистку. На Windows команда отказывает без удаления.
 Общий кеш не очищается этой командой.
+
+### Продолжение пары после публикации клиента
+
+Если клиент уже опубликован, а сервер ещё не получил candidate, используйте
+`just release ship --mod vX.Y.Z --resume-client-published CLIENT_TAG SERVER_TAG CLIENT_TREE SERVER_TREE`
+с обычными RC/waiver и owner-confirmation флагами. Сначала выполните `--dry-run`.
+Передайте полные tree SHA принятого RC клиента и сервера. Команда проверяет
+неизменность client tag и server release branch, требует отсутствие server tag,
+повторно проверяет публикацию и stage клиента, затем продолжает candidate, server
+merge/tag, Deploy пары и pin. Клиент повторно не тегируется. Другие точки
+возобновления этот режим отклоняет; после candidate требуется отдельная проверка состояния.
+
+Если автоматический Deploy клиента был пропущен, после отдельно разрешённого
+stage добавьте `--client-stage-run RUN_ID`. Проверяются успешный main dispatch
+`deploy.yml`, запись staging именно этого тега и пропущенное продвижение в Latest.
+Неуспешный автоматический Deploy этим флагом не обходится.

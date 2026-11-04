@@ -854,6 +854,136 @@ class SubmoduleUrlTest(unittest.TestCase):
         self.assertFalse((out / ".gitmodules").exists())
 
 
+class WorkspacePublicTreeTest(unittest.TestCase):
+    """Workspace sterile tree (ws#13a): public repos stay linked, LICENSE fixed."""
+
+    def test_public_submodule_allowlist_covers_client_and_mod(self):
+        policy = real_policy(self)
+        self.assertIn("client", policy["public_submodule_paths"])
+        self.assertIn("localmods/blockfield-mod", policy["public_submodule_paths"])
+
+    def test_client_and_mod_urls_survive_server_url_goes(self):
+        policy = real_policy(self)
+        modules = (
+            '[submodule "client"]\n\tpath = client\n'
+            "\turl = https://github.com/Blockfield/synth-client.git\n"
+            '[submodule "mod"]\n\tpath = localmods/blockfield-mod\n'
+            "\turl = https://github.com/Blockfield/synth-mod.git\n"
+            '[submodule "server"]\n\tpath = server\n'
+            "\turl = https://github.com/Blockfield/synth-server.git\n"
+        )
+        docs = (
+            "see https://github.com/Blockfield/synth-client/blob/main/README.md\n"
+            "see https://github.com/Blockfield/synth-mod/blob/main/CLAUDE.md\n"
+            "see https://github.com/Blockfield/synth-server/blob/main/docs/DEPLOY.md\n"
+        )
+        files = {
+            ".gitmodules": (modules.encode(), 0o644),
+            "docs/n.md": (docs.encode(), 0o644),
+        }
+        payload, _, _ = public_export.build_payload(
+            files,
+            ["client", "localmods/blockfield-mod", "server"],
+            [],
+            [],
+            modules.encode(),
+            policy,
+        )
+        text = payload["docs/n.md"][1].decode()
+        self.assertIn(
+            "https://github.com/Blockfield/synth-client/blob/main/README.md", text
+        )
+        self.assertIn(
+            "https://github.com/Blockfield/synth-mod/blob/main/CLAUDE.md", text
+        )
+        self.assertNotIn("synth-server", text)
+        self.assertIn("<private-submodule>", text)
+        self.assertFalse(
+            any(r == ".gitmodules" for r in payload),
+            ".gitmodules stays excluded from the public tree",
+        )
+
+    def test_public_license_replaces_source_text(self):
+        policy = real_policy(self)
+        files = {
+            "LICENSE": (
+                b"Copyright (c) 2026 Acme contributors. All rights reserved.\n",
+                0o644,
+            ),
+            "docs/n.md": (b"clean\n", 0o644),
+        }
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertEqual(
+            payload["LICENSE"][1],
+            b"Copyright (c) 2026 Blockfield. All rights reserved.\n",
+        )
+
+    def test_license_keys_flow_into_payload(self):
+        # Synthetic policy: the license file lands byte-exact and passes the
+        # public re-check, with no private policy involved.
+        public = json.loads(CONFIG.read_text())
+        public["license_path"] = "LICENSE"
+        public["license_text"] = "Copyright (c) 2026 Acme. All rights reserved.\n"
+        private = {
+            "version": 1,
+            "replacements": [],
+            "drop_sections": [],
+            "banned_tokens": [],
+        }
+        repo, summary, out = export_fixture(
+            self,
+            {"LICENSE": "old\n", "n.txt": "clean\n"},
+            private=private,
+            public=public,
+        )
+        self.assertEqual(
+            (out / "LICENSE").read_text(),
+            "Copyright (c) 2026 Acme. All rights reserved.\n",
+        )
+        result = public_export.check_tree(out)
+        self.assertEqual(result["tree_files"], summary["tree_files"])
+
+    def test_private_repo_urls_rewritten_and_gated(self):
+        # Tokens load from the excluded private policy at runtime only.
+        policy = real_policy(self)
+        tokens = [
+            entry["token"]
+            for entry in policy["banned_tokens"]
+            if isinstance(entry, dict) and entry.get("hint") == "private-repo"
+        ]
+        self.assertTrue(tokens, "private-repo tokens must exist")
+        files = {
+            "docs/n.md": (
+                "".join(
+                    f"see https://{token}/blob/main/docs/X.md\n" for token in tokens
+                ).encode(),
+                0o644,
+            ),
+            "scripts/tool.py": (
+                "".join(f'URL = "https://{token}.git"\n' for token in tokens).encode(),
+                0o644,
+            ),
+        }
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        for rel in ("docs/n.md", "scripts/tool.py"):
+            text = payload[rel][1].decode()
+            self.assertIn("<private-repo>", text)
+            for token in tokens:
+                self.assertNotIn(token, text)
+                self.assertNotIn(token.upper(), text)
+        for token in tokens:
+            with self.subTest(path=token):
+                with self.assertRaises(SystemExit):
+                    public_export.build_payload(
+                        {f"docs/{token}.md": (b"clean\n", 0o644)},
+                        [],
+                        [],
+                        [],
+                        None,
+                        policy,
+                    )
+
+
 class CheckModeTest(unittest.TestCase):
     def test_check_passes_clean_tree(self):
         repo, summary, out = export_fixture(self, {"docs/n.md": "clean\n"})
@@ -1275,5 +1405,971 @@ class PrivatePolicyTest(unittest.TestCase):
         self.assertIn("private export policy missing", str(ctx.exception))
 
 
+CLIENT_CONFIG = HERE.parents[2] / "public_export_client.json"
+
+
+class ClientOverlayTest(unittest.TestCase):
+    """Client sterile-export overlay: deploy stays private, pack data passes."""
+
+    def overlay_policy(self):
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        return public_export.load_policy(str(CONFIG), str(PRIVATE), str(CLIENT_CONFIG))
+
+    def bare_policy(self):
+        """Overlay policy without the workflow inventory (content-scan fixtures)."""
+        policy = dict(self.overlay_policy())
+        policy.pop("allowed_workflows", None)
+        policy.pop("stub_files", None)
+        policy.pop("license_path", None)
+        policy.pop("license_text", None)
+        return policy
+
+    def test_overlay_file_is_public_safe(self):
+        overlay = json.loads(CLIENT_CONFIG.read_text())
+        self.assertEqual(overlay["repo"], "client")
+        if HAS_PRIVATE:
+            policy = public_export.load_policy(str(CONFIG), str(PRIVATE))
+            variants = set()
+            for entry in policy["banned_tokens"]:
+                token = entry["token"] if isinstance(entry, dict) else entry
+                variants.add(token)
+                variants.add(token.upper())
+            text = CLIENT_CONFIG.read_text(encoding="utf-8")
+            hits = [v for v in variants if v and v in text]
+            self.assertEqual(hits, [], "private literals in client overlay")
+
+    def test_resolve_target(self):
+        repo, config, private, overlay = public_export.resolve_target("client")
+        self.assertEqual(Path(overlay).name, "public_export_client.json")
+        self.assertEqual(Path(private).name, "public_export_private.json")
+        self.assertEqual(Path(repo).name, "client")
+        if HAS_PRIVATE:
+            self.assertTrue(Path(private).is_file())
+            self.assertTrue(Path(repo).is_dir())
+        with self.assertRaises(SystemExit):
+            public_export.resolve_target("no-such-target")
+
+    def test_overlay_excludes_deploy_cluster(self):
+        policy = self.overlay_policy()
+        for rel in (
+            ".github/workflows/deploy.yml",
+            "scripts/deploy-client.py",
+            "scripts/deploy-webhooks.py",
+            "scripts/workshop-deploy.py",
+            "scripts/pack-swap.py",
+            "scripts/check-deployed.py",
+            "scripts/update-pack-gate.py",
+            "tests/test_deploy.py",
+            "tests/test_deploy_webhooks.py",
+            "tests/test_workshop_deploy.py",
+            "tests/test_pack_swap.py",
+            "tests/test_live_pack_gate.py",
+        ):
+            self.assertIn(rel, policy["exclude_paths"], rel)
+
+    def test_overlay_keeps_pack_workflows(self):
+        policy = self.overlay_policy()
+        self.assertEqual(
+            sorted(policy["allowed_workflows"]),
+            [
+                ".github/workflows/client.yml",
+                ".github/workflows/deploy.yml",
+                ".github/workflows/pr-text.yml",
+            ],
+        )
+
+    def test_deploy_stub_replaces_excluded_original(self):
+        policy = self.overlay_policy()
+        stub = policy["stub_files"][".github/workflows/deploy.yml"]
+        self.assertIn("workflow_call", stub)
+        self.assertIn("tag", stub)
+        self.assertNotIn("blockfield-deploy", stub)
+        # Split so this test file itself survives the export unchanged.
+        private = (
+            "runs-on: blockfield-deploy\n    steps:\n      - run: echo blockfield-proxy-"
+            + "abcdef\n"
+        )
+        files = {
+            ".github/workflows/deploy.yml": (private.encode(), 0o644),
+            ".github/workflows/client.yml": (
+                b"jobs:\n  deploy:\n    uses: ./.github/workflows/deploy.yml\n",
+                0o644,
+            ),
+            ".github/workflows/pr-text.yml": (b"on: push\n", 0o644),
+        }
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertEqual(payload[".github/workflows/deploy.yml"][1].decode(), stub)
+
+    def test_deploy_stub_passes_actionlint(self):
+        policy = self.overlay_policy()
+        stub = policy["stub_files"][".github/workflows/deploy.yml"]
+        actionlint = shutil.which("actionlint")
+        if actionlint is None and not HAS_PRIVATE:
+            self.skipTest("actionlint not on PATH")
+        self.assertIsNotNone(actionlint, "actionlint not on PATH")
+        with tempfile.TemporaryDirectory() as tmp:
+            caller = (
+                "on: push\njobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "    with:\n      tag: v1\n"
+                "    secrets: inherit\n"
+            )
+            Path(tmp, "deploy.yml").write_text(stub)
+            Path(tmp, "caller.yml").write_text(caller)
+            result = subprocess.run(
+                [actionlint, "-no-color", f"{tmp}/caller.yml", f"{tmp}/deploy.yml"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, msg=result.stdout)
+
+    def test_deploy_stub_runs_pinned_runner(self):
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        policy = public_export.load_policy(
+            str(CONFIG), str(PRIVATE), str(CLIENT_CONFIG)
+        )
+        stub = policy["stub_files"][".github/workflows/deploy.yml"]
+        self.assertIn("runs-on: ubuntu-24.04", stub)
+        self.assertNotIn("ubuntu-latest", stub)
+
+    def test_overlay_stays_synced_with_base_forbidden(self):
+        base = public_export.load_config(str(CONFIG))
+        policy = self.overlay_policy()
+        merged = {rule["id"]: rule for rule in policy["forbidden"]}
+        for rule in base["forbidden"]:
+            self.assertIn(rule["id"], merged)
+            self.assertEqual(merged[rule["id"]]["pattern"], rule["pattern"])
+
+    def test_pack_manifest_opaque_names_pass(self):
+        policy = self.bare_policy()
+        # Split so this test file itself survives the export unchanged.
+        # Fixtures mirror real manifest shapes: the opaque run never spans a
+        # whole quoted value, so only the assigned+bare gates (still exempt in
+        # manifests) fire, not the re-armed quoted/backtick gates.
+        stem = "SynthOnly" + "-ModAlpha99-v1"
+        files = {
+            "mods/a.pw.toml": (f'filename = "{stem}.jar"\n'.encode(), 0o644),
+            "shaderpacks/b.pw.toml": (f'filename = "{stem}.zip"\n'.encode(), 0o644),
+            "launcher.json": (
+                f'{{"dl": {{"url": "https://example.invalid/p/{stem}/x"}}}}\n'.encode(),
+                0o644,
+            ),
+        }
+        key = "F3CopyIn" + "Inventory"
+        files["config/kiwi-client.yaml"] = (f"{key}: true\n".encode(), 0o644)
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertEqual(len(payload), 4)
+
+    def test_opaque_patches_are_scoped_per_gate(self):
+        policy = self.bare_policy()
+        by_id = {rule["id"]: rule for rule in policy["forbidden"]}
+        # Probe (client a548bad, no patches): backtick/quoted never fire,
+        # assigned fires only in pack manifests, bare only in manifests,
+        # launcher.json and one config key. No gate stays blanket-exempt.
+        self.assertEqual(by_id["f-opaque-backtick"].get("except_paths", []), [])
+        self.assertEqual(by_id["f-opaque-quoted"].get("except_paths", []), [])
+        self.assertEqual(
+            by_id["f-opaque-assigned"].get("except_paths"),
+            ["mods/*.pw.toml", "shaderpacks/*.pw.toml"],
+        )
+        bare = by_id["f-opaque-bare"]
+        self.assertEqual(
+            bare.get("except_paths"),
+            ["mods/*.pw.toml", "shaderpacks/*.pw.toml", "launcher.json"],
+        )
+        self.assertIn("F3CopyIn" + "Inventory", bare.get("allow_exact", []))
+
+    def test_scoped_opaque_gates_still_fire_elsewhere(self):
+        policy = self.bare_policy()
+        stem = "SynthOnly" + "ModAlpha99"
+        ok = {
+            rel: (f'filename = "{stem}.jar"\n'.encode(), 0o644)
+            for rel in ["mods/a.pw.toml", "shaderpacks/b.pw.toml"]
+        }
+        payload, _, _ = public_export.build_payload(ok, [], [], [], None, policy)
+        self.assertEqual(len(payload), 2)
+        # Same token outside a pack manifest stays gated (assigned and bare).
+        bad = {"config/other.toml": (f'filename = "{stem}.jar"\n'.encode(), 0o644)}
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-opaque-", str(ctx.exception))
+        # Backtick/quoted gates are re-armed inside manifests too.
+        for rule, text in (
+            ("f-opaque-backtick", f"`{stem}`\n"),
+            ("f-opaque-quoted", f'"{stem}"\n'),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                public_export.build_payload(
+                    {"mods/a.pw.toml": (text.encode(), 0o644)},
+                    [],
+                    [],
+                    [],
+                    None,
+                    policy,
+                )
+            self.assertIn(rule, str(ctx.exception))
+        # launcher.json keeps only the bare exemption: assigned still fires.
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(
+                {"launcher.json": (f'"dl": {stem}\n'.encode(), 0o644)},
+                [],
+                [],
+                [],
+                None,
+                policy,
+            )
+        self.assertIn("f-opaque-assigned", str(ctx.exception))
+
+    def test_patch_return_label_passes(self):
+        policy = self.bare_policy()
+        files = {
+            "tools/packwiz-installer/installer.patch": (
+                b"+                        return@" + b"createContext\n",
+                0o644,
+            )
+        }
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertIn("tools/packwiz-installer/installer.patch", payload)
+
+    def test_synthetic_hook_fixtures_pass(self):
+        policy = self.bare_policy()
+        # Fixture values come from the overlay itself so no raw literal that
+        # matches the pre-push identifier grep ever appears in this file.
+        suffix_rule = next(r for r in policy["forbidden"] if r["id"] == "f-app-suffix")
+        allowed = list(suffix_rule.get("allow_exact", []))
+        self.assertTrue(allowed, "overlay must pin the synthetic fixture values")
+        files = {
+            "tests/test_hooks.py": (
+                "".join(f"endpoint {value} !\n" for value in allowed).encode()
+                + b"GIT_AUTHOR_EMAIL=t@"
+                + b"t\n",
+                0o644,
+            )
+        }
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertIn("tests/test_hooks.py", payload)
+
+    def test_new_hook_suffix_still_fails(self):
+        policy = self.bare_policy()
+        fresh = "blockfield-proxy-" + "zzz999"  # split: never raw in this file
+        bad = {"tests/test_hooks.py": (f"endpoint {fresh} !\n".encode(), 0o644)}
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-app-suffix", str(ctx.exception))
+
+    def test_base_suffix_gate_has_no_overlay_path_exemption(self):
+        # Review #269: the workspace gate must exempt only the reviewed
+        # fixture values on the overlay file, never the whole file.
+        base = public_export.load_config(str(CONFIG))
+        suffix = next(r for r in base["forbidden"] if r["id"] == "f-app-suffix")
+        self.assertEqual(suffix.get("except_paths", []), [])
+        overlay = json.loads(CLIENT_CONFIG.read_text(encoding="utf-8"))
+        pinned = overlay["rule_patches"]["f-app-suffix"]["allow_exact"]
+        self.assertTrue(pinned, "overlay must pin the synthetic fixture values")
+        self.assertEqual(sorted(suffix.get("allow_exact", [])), sorted(pinned))
+
+    def test_base_email_gate_has_no_overlay_path_exemption(self):
+        # Review #269: the workspace no-TLD-email gate must exempt only the
+        # reviewed fixture values on the overlay file, never the whole file.
+        base = public_export.load_config(str(CONFIG))
+        rule = next(r for r in base["forbidden"] if r["id"] == "f-email-no-tld")
+        self.assertEqual(rule.get("except_paths", []), [])
+        overlay = json.loads(CLIENT_CONFIG.read_text(encoding="utf-8"))
+        pinned = overlay["rule_patches"]["f-email-no-tld"]["allow_exact"]
+        self.assertTrue(pinned, "overlay must pin the reviewed email fixtures")
+        self.assertEqual(sorted(rule.get("allow_exact", [])), sorted(pinned))
+
+    def test_new_overlay_suffix_still_fails(self):
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        policy = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        fresh = "blockfield-proxy-" + "zzz999"  # split: never raw in this file
+        bad = {
+            "scripts/public_export_client.json": (
+                f"overlay pins {fresh}\n".encode(),
+                0o644,
+            )
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-app-suffix", str(ctx.exception))
+
+    def test_new_overlay_address_still_fails(self):
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        policy = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        fresh = "ops@" + "internal"  # split: never raw in this file
+        bad = {
+            "scripts/public_export_client.json": (
+                f"contact {fresh}\n".encode(),
+                0o644,
+            )
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-email-no-tld", str(ctx.exception))
+
+    def test_installer_patch_exemption_is_value_scoped(self):
+        # Review #269: the client overlay must exempt the reviewed patch
+        # match, not the whole installer patch file.
+        overlay = json.loads(CLIENT_CONFIG.read_text(encoding="utf-8"))
+        patch = overlay["rule_patches"]["f-email-no-tld"]
+        self.assertEqual(patch.get("except_paths", []), [])
+        self.assertIn("return@createContext", patch.get("allow_exact", []))
+        policy = self.bare_policy()
+        good = {
+            "tools/packwiz-installer/installer.patch": (
+                b"+                        return@createContext\n",
+                0o644,
+            )
+        }
+        payload, _, _ = public_export.build_payload(good, [], [], [], None, policy)
+        self.assertIn("tools/packwiz-installer/installer.patch", payload)
+        fresh = "ops@" + "internal"  # split: never raw in this file
+        bad = {
+            "tools/packwiz-installer/installer.patch": (
+                f"contact {fresh}\n".encode(),
+                0o644,
+            )
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-email-no-tld", str(ctx.exception))
+
+    def test_client_target_drops_path_token_exemptions(self):
+        # Review #269: workspace-reviewed path exemptions for private
+        # literals must not silently cover client files at the same paths.
+        # Whole-file exempts and spelling exempts are dropped; only the
+        # overlay-declared word paths carry over to the target export.
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        base = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        self.assertTrue(
+            any(
+                isinstance(e, dict) and e.get("except_paths")
+                for e in base["banned_tokens"]
+            ),
+            "base policy must keep its reviewed path exemptions",
+        )
+        overlay = json.loads(CLIENT_CONFIG.read_text(encoding="utf-8"))
+        keep = overlay.get("banned_token_word_paths", [])
+        self.assertTrue(keep, "overlay must declare its reviewed word paths")
+        client = self.overlay_policy()
+        for entry in client["banned_tokens"]:
+            if not isinstance(entry, dict):
+                continue
+            self.assertEqual(entry.get("except_paths", []), [])
+            self.assertEqual(entry.get("except_spellings", []), [])
+            for word in entry.get("except_words", []):
+                self.assertIn(word.get("path"), keep)
+        kept = [
+            (w.get("path"), w.get("word"))
+            for e in client["banned_tokens"]
+            if isinstance(e, dict)
+            for w in e.get("except_words", [])
+        ]
+        self.assertTrue(kept, "declared word exemptions must survive")
+
+    def test_client_export_rejects_workspace_exempted_literal(self):
+        # Review #269: a private literal at a workspace-exempted path in the
+        # client tree must fail the client export. Token loads from the
+        # excluded private policy at runtime only, never spelled here.
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        base = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        token = next(
+            e["token"]
+            for e in base["banned_tokens"]
+            if isinstance(e, dict) and e.get("hint") == "org-name"
+        )
+        policy = self.bare_policy()
+        bad = {
+            "docs/assets-manifest.json": (f"owner {token}\n".encode(), 0o644),
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("token:org-name", str(ctx.exception))
+
+    def test_client_export_rejects_workspace_spelling(self):
+        # Review #269: a workspace-reviewed spelling exemption must not cover
+        # the same path in the client tree either. Spelling loads from the
+        # excluded private policy at runtime only, never spelled here.
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        base = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        spelling = next(
+            (
+                w["spelling"]
+                for e in base["banned_tokens"]
+                if isinstance(e, dict) and e.get("hint") == "identity"
+                for w in e.get("except_spellings", []) or []
+                if w.get("path") == "docs/assets-manifest.json"
+            ),
+            None,
+        )
+        self.assertIsNotNone(spelling, "base policy must keep its spelling")
+        policy = self.bare_policy()
+        bad = {
+            "docs/assets-manifest.json": (f"owner {spelling}\n".encode(), 0o644),
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("token:identity", str(ctx.exception))
+
+    def test_kept_word_still_passes_client_export(self):
+        # The overlay-declared review carries the shared config word over so
+        # the real client file keeps passing the target export.
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        base = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        overlay = json.loads(CLIENT_CONFIG.read_text(encoding="utf-8"))
+        keep = overlay.get("banned_token_word_paths", [])
+        pair = next(
+            (
+                (w["path"], w["word"])
+                for e in base["banned_tokens"]
+                if isinstance(e, dict)
+                for w in e.get("except_words", []) or []
+                if w.get("path") in keep
+            ),
+            None,
+        )
+        self.assertIsNotNone(pair, "overlay keep-list must match a base word")
+        policy = self.bare_policy()
+        rel, word = pair
+        payload, _, _ = public_export.build_payload(
+            {rel: (f"key {word}=4.0\n".encode(), 0o644)}, [], [], [], None, policy
+        )
+        self.assertIn(rel, payload)
+
+    def test_overlay_carries_no_raw_identifier_literals(self):
+        # The workspace pre-push hook greps raw added lines for the
+        # infrastructure-identifier shape: fixture values in the overlay must
+        # stay \u-escaped so pushing this file never trips that gate.
+        text = CLIENT_CONFIG.read_text(encoding="utf-8")
+        overlay = json.loads(text)
+        values = overlay["rule_patches"]["f-app-suffix"]["allow_exact"]
+        self.assertTrue(values, "f-app-suffix must pin exact fixture values")
+        for value in values:
+            self.assertNotIn(value, text)
+            self.assertRegex(value, r"\Ablockfield-proxy-[a-z0-9]{6}\Z")
+
+    def test_checkout_tag_passes_but_real_suffix_fails(self):
+        policy = self.bare_policy()
+        good = {
+            ".github/workflows/client.yml": (
+                b"- uses: actions/checkout@" + b"v4\n",
+                0o644,
+            )
+        }
+        payload, _, _ = public_export.build_payload(good, [], [], [], None, policy)
+        self.assertIn(".github/workflows/client.yml", payload)
+        bad = {
+            "scripts/n.txt": (b"app `blockfield-proxy-" + b"abcdef`\n", 0o644),
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-app-suffix", str(ctx.exception))
+
+    def test_unexpected_workflow_rejected(self):
+        policy = self.overlay_policy()
+        files = {
+            ".github/workflows/client.yml": (b"on: push\n", 0o644),
+            ".github/workflows/extra.yml": (b"on: push\n", 0o644),
+        }
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(files, [], [], [], None, policy)
+        self.assertIn("unexpected workflow inventory", str(ctx.exception))
+
+    def test_nonallowlisted_binary_rejected(self):
+        policy = self.bare_policy()
+        payload = {"assets/icon.png": ("file", b"\x00\x01binary", 0o644)}
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.verify_allowed_binaries(payload, policy["allowed_binaries"])
+        self.assertIn("binary file not allowlisted", str(ctx.exception))
+
+    def test_single_commit(self):
+        make_repo(self, {"n.txt": "clean\n"})
+        out = Path(tempfile.mkdtemp(prefix="export-commit-"))
+        self.addCleanup(shutil.rmtree, out, True)
+        target = out / "tree"
+        (target).mkdir(parents=True, exist_ok=True)
+        (target / "n.txt").write_text("clean\n")
+        sha = public_export.commit_tree(
+            target, "Sterile export test", "2026-10-31T12:00:00+00:00"
+        )
+        self.assertRegex(sha, r"\A[0-9a-f]{40}\Z")
+        log = (
+            subprocess.run(
+                ["git", "-C", str(target), "rev-list", "--count", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        self.assertEqual(log, "1")
+
+    def test_commit_pins_source_date(self):
+        target = Path(tempfile.mkdtemp(prefix="export-commit-date-"))
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "n.txt").write_text("clean\n")
+        date = "2026-10-31T12:00:00+00:00"
+        public_export.commit_tree(target, "Sterile export test", date)
+        # Git prints a zero UTC offset as Z (newer) or +00:00 (older, e.g.
+        # the Boat golden image's git 2.43); the stored instant is exact
+        # either way, and both spellings denote that same instant.
+        want = ("2026-10-31T12:00:00Z", "2026-10-31T12:00:00+00:00")
+        author = (
+            subprocess.run(
+                ["git", "-C", str(target), "show", "-s", "--format=%aI", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        committer = (
+            subprocess.run(
+                ["git", "-C", str(target), "show", "-s", "--format=%cI", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        self.assertIn(author, want)
+        self.assertIn(committer, want)
+
+    def test_commit_is_reproducible_for_source_date(self):
+        date = "2026-10-31T12:00:00+00:00"
+        shas = []
+        for prefix in ("export-commit-repro-a-", "export-commit-repro-b-"):
+            target = Path(tempfile.mkdtemp(prefix=prefix))
+            self.addCleanup(shutil.rmtree, target, True)
+            (target / "n.txt").write_text("clean\n")
+            shas.append(public_export.commit_tree(target, "Sterile export", date))
+        self.assertEqual(shas[0], shas[1])
+
+    def test_commit_keeps_gitignored_payload_files(self):
+        # A source commit may force-track files matching the exported tree's
+        # .gitignore (or the user's global excludes): the commit must keep
+        # every on-disk payload file, not just the unignored ones.
+        target = Path(tempfile.mkdtemp(prefix="export-commit-ignore-"))
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / ".gitignore").write_text("*.log\n")
+        (target / "app.log").write_text("payload\n")
+        (target / "keep.txt").write_text("payload\n")
+        home = Path(tempfile.mkdtemp(prefix="export-commit-home-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".config" / "git").mkdir(parents=True)
+        (home / ".config" / "git" / "ignore").write_text("keep.txt\n")
+        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(home)}
+        with mock.patch.dict(os.environ, env):
+            public_export.commit_tree(
+                target, "Sterile export test", "2026-10-31T12:00:00+00:00"
+            )
+            tracked = (
+                subprocess.run(
+                    ["git", "-C", str(target), "ls-files"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    env={**os.environ, **env},
+                )
+                .stdout.decode()
+                .split()
+            )
+        self.assertIn("app.log", tracked)
+        self.assertIn("keep.txt", tracked)
+
+    def test_commit_keeps_exact_bytes_despite_conversion(self):
+        # Review #269: core.autocrlf/eol and attribute filters must not
+        # rewrite payload bytes; the same source commits identically
+        # on every machine.
+        shas = []
+        for prefix, hostile in (
+            ("export-commit-crlf-plain-", False),
+            ("export-commit-crlf-hostile-", True),
+        ):
+            target = Path(tempfile.mkdtemp(prefix=prefix))
+            self.addCleanup(shutil.rmtree, target, True)
+            (target / ".gitattributes").write_text("*.txt text eol=crlf\n")
+            (target / "notes.txt").write_bytes(b"one\r\ntwo\r\n")
+            env = (
+                {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "core.autocrlf",
+                    "GIT_CONFIG_VALUE_0": "true",
+                }
+                if hostile
+                else {}
+            )
+            with mock.patch.dict(os.environ, env):
+                shas.append(
+                    public_export.commit_tree(
+                        target,
+                        "Sterile export test",
+                        "2026-10-31T12:00:00+00:00",
+                    )
+                )
+            stored = subprocess.run(
+                ["git", "-C", str(target), "show", "HEAD:notes.txt"],
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            self.assertEqual(stored, b"one\r\ntwo\r\n")
+        self.assertEqual(shas[0], shas[1])
+
+    def test_commit_ignores_caller_git_dir(self):
+        # Review #269: an export run from a hook (or any GIT_DIR-carrying
+        # environment) must not read or clobber the caller's repository.
+        victim = make_repo(self, {"v.txt": "victim\n"})
+        before = (
+            subprocess.run(
+                ["git", "-C", str(victim), "rev-parse", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        target = Path(tempfile.mkdtemp(prefix="export-commit-gitdir-"))
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "n.txt").write_text("clean\n")
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(victim / ".git")}):
+            sha = public_export.commit_tree(
+                target, "Sterile export test", "2026-10-31T12:00:00+00:00"
+            )
+        after = (
+            subprocess.run(
+                ["git", "-C", str(victim), "rev-parse", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        self.assertEqual(before, after)
+        self.assertTrue((target / ".git").is_dir())
+        self.assertRegex(sha, r"\A[0-9a-f]{40}\Z")
+
+    def test_git_blob_ignores_caller_git_dir(self):
+        # Review #269: manifest reads for the export must come from the
+        # target repo even when the caller environment selects another one.
+        src = make_repo(self, {".gitmodules": '[submodule "x"]\n', "n.txt": "clean\n"})
+        other = make_repo(self, {"n.txt": "clean\n"})
+        want = subprocess.run(
+            ["git", "-C", str(src), "show", "HEAD:.gitmodules"],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
+            got = public_export.git_blob("HEAD", ".gitmodules", repo=src)
+        self.assertEqual(got, want)
+
+    def test_commit_ignores_caller_object_store(self):
+        # Review #269: the export objects must land in the output repo even
+        # when the caller environment points Git at an external object store.
+        target = Path(tempfile.mkdtemp(prefix="export-commit-objstore-"))
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "n.txt").write_text("clean\n")
+        store = Path(tempfile.mkdtemp(prefix="export-external-store-"))
+        self.addCleanup(shutil.rmtree, store, True)
+        with mock.patch.dict(os.environ, {"GIT_OBJECT_DIRECTORY": str(store)}):
+            sha = public_export.commit_tree(
+                target, "Sterile export test", "2026-10-31T12:00:00+00:00"
+            )
+        kind = (
+            subprocess.run(
+                ["git", "-C", str(target), "cat-file", "-t", sha],
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        self.assertEqual(kind, "commit")
+
+    def test_client_target_uses_own_submodule_allowlist(self):
+        # Review #269: the client target must not inherit the workspace
+        # public-submodule paths; a client-private URL at such a path must
+        # be scrubbed from the export. The synthetic URL is split so no raw
+        # literal resembling it ever appears in this file.
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        base = public_export.load_policy(str(CONFIG), str(PRIVATE))
+        self.assertEqual(
+            sorted(base["public_submodule_paths"]),
+            [
+                "client",
+                "localmods/blockfield-mod",
+                "localmods/create-fabric",
+                "localmods/parcool-fabric",
+                "localmods/simplebedrockmodel-fabric",
+                "localmods/superbwarfare-fabric",
+            ],
+        )
+        client = self.overlay_policy()
+        self.assertEqual(client["public_submodule_paths"], [])
+        policy = self.bare_policy()
+        self.assertEqual(policy["public_submodule_paths"], [])
+        stem = "https://example" + ".invalid/x-mod.git"
+        modules = (
+            '[submodule "localmods/create-fabric"]\n'
+            "\tpath = localmods/create-fabric\n"
+            f"\turl = {stem}\n"
+        ).encode()
+        files = {"localmods/create-fabric/note.txt": f"see {stem}\n".encode()}
+        encoded = {r: (d, 0o644) for r, d in files.items()}
+        payload, _, _ = public_export.build_payload(
+            encoded, ["localmods/create-fabric"], [], [], modules, policy
+        )
+        text = payload["localmods/create-fabric/note.txt"][1].decode()
+        self.assertIn("<private-submodule>", text)
+        self.assertNotIn(stem, text)
+        payload, _, _ = public_export.build_payload(
+            encoded,
+            ["localmods/create-fabric"],
+            [],
+            [],
+            modules,
+            base,
+        )
+        text = payload["localmods/create-fabric/note.txt"][1].decode()
+        self.assertIn(stem, text)
+
+    def test_commit_ignores_caller_template_dir(self):
+        # Review #269: the export repo must not inherit the caller's Git
+        # template directory (private hooks/files would land unscanned).
+        target = Path(tempfile.mkdtemp(prefix="export-commit-template-"))
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "n.txt").write_text("clean\n")
+        template = Path(tempfile.mkdtemp(prefix="export-foreign-template-"))
+        self.addCleanup(shutil.rmtree, template, True)
+        hooks = template / "hooks"
+        hooks.mkdir()
+        (hooks / "post-checkout").write_text("#!/bin/sh\necho foreign\n")
+        with mock.patch.dict(os.environ, {"GIT_TEMPLATE_DIR": str(template)}):
+            sha = public_export.commit_tree(
+                target, "Sterile export test", "2026-10-31T12:00:00+00:00"
+            )
+        self.assertFalse((target / ".git" / "hooks" / "post-checkout").exists())
+        self.assertRegex(sha, r"\A[0-9a-f]{40}\Z")
+
+    def test_commit_pins_encoding(self):
+        # Review #269: the caller's i18n.commitEncoding must not change the
+        # export commit ID.
+        shas = []
+        for prefix, hostile in (
+            ("export-commit-enc-plain-", False),
+            ("export-commit-enc-latin-", True),
+        ):
+            target = Path(tempfile.mkdtemp(prefix=prefix))
+            self.addCleanup(shutil.rmtree, target, True)
+            (target / "n.txt").write_text("clean\n")
+            env = (
+                {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "i18n.commitEncoding",
+                    "GIT_CONFIG_VALUE_0": "ISO-8859-1",
+                }
+                if hostile
+                else {}
+            )
+            with mock.patch.dict(os.environ, env):
+                shas.append(
+                    public_export.commit_tree(
+                        target,
+                        "Sterile export test",
+                        "2026-10-31T12:00:00+00:00",
+                    )
+                )
+            raw = subprocess.run(
+                ["git", "-C", str(target), "cat-file", "-p", shas[-1]],
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            self.assertNotIn(b"\nencoding ", raw)
+        self.assertEqual(shas[0], shas[1])
+
+    def test_unreadable_tracked_gitmodules_fails_closed(self):
+        # Review #269: a tracked export manifest that cannot be read must
+        # fail the export, never silently skip the submodule gates.
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        repo = make_repo(
+            self,
+            {
+                ".gitmodules": '[submodule "x"]\n\tpath = x\n',
+                "n.txt": "clean\n",
+            },
+        )
+        pub, priv = write_policy_files(self)
+        out = Path(tempfile.mkdtemp(prefix="export-unreadable-"))
+        self.addCleanup(shutil.rmtree, out, True)
+        with mock.patch.object(public_export, "git_blob", return_value=None):
+            with self.assertRaises(SystemExit) as ctx:
+                public_export.export_tree("HEAD", out, pub, priv, repo=repo)
+        self.assertIn(".gitmodules", str(ctx.exception))
+
+    def test_commit_pins_object_format(self):
+        # Review #269: the export commit must be SHA-1 even when the
+        # machine prefers another object format (GIT_DEFAULT_HASH), or
+        # the same source yields different commit IDs on different machines.
+        shas = []
+        for prefix, hostile in (
+            ("export-commit-fmt-plain-", False),
+            ("export-commit-fmt-sha256-", True),
+        ):
+            target = Path(tempfile.mkdtemp(prefix=prefix))
+            self.addCleanup(shutil.rmtree, target, True)
+            (target / "n.txt").write_text("clean\n")
+            env = {"GIT_DEFAULT_HASH": "sha256"} if hostile else {}
+            with mock.patch.dict(os.environ, env):
+                shas.append(
+                    public_export.commit_tree(
+                        target,
+                        "Sterile export test",
+                        "2026-10-31T12:00:00+00:00",
+                    )
+                )
+            fmt = (
+                subprocess.run(
+                    ["git", "-C", str(target), "rev-parse", "--show-object-format"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                )
+                .stdout.decode()
+                .strip()
+            )
+            self.assertEqual(fmt, "sha1")
+        self.assertEqual(shas[0], shas[1])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+MOD_CONFIG = HERE.parents[2] / "public_export_mod.json"
+
+MOD_CANONICAL_LICENSE = b"Copyright (c) 2026 Blockfield. All rights reserved.\n"
+
+
+class ModOverlayTest(unittest.TestCase):
+    """Mod sterile-export overlay: server tree dropped, mod gates calibrated."""
+
+    def overlay_policy(self):
+        if not HAS_PRIVATE:
+            self.skipTest("private export policy absent")
+        return public_export.load_policy(str(CONFIG), str(PRIVATE), str(MOD_CONFIG))
+
+    def bare_policy(self):
+        """Overlay policy without the workflow inventory (content-scan fixtures)."""
+        policy = dict(self.overlay_policy())
+        policy.pop("allowed_workflows", None)
+        return policy
+
+    def test_resolve_mod_target(self):
+        repo, config, private, overlay = public_export.resolve_target("mod")
+        self.assertEqual(Path(overlay).name, "public_export_mod.json")
+        self.assertEqual(Path(private).name, "public_export_private.json")
+        self.assertEqual(Path(repo).name, "blockfield-mod")
+
+    def test_overlay_file_is_public_safe(self):
+        overlay = json.loads(MOD_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(overlay["repo"], "mod")
+        if HAS_PRIVATE:
+            policy = public_export.load_policy(str(CONFIG), str(PRIVATE))
+            variants = set()
+            for entry in policy["banned_tokens"]:
+                token = entry["token"] if isinstance(entry, dict) else entry
+                variants.add(token)
+                variants.add(token.upper())
+            text = MOD_CONFIG.read_text(encoding="utf-8")
+            hits = [v for v in variants if v and v in text]
+            self.assertEqual(hits, [], "private literals in mod overlay")
+
+    def test_overlay_excludes_server_tree(self):
+        policy = self.overlay_policy()
+        # Every path in a3-dropped-server-files.txt lives under server/.
+        self.assertIn("server/**", policy["exclude_paths"])
+        self.assertIn("CREDITS.txt", policy["exclude_paths"])
+        self.assertIn(".gitmodules", policy["exclude_paths"])
+        self.assertIn(".dev/**", policy["exclude_paths"])
+
+    def test_server_files_and_credits_absent(self):
+        policy = self.bare_policy()
+        files = {
+            "server/build.gradle": (b"clean\n", 0o644),
+            "server/src/main/java/com/lunares/blockfield/server/BlockFieldServer.java": (
+                b"clean\n",
+                0o644,
+            ),
+            "CREDITS.txt": (b"clean\n", 0o644),
+            "client/src/main/java/Clean.java": (b"clean\n", 0o644),
+        }
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertNotIn("server/build.gradle", payload)
+        self.assertNotIn(
+            "server/src/main/java/com/lunares/blockfield/server/BlockFieldServer.java",
+            payload,
+        )
+        self.assertNotIn("CREDITS.txt", payload)
+        self.assertFalse(
+            [r for r in payload if r == "server" or r.startswith("server/")]
+        )
+        self.assertIn("client/src/main/java/Clean.java", payload)
+
+    def test_overlay_keeps_mod_workflows(self):
+        policy = self.overlay_policy()
+        self.assertEqual(
+            sorted(policy["allowed_workflows"]),
+            [
+                ".github/workflows/pr-text.yml",
+                ".github/workflows/quality.yml",
+                ".github/workflows/release.yml",
+            ],
+        )
+
+    def test_mod_license_is_single_string(self):
+        policy = self.bare_policy()
+        files = {"LICENSE": (b"old license\n", 0o644)}
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertEqual(payload["LICENSE"][1], MOD_CANONICAL_LICENSE)
+
+    def test_mod_single_commit(self):
+        policy = self.overlay_policy()
+        self.assertTrue(policy["single_commit"])
+        self.assertIn("{sha}", policy["single_commit_message"])
+
+    def test_known_packet_name_passes(self):
+        # Split so this test file itself survives the export unchanged.
+        packet = "Animation" + "WireC2SPacket"
+        policy = self.bare_policy()
+        files = {"common/src/Packets.java": (f"class {packet} {{}}\n".encode(), 0o644)}
+        payload, _, _ = public_export.build_payload(files, [], [], [], None, policy)
+        self.assertIn("common/src/Packets.java", payload)
+
+    def test_fresh_opaque_token_still_fails(self):
+        # Split so this test file itself survives the export unchanged.
+        fresh = "TestToken9Ab" + "CdEfGhIjKlMn"
+        policy = self.bare_policy()
+        bad = {"common/src/Packets.java": (f"class {fresh} {{}}\n".encode(), 0o644)}
+        with self.assertRaises(SystemExit) as ctx:
+            public_export.build_payload(bad, [], [], [], None, policy)
+        self.assertIn("f-opaque-bare", str(ctx.exception))
+
+    def test_overlay_values_stay_escaped(self):
+        # The workspace export scans this overlay raw: fixture values must
+        # stay \u-escaped so pushing this file never trips that gate.
+        text = MOD_CONFIG.read_text(encoding="utf-8")
+        overlay = json.loads(text)
+        values = []
+        for patch in overlay.get("rule_patches", {}).values():
+            values += patch.get("allow_exact", [])
+        self.assertTrue(values, "mod overlay must pin reviewed fixture values")
+        for value in values:
+            self.assertNotIn(value, text)

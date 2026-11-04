@@ -112,8 +112,11 @@ def tool_client_prepare(args):
 
 
 def tool_client_play(args):
-    if devstack.client_pid():
-        raise RuntimeError("this stack's client is already running")
+    number = int(args.get("client", 1) or 1)
+    if number not in devstack.CLIENTS:
+        raise RuntimeError("unknown client: use 1 or 2")
+    if devstack.client_pid(number):
+        raise RuntimeError(f"this stack's client {number} is already running")
     command = [sys.executable, str(devstack.ROOT / "bf.py"), "play"]
     for key, flag in (
         ("server", "--server"),
@@ -123,6 +126,7 @@ def tool_client_play(args):
     ):
         if args.get(key):
             command += [flag, str(args[key])]
+    command += ["--client", str(number)]
     for flag in ("mod", "debug", "no_testbot"):
         if args.get(flag):
             command += ["--" + flag.replace("_", "-")]
@@ -141,7 +145,8 @@ def tool_client_play(args):
         except subprocess.TimeoutExpired as error:
             raise RuntimeError("client preparation exceeded 10 minutes") from error
         return text(
-            result.stdout.strip() or f"client started (pid {devstack.client_pid()})"
+            result.stdout.strip()
+            or f"client started (pid {devstack.client_pid(number)})"
         )
     devstack.HOME.mkdir(parents=True, exist_ok=True)
     log = open(devstack.HOME / "client-launch.out", "w", encoding="utf-8")
@@ -156,8 +161,8 @@ def tool_client_play(args):
     return text(f"client starting (pid {process.pid})")
 
 
-def tool_client_stop(_):
-    devstack.client_stop()
+def tool_client_stop(args):
+    devstack.client_stop(int(args.get("client", 1) or 1))
     return text("stopped")
 
 
@@ -254,6 +259,7 @@ TOOLS = {
         {
             "type": "object",
             "properties": {
+                "client": {"type": "integer"},
                 "server": {"type": "string"},
                 "name": {"type": "string"},
                 "game_dir": {"type": "string"},
@@ -266,7 +272,7 @@ TOOLS = {
     "client_stop": (
         tool_client_stop,
         "stop the direct client",
-        {"type": "object", "properties": {}},
+        {"type": "object", "properties": {"client": {"type": "integer"}}},
     ),
     "bot_send": (
         tool_bot_send,

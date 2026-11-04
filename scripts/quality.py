@@ -10,6 +10,35 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from toolchain import canonical_python, child_env, download, native, tool  # noqa: E402
 
+# javac internals google-java-format touches on JDK 16+; without them it dies
+# with LinkageError. Flags change nothing about the formatted output.
+GJF_EXPORTS = [
+    "--add-exports",
+    "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+    "--add-exports",
+    "jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED",
+    "--add-exports",
+    "jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED",
+    "--add-exports",
+    "jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED",
+    "--add-exports",
+    "jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED",
+]
+
+
+def wire_hooks(root=ROOT):
+    """Point this checkout at the versioned hooks so pushes run the fast checks."""
+    if not (root / ".githooks").is_dir():
+        print(f"no {root / '.githooks'}: leaving git hooks alone")
+        return
+    subprocess.run(
+        ["git", "config", "core.hooksPath", ".githooks"],
+        cwd=root,
+        check=True,
+        env=child_env(),
+    )
+    print("git pushes now run .githooks/pre-push (bypass: --no-verify)")
+
 
 def run(*args, capture=False, input=None, cwd=ROOT):
     name = str(args[0])
@@ -157,6 +186,7 @@ def formatting(files, write=False):
         each(
             [
                 "java",
+                *GJF_EXPORTS,
                 "-jar",
                 jar,
                 "--aosp",

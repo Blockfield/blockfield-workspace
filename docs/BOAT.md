@@ -92,11 +92,14 @@ CLI `1.0.85` скачивается по версии и SHA256 в `.cache/quali
 just boat env new blockfield
 just boat env set blockfield --safe-for-third-parties false --github true --secrets false --boat-credentials false --agents-credentials false
 just boat env add-repo blockfield Blockfield/blockfield-workspace --branch main
+just boat env add-repo blockfield Blockfield/blockfield-client --branch main
+just boat env add-repo blockfield Blockfield/blockfield-mod --branch main
+just boat env add-repo blockfield Blockfield/blockfield-server --branch main
 just boat env info blockfield --json
 ```
 
 В `effective` включён только `passGithub`; список `selectedRepositories` содержит
-workspace. Ошибка `repository ... not found in your connected GitHub repos`
+workspace и три приватных репозитория. Ошибка `repository ... not found in your connected GitHub repos`
 означает, что подключение GitHub ещё не даёт Boat доступ к репозиторию.
 
 В dashboard подключите GitHub с доступом к нужным приватным репозиториям
@@ -142,6 +145,9 @@ export PATH="$python_bin:$PWD/.cache/quality/bin:$PATH"
 unset DISPLAY WAYLAND_DISPLAY
 export AI_AGENT_SESSION_ID=boat-bx_ID-task-name
 export BF_DEV_HOME="$PWD/.dev/boat-task-name"
+export BLOCKFIELD_BOAT_VM=1  # Gradle guard: allows just recipes that run Gradle on this VM
+export JAVA_HOME="$(python3 -c "import sys; sys.path.insert(0, 'scripts'); from toolchain import java_home; print(java_home())")"  # pinned Temurin 21 for bare shells (`boat exec`/`ssh`, direct `./gradlew`); `just` recipes export it themselves
+export PATH="$JAVA_HOME/bin:$PATH"
 just status
 free -g
 ss -ltnp
@@ -195,6 +201,67 @@ just boat new --from bf-dev-YYYYMMDD --environment blockfield --type large --ttl
 владельца и `BF_DEV_HOME`. Дисковый snapshot не гарантирует актуальный код.
 В trial можно последовательно `stop`/`resume` одной VM или fork её последнего
 snapshot в пределах лимитов, без именованного шаблона.
+
+## Рабочий цикл агента (helper)
+
+`just`-рецепты, запускающие Gradle (mod `gradle`/`build`/`java-check`/`java-format`/`format`/`test`,
+client/server `compile`/`build` при наличии wrapper), отказываются работать на компьютере владельца:
+только Boat VM или CI. Разрешают запуск `BLOCKFIELD_BOAT_VM=1` (helper и шаблон выше ставят его автоматически),
+либо `CI`/`GITHUB_ACTIONS=true` (CI ставит сам). Обходной путь только для владельца:
+`BF_ALLOW_LOCAL_GRADLE=1` — агентам его выставлять запрещено.
+
+Правки — локально, VM — только на сборку. Один вызов helper на сборку:
+
+```sh
+just boat-build --fork-from bx_GOLDEN --name bf-task --branch my-branch --timeout 1800 -- \
+  'cd localmods/blockfield-mod && ./gradlew :server:test --max-workers=2'
+```
+
+Helper сам resume/fork'ает VM, переносит точные коммиты без push в origin
+(git bundle от merge-base с origin/main либо полный ref, когда база неизвестна;
+старый `^SHA-VM` падал, если VM стояла на неизвестном локально коммите),
+сверяет rev-parse, поднимает JDK 21 и env, запускает команду с жёстким
+таймаутом. Вердикт берётся только из history (`exitCode` и `finishedAt`); обрыв
+exec stream не означает падение команды. Незавершённый вызов возвращает 75
+(RUNNING, ожидание не более 540 с) и печатает `--resume-run`: повторите эту
+команду без повторного запуска build. Пока команда работает, VM не останавливается.
+Перед stop лог и файлы `--evidence '<glob>'` (повторяемый, пути VM) копируются
+в `.dev/<task>/<run>/`; `manifest.json` содержит команду, VM id, exitCode,
+finishedAt и SHA256 каждого файла. `--fetch` тоже сохраняется здесь; `--out`
+получает дополнительную копию. Ошибка копирования — неуспешный результат,
+VM остаётся доступной для восстановления evidence. При ошибке setup до
+вердикта helper также оставляет VM работающей: проверьте history и сохраните
+evidence перед ручным stop. Незакоммиченные правки и untracked-файлы тоже
+едут (патч `git diff HEAD`, применяется через `git apply --check`; отказ —
+сразу с именами файлов, а не в середине прогона; `--no-worktree` отключает).
+Локально собранный fork-jar: `--local-jar DIR=PATH.jar` (DIR — localmods/ или
+его pw.toml; мод обязан быть LOCAL по `just build-mods --plan`, иначе helper
+откажет до биллинга VM). Между итерациями VM остановлена: правьте локально, следующий прогон — новый
+вызов helper. Никогда не останавливайте чужие VM.
+
+Размер: `small` (2 vCPU/4 ГБ, половина тарифа) для `:server:test`
+не медленнее `default` (замер: small ~259 с, default ~296 с — медианы
+`--rerun-tasks` после прогрева; оба упираются в один предсуществующий
+падающий тест) и вдвое дешевле — используйте `small`, если VM не
+упирается в память. Golden VM `bf-golden-20261031` (`bx_7ah8ntd6`,
+пины ws 58c0b588, JDK 21, прогретые кеши, `just setup --testbot` готов):
+задачи делают fork неё и сразу собирают. Fork всегда с re-pin окружения
+(`--environment blockfield`, helper делает это сам): GitHub-авторизация
+только из окружения Boat, в golden нет baked-конфига `gh`
+(протухший baked токен даёт 401 на скачивании релизов). Обновляйте golden,
+когда пины workspace/submodules материально меняются: fork, checkout новых
+пинов, прогрев, stop; старый golden оставляйте остановленным, не удаляйте.
+При подготовке golden замаскируйте snapd (`sudo -n systemctl mask --now
+snapd.service snapd.socket snapd.seeded.service snapd.snap-repair.service
+snapd.refresh.timer`): в образе Boat он падает с кодом 42 примерно раз в
+минуту и жрёт CPU на каждом форке; маска переживает snapshot'ы, новый
+golden ради неё не нужен.
+`just` на golden нет (образ без него): агенты ставят pinned `just` 1.57.0
+из workspace (`python3 -I scripts/quality.py run just --version` проверяет
+checksum и кладёт бинарь в `.cache/quality/bin`) и добавляют в PATH
+(`install -m755 .cache/quality/bin/just "$HOME/.local/bin/just"`). При обновлении
+golden ставьте `just` так же, чтобы `just ...` работал сразу, без `bf.py`.
+Правила cleanup из раздела «Проверка и завершение» действуют как прежде.
 
 ## Проверка и завершение
 

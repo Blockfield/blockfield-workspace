@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """PvP-consent regression: a passive player keeps HP and position through mine and vehicle hits.
 
-Needs two clients (deferred until the second dev client lands): with one bot the
-module reports the skip instead of failing.
+Needs two clients: with one bot the module reports the skip instead of failing.
 """
 
 import json

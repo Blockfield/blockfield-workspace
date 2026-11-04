@@ -29,6 +29,18 @@ RELEASED_PACK = (
     "edf28a08ec29b853e194d4a27ae892d8125306a4b8031642b573422e864ff33e",
 )
 
+# PureWindowsPath.is_reserved() was removed in Python 3.14; match its stem
+# comparison so the gate behaves the same on every interpreter.
+_RESERVED_WINDOWS_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _is_reserved_windows_name(part):
+    return part.partition(".")[0].rstrip(". ").upper() in _RESERVED_WINDOWS_NAMES
+
 
 def claim_stack():
     home, owner = devstack.HOME.resolve(), devstack.process_owner()
@@ -118,7 +130,7 @@ def extract_released_pack(archive, game_dir):
                 or any(
                     part in ("", ".", "..")
                     or part.endswith((".", " "))
-                    or PureWindowsPath(part).is_reserved()
+                    or _is_reserved_windows_name(part)
                     or any(char in part for char in '<>"|?*')
                     for part in parts
                 )
@@ -387,7 +399,7 @@ def run(args):
                 testbot_port=str(devstack.BOT_PORTS[1]),
                 server="",
                 debug=False,
-                xmx=getattr(args, "xmx", "4G"),
+                xmx=getattr(args, "xmx", "3G"),
                 resolution="640x360",
             )
             devstack.install_testbot(launch_args, game_dir)

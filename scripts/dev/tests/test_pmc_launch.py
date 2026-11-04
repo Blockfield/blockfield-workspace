@@ -36,12 +36,19 @@ class LaunchCommand(unittest.TestCase):
             ),
         }
         output = io.StringIO()
+        real_which = pmc_launch.shutil.which
+
+        def fake_which(cmd, path=None, **kwargs):
+            # The JAVA_HOME-directed lookup runs for real (exec bit above);
+            # only the bare-PATH fallback is stubbed.
+            if path is not None:
+                return real_which(cmd, path=path)
+            return "/project/jdk/bin/java"
+
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch.dict(sys.modules, modules),
-            patch.object(
-                pmc_launch.shutil, "which", return_value="/project/jdk/bin/java"
-            ),
+            patch.object(pmc_launch.shutil, "which", side_effect=fake_which),
             patch.object(
                 sys,
                 "argv",
@@ -61,8 +68,17 @@ class LaunchCommand(unittest.TestCase):
             ),
             contextlib.redirect_stdout(output),
         ):
-            pmc_launch.main()
-        self.assertEqual(version.jvm_path, Path("/project/jdk/bin/java"))
+            # JAVA_HOME is the pinned project JDK under `just play`: a fake
+            # home on disk wins over the PATH fallback below.
+            home = Path(tmp) / "home-jdk"
+            (home / "bin").mkdir(parents=True)
+            java = home / "bin" / ("java.exe" if sys.platform == "win32" else "java")
+            java.write_bytes(b"fake")
+            if sys.platform != "win32":
+                java.chmod(0o755)  # shutil.which(path=...) needs the exec bit
+            with patch.dict(pmc_launch.os.environ, {"JAVA_HOME": str(home)}):
+                pmc_launch.main()
+        self.assertEqual(version.jvm_path, java)
         self.assertIn(
             "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5006",
             json.loads(output.getvalue()),

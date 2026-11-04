@@ -38,6 +38,7 @@ import time
 import tomllib
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path, PureWindowsPath
@@ -48,7 +49,7 @@ from modmap import BuildError, classify, decisions, ensure_built  # noqa: E402
 from modmap import load_mapping, local_jars, newest_jar  # noqa: E402  (localmods/ mapping)
 from modmap import runtime_jar_name, write_stamp  # noqa: E402  (localmods/ mapping)
 from rcon import Rcon  # noqa: E402  (scripts/dev/rcon.py, plain stdlib)
-from toolchain import deb_libraries, download, native, tool  # noqa: E402
+from toolchain import deb_libraries, download, jdk_env, native, tool  # noqa: E402
 from terminal import progress  # noqa: E402
 from dev_cache import CACHE as INPUT_CACHE, clone_tree, materialize  # noqa: E402
 
@@ -68,6 +69,18 @@ if not (1 <= PORT <= 65535 and 1 <= RCON_PORT <= 65535) or PORT == RCON_PORT:
     )
 RCON_PASSWORD = "leaks"
 BOT_PORTS = {1: 47777, 2: 47778}
+# Two headless clients share one stand server, display and RCON; game dirs and
+# pid/cmd/log records stay per-client (AGENTS.md: separate ownership records).
+CLIENTS = {
+    1: {"pid": "client.pid", "cmd": "client.cmd", "log": "client.out", "game": "play"},
+    2: {
+        "pid": "client2.pid",
+        "cmd": "client2.cmd",
+        "log": "client2.out",
+        "game": "play2",
+    },
+}
+CLIENT_DEBUG_PORTS = {1: 5006, 2: 5007}
 PROXY_ONLY_MODS = ("FabricProxy-Lite", "crossstitch")
 CARPET_ASSET = (
     "fabric-carpet-1.21-1.4.147+v240613.jar",
@@ -85,6 +98,25 @@ SERVER_PROPERTIES = {
     "view-distance": "8",
     "sync-chunk-writes": "false",
 }
+
+
+def client_number(args):
+    number = getattr(args, "client", 1) or 1
+    if number not in CLIENTS:
+        die(f"unknown client {number}: use --client 1 or --client 2")
+    return number
+
+
+def client_pid_file(number=1):
+    return HOME / CLIENTS[number]["pid"]
+
+
+def client_cmd_file(number=1):
+    return HOME / CLIENTS[number]["cmd"]
+
+
+def client_log_file(number=1):
+    return HOME / CLIENTS[number]["log"]
 
 
 def stack_home():
@@ -229,6 +261,23 @@ REFRESH_STACK = (
 )
 
 
+def require_boat_for_gradle(what):
+    """Workspace Gradle builds run on a Boat VM or CI, never on the owner PC.
+
+    Agents must not set BF_ALLOW_LOCAL_GRADLE (owner-only bypass).
+    """
+    if os.environ.get("BLOCKFIELD_BOAT_VM") == "1":
+        return
+    if os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true":
+        return
+    if os.environ.get("BF_ALLOW_LOCAL_GRADLE") == "1":
+        return
+    die(
+        f"refusing Gradle {what} on this machine: run it on your Boat VM "
+        "(`just boat-build ...`) — Gradle never runs on the owner PC"
+    )
+
+
 def testbot_jar(args):
     """The explicit testbot JAR or the single workspace implementation."""
     explicit = getattr(args, "testbot", None)
@@ -240,11 +289,18 @@ def testbot_jar(args):
     )
 
 
+def stack_testbot_jar():
+    """Testbot jar enabled stack-wide by `just setup --testbot` (client 1 dir)."""
+    jar = default_game_dir(1) / "mods/bftestbot.jar"
+    return jar if jar.is_file() else None
+
+
 def testbot_enabled(args, game_dir):
     return not getattr(args, "no_testbot", False) and bool(
         getattr(args, "testbot", None)
         or getattr(args, "testbot_port", None)
         or (game_dir / "mods/bftestbot.jar").is_file()
+        or stack_testbot_jar() is not None
     )
 
 
@@ -255,7 +311,25 @@ def install_testbot(args, game_dir):
             destination.unlink(missing_ok=True)
         return None
     explicit = getattr(args, "testbot", None)
-    jar = destination if not explicit and destination.is_file() else testbot_jar(args)
+    stack = stack_testbot_jar()
+    if (
+        explicit is None
+        and stack is not None
+        and stack.resolve() != destination.resolve()
+    ):
+        # Plain runs converge every stack client to the stack jar: after
+        # `just setup --testbot NEW.jar` a second client picks up NEW instead
+        # of silently running the stale jar it copied earlier.
+        jar = stack
+    else:
+        jar = (
+            destination if not explicit and destination.is_file() else testbot_jar(args)
+        )
+    if not jar and explicit is None:
+        # `just setup --testbot` equips every stack client: a second client
+        # started without --testbot reuses that jar instead of running bot-less.
+        # An explicit bare --testbot is a build request and keeps building below.
+        jar = stack
     if not jar and explicit in (None, True):
         build_testbot(args)
         jar = testbot_jar(args)
@@ -263,11 +337,15 @@ def install_testbot(args, game_dir):
         die("no testbot jar: run `just build-testbot` or pass --testbot JAR")
     if jar.resolve() != destination.resolve():
         materialize(jar, destination)
-    return getattr(args, "testbot_port", None) or "47777"
+    return str(
+        getattr(args, "testbot_port", None)
+        or BOT_PORTS.get(getattr(args, "client", 1) or 1, 47777)
+    )
 
 
 def build_testbot(args):
     """./gradlew build for the workspace testbot (scripts/dev/testbot)."""
+    require_boat_for_gradle("testbot build")
     java_exe()
     directory = ROOT / "scripts" / "dev" / "testbot"
     if not (directory / "settings.gradle").is_file():
@@ -278,7 +356,7 @@ def build_testbot(args):
         "-Dorg.gradle.daemon.idletimeout=600000",
         "--max-workers=2",
     ]
-    run(command, cwd=directory, message="Building testbot")
+    run(command, cwd=directory, message="Building testbot", env=jdk_env())
     jar = newest_jar(directory / "build" / "libs", "bftestbot-")
     ok(f"built: {jar.name}" if jar else "built (no jar found)")
 
@@ -375,6 +453,22 @@ def metafile_jar_name(metadata):
     return filename
 
 
+def pinned_jar_ok(jar, metadata):
+    """The jar exists and matches the metafile's [download] hash when it declares one.
+
+    A name-only check let a stale build sit under the pin's filename (1.55.3 as 1.57.0)."""
+    if not jar.is_file():
+        return False
+    try:
+        download = tomllib.loads(metadata.read_text(encoding="utf-8"))["download"]
+        algorithm, expected = download["hash-format"], download["hash"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+    if algorithm not in hashlib.algorithms_guaranteed:
+        return True
+    return hashlib.new(algorithm, jar.read_bytes()).hexdigest() == expected
+
+
 def fetch_mod_jars(modpack, client_pack=None):
     """Same pins as CI's fetch-mod-release.sh, without needing a POSIX shell.
 
@@ -387,7 +481,8 @@ def fetch_mod_jars(modpack, client_pack=None):
         if f"blockfield-{side}.pw.toml" in local:
             continue
         name = pinned_jar_name(pack, side)
-        if (modpack / "files" / "mods" / name).is_file():
+        metadata = pack / "mods" / f"blockfield-{side}.pw.toml"
+        if pinned_jar_ok(modpack / "files" / "mods" / name, metadata):
             continue
         tag = "v" + name.removeprefix(f"blockfield-{side}-").split("+")[0].removesuffix(
             ".jar"
@@ -417,8 +512,13 @@ def fetch_mod_jars(modpack, client_pack=None):
             break
         else:
             raise SystemExit(f"{name}: release {tag} not found")
+        if not pinned_jar_ok(modpack / "files" / "mods" / name, metadata):
+            raise SystemExit(f"{name}: downloaded jar does not match the pin hash")
     name = pinned_jar_name(client_pack, "music")
-    if not (modpack / "files" / "mods" / name).is_file():
+    if not pinned_jar_ok(
+        modpack / "files" / "mods" / name,
+        client_pack / "mods" / "blockfield-music.pw.toml",
+    ):
         run(
             [
                 sys.executable,
@@ -489,6 +589,20 @@ def disable_proxy_mods():
     for jar in (SERVER / "mods").glob("*.jar"):
         if jar.name.startswith(PROXY_ONLY_MODS):
             jar.replace(off / jar.name)
+
+
+def enable_proxy_mods():
+    """Behind the stand proxy the backend needs its proxy-only mods (prod parity).
+
+    setup() always disables them for direct connects; --via-proxy moves them back.
+    """
+    off = SERVER / "mods-off"
+    if not off.is_dir():
+        return
+    (SERVER / "mods").mkdir(parents=True, exist_ok=True)
+    for jar in off.glob("*.jar"):
+        if jar.name.startswith(PROXY_ONLY_MODS):
+            jar.replace(SERVER / "mods" / jar.name)
 
 
 def build_distribution(modpack, client_pack=None):
@@ -582,6 +696,46 @@ def install_carpet():
     for old in destination.parent.glob("fabric-carpet-*.jar"):
         if old != destination:
             old.unlink()
+    seed_bot_profiles(SERVER / "usercache.json")
+
+
+# Every name the scenarios can pass to Carpet `/player <name> spawn`: a cache miss is a
+# blocking Mojang lookup on the server thread. hitreg.py uses "hitbot", tablet.py "TabletBot".
+# Limit: stress stages above 99 bots need this range extended too.
+SCENARIO_BOTS = [f"bot{i:02d}" for i in range(1, 100)] + ["hitbot", "TabletBot"]
+
+
+def offline_uuid(name):
+    """Java's UUID.nameUUIDFromBytes("OfflinePlayer:" + name), the offline-mode identity."""
+    digest = bytearray(hashlib.md5(f"OfflinePlayer:{name}".encode()).digest())
+    digest[6] = digest[6] & 0x0F | 0x30
+    digest[8] = digest[8] & 0x3F | 0x80
+    return str(uuid.UUID(bytes=bytes(digest)))
+
+
+def seed_bot_profiles(path):
+    """Carpet's `/player <bot> spawn` resolves the name through the profile cache, and a miss is a
+    blocking Mojang lookup on the server thread: 30 bots on a slow link stalled ticks for seconds.
+    Pin offline profiles for the scenario bots; other cached players stay untouched."""
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        entries = []
+    bots = {b.lower() for b in SCENARIO_BOTS}
+    entries = [
+        e
+        for e in entries
+        if isinstance(e, dict) and str(e.get("name", "")).lower() not in bots
+    ]
+    entries += [
+        {
+            "name": name,
+            "uuid": offline_uuid(name),
+            "expiresOn": "2099-12-31 00:00:00 +0000",
+        }
+        for name in SCENARIO_BOTS
+    ]
+    path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
 ZERO_SPREAD_PACK = ROOT / "scripts" / "dev" / "standpacks" / "tacz_zero_spread"
@@ -615,10 +769,57 @@ def _restore_missing(src, dst):
         materialize(src, dst)
 
 
+def wire_hooks(root):
+    """Point one checkout at its versioned hooks so pushes run the fast checks."""
+    if not (root / ".githooks").is_dir():
+        return False
+    subprocess.run(
+        ["git", "config", "core.hooksPath", ".githooks"],
+        cwd=root,
+        check=True,
+    )
+    return True
+
+
+def patch_dev_skinrestorer():
+    """Dev stands must not auto-fetch skins on join.
+
+    The distributed config fetches blockfield+mojang skins for every join, but
+    stands join with throwaway offline names (PlayerNNNN), so each join logs
+    "Failed to fetch skin" WARNs (rc-final6 log-scan FAIL). Prod keeps fetching
+    for real players; this overlay only ever touches the dev stack SERVER dir.
+    """
+    config = SERVER / "config" / "skinrestorer" / "config.json"
+    if not config.is_file():
+        return
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+        auto = data["join"]["autoFetch"]
+    except (ValueError, KeyError, TypeError):
+        return
+    if auto.get("enabled") is False:
+        return
+    auto["enabled"] = False
+    config.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    step("SkinRestorer join auto-fetch off (dev stand)")
+
+
 def setup(args):
-    if server_pid() or client_pid():
+    wired = [str(ROOT)] if wire_hooks(ROOT) else []
+    for sub in [
+        ROOT / "server",
+        ROOT / "client",
+        *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
+    ]:
+        if sub.is_dir() and wire_hooks(sub):
+            wired.append(str(sub.relative_to(ROOT)))
+    if wired:
+        ok(
+            f"pushes run .githooks/pre-push in: {', '.join(wired)} (bypass: --no-verify)"
+        )
+    if server_pid() or client_pid(1) or client_pid(2):
         die("server or client is running; inspect it before preparing this stack")
-    for path in (PID_FILE, CLIENT_PID_FILE):
+    for path in (PID_FILE, CLIENT_PID_FILE, client_pid_file(2)):
         record = process_record(path)
         if record and record.get("owner") not in (None, process_owner()):
             die(f"process record belongs to another session: {path}")
@@ -664,6 +865,7 @@ def setup(args):
         disable_proxy_mods()
     install_carpet()
     install_zero_spread_pack()
+    patch_dev_skinrestorer()
     step("3/4  Testbot")
     if args.no_testbot:
         step("Removing an installed testbot")
@@ -804,11 +1006,11 @@ def build_mods(args):
             # Recipe builds shell out to bare `ffmpeg`; Homebrew ffmpeg dropped
             # libvorbis (TaCZ animsync needs -c:a libvorbis), so prefer a
             # vorbis-capable binary via the shim first on PATH.
-            recipe_env = dict(
-                os.environ,
-                PATH=str(ROOT / "scripts" / "dev" / "shims")
+            recipe_env = jdk_env()
+            recipe_env["PATH"] = (
+                str(ROOT / "scripts" / "dev" / "shims")
                 + os.pathsep
-                + os.environ.get("PATH", ""),
+                + recipe_env["PATH"]
             )
             run(
                 ["just", "build"],
@@ -819,6 +1021,7 @@ def build_mods(args):
             if not local_jars(ROOT, {name: mapping[name]}):
                 die(f"{name}: build did not produce {mapping[name]['jar']}")
         else:
+            require_boat_for_gradle(f"localmod {name} build")
             wrapper = directory / (
                 "gradlew.bat" if sys.platform == "win32" else "gradlew"
             )
@@ -830,7 +1033,7 @@ def build_mods(args):
                 "--max-workers=2",
                 "-Dorg.gradle.jvmargs=-Xmx2G",
             ]
-            run(command, cwd=directory, message=f"Building {name}")
+            run(command, cwd=directory, message=f"Building {name}", env=jdk_env())
         built.append(name)
         try:
             write_stamp(HOME, name, directory, local_jars(ROOT, {name: mapping[name]}))
@@ -1111,18 +1314,45 @@ def server_start(args):
         die(
             "this stack's server is already running (just server stop, or just server log)"
         )
+    stand_preflight(_xmx_gib((f"-Xmx{args.xmx}",)))
     debug_port = int(getattr(args, "debug_port", 5005))
+    via_proxy = getattr(args, "via_proxy", False)
+    paranoid = getattr(args, "leak_paranoid", False)
+    proxy_ports = []
+    if via_proxy:
+        import proxy_stand
+
+        proxy_ports = [
+            proxy_stand.PROXY_TCP,
+            proxy_stand.PROXY_UDP,
+            proxy_stand.STUB_PORT,
+        ]
     if (
         port_open(PORT)
         or port_open(RCON_PORT)
         or (args.debug and port_open(debug_port))
+        or any(port_open(port) for port in proxy_ports)
     ):
         die(
             "server/RCON/debug port is busy: inspect the existing process before starting another server"
         )
     if not (SERVER / "fabric-server-launch.jar").is_file():
         die(f"no server in {SERVER}: run `just setup` first")
+    if via_proxy:
+        import proxy_stand
+
+        enable_proxy_mods()
+        proxy_stand.start(HOME, PORT, paranoid)
+    else:
+        # A previous --via-proxy run left the proxy-only mods in mods/:
+        # restore direct mode so plain connects are not refused.
+        disable_proxy_mods()
     command = [java_exe(), f"-Xms{args.xms}", f"-Xmx{args.xmx}", "-XX:+UseG1GC"]
+    command += [opt for opt in getattr(args, "jvm_opt", None) or [] if opt]
+    if paranoid:
+        import proxy_stand
+
+        command.append(proxy_stand.LEAK_OPT)
     if getattr(args, "pose_debug", False):
         command.append("-Dblockfield.poseDebug=true")
     if args.debug:
@@ -1160,16 +1390,21 @@ def server_start(args):
 
 def server_stop(_args):
     stop_process(PID_FILE)
+    import proxy_stand
+
+    proxy_stand.stop(HOME)
     ok("stopped")
 
 
-def client_pid():
-    return recorded_pid(CLIENT_PID_FILE)
+def client_pid(number=1):
+    return recorded_pid(client_pid_file(number))
 
 
-def client_stop():
-    stop_process(CLIENT_PID_FILE)
-    stop_process(HOME / "display.pid")
+def client_stop(number=1):
+    stop_process(client_pid_file(number))
+    if client_pid(1) is None and client_pid(2) is None:
+        # The private Xvfb stays shared: stop it only with the last client.
+        stop_process(HOME / "display.pid")
 
 
 def gpu_render_node():
@@ -1389,6 +1624,28 @@ def server_log(args):
     print("\n".join(lines[-args.lines :]))
 
 
+def proxy_cmd(args):
+    """Manual control of the stand proxy (the entry scenario restarts it itself)."""
+    import proxy_stand
+
+    if args.proxy_action == "log":
+        log = proxy_stand.proxy_dir(HOME) / "velocity.out"
+        try:
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            die(f"no log yet: {log}")
+        print("\n".join(lines[-args.lines :]))
+        return
+    if args.proxy_action == "stop":
+        proxy_stand.stop(HOME)
+        ok("proxy stopped")
+        return
+    paranoid = getattr(args, "paranoid", False)
+    if args.proxy_action == "restart":
+        proxy_stand.stop(HOME, stop_stub=False)
+    proxy_stand.start(HOME, PORT, paranoid)
+
+
 def available_memory_gib():
     if sys.platform.startswith("linux"):
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -1425,11 +1682,69 @@ def available_memory_gib():
         return None
 
 
+# Worst-case RAM budget for one stand JVM: heap-external headroom (metaspace,
+# direct buffers, software-GL allocations) on top of the -Xmx cap, plus a host
+# reserve (OS, Xvfb displays, Boat agent). 2026-10-31: 3G + 4G + 4G heaps
+# thrashed a 16 GiB RC VM into swap; all JVMs stalled 60 s and the watchdog
+# fired inside a vanilla NBT write, so the layout below must fit in RAM.
+_STAND_JVM_OVERHEAD_GIB = 1.0
+_STAND_RESERVE_GIB = 2.0
+
+
+def _xmx_gib(command):
+    gib = 0.0
+    for token in command:
+        if token.startswith("-Xmx") and len(token) > 4:
+            try:
+                gib = max(
+                    gib,
+                    float(token[4:-1])
+                    * {"K": 1 / 1024**2, "M": 1 / 1024, "G": 1}[token[-1].upper()],
+                )
+            except (ValueError, KeyError):
+                continue
+    return gib
+
+
+def _total_memory_gib():
+    if sys.platform.startswith("linux"):
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return round(int(line.split()[1]) / 1024**2, 1)
+    return None
+
+
+def stand_preflight(new_xmx_gib):
+    """Refuse a stand layout whose worst case exceeds host RAM (dies; None-safe)."""
+    caps = [new_xmx_gib]
+    for path in (PID_FILE, client_pid_file(1), client_pid_file(2)):
+        record = process_record(path)
+        if record and record.get("live"):
+            # Records without a recorded launch command (never written by
+            # start_process) carry no attributable heap; counting them as full
+            # JVMs would refuse legitimate small-host layouts.
+            cap = _xmx_gib(record.get("command") or ())
+            if cap > 0:
+                caps.append(cap)
+    total = sum(caps) + _STAND_JVM_OVERHEAD_GIB * len(caps) + _STAND_RESERVE_GIB
+    mem = _total_memory_gib()
+    if mem is not None and total > mem:
+        breakdown = "+".join(f"{cap:g}G" for cap in caps)
+        die(
+            f"stand layout over-commits RAM: heaps {breakdown} need ~{total:.1f} GiB"
+            f" on a {mem:.1f} GiB host; lower --xmx (2-client stands fit 3G heaps)"
+        )
+
+
 def status(_args, as_json=False):
+    import proxy_stand
+
     data = {
         "stack": str(HOME),
         "server_pid": server_pid(),
         "server_port_open": port_open(PORT),
+        "proxy_pid": recorded_pid(proxy_stand.proxy_pid_file(HOME)),
+        "proxy_tcp_open": port_open(proxy_stand.PROXY_TCP),
         "memory_available_gib": available_memory_gib(),
         "clients": {
             name: port_open(port)
@@ -1447,6 +1762,14 @@ def status(_args, as_json=False):
     state = _green("running") if running else _dim("stopped")
     extra = f" {_dim('(pid ' + str(data['server_pid']) + ')')}" if running else ""
     print(f"  {_dim('server:')} 127.0.0.1:{PORT} {state}{extra}")
+    import proxy_stand
+
+    proxy_pid = data["proxy_pid"]
+    if proxy_pid is not None:
+        print(
+            f"  {_dim('proxy:')}  127.0.0.1:{proxy_stand.PROXY_TCP} "
+            f"{_green('running')} {_dim('(pid ' + str(proxy_pid) + ')')}"
+        )
     for name, up in data["clients"].items():
         dot = _green(_sym()["dot"]) if up else _dim("○")
         label = _green("up") if up else _dim("down")
@@ -1501,6 +1824,7 @@ def install_tools(game_dir, remove=False):
 # ── workspace client settings ────────────────────────────────────────────────────────────────────────
 
 DEV_SETTINGS = "menu.vanilla=true\n"
+DEV_SETTINGS_OFF = "menu.vanilla=false\n"
 
 
 def patch_headless_options(game_dir):
@@ -1521,12 +1845,20 @@ def patch_headless_options(game_dir):
 def patch_client_settings(game_dir):
     settings = game_dir / "config" / "blockfield-settings.properties"
     settings.parent.mkdir(parents=True, exist_ok=True)
+    # Pack-update stands set BLOCKFIELD_MENU_VANILLA=0: PackUpdates stays silent
+    # under the forced dev-menu flag, so the feature under test needs it off.
+    # The final property wins, so pinning false also neutralizes a stale true.
+    wanted = (
+        DEV_SETTINGS_OFF
+        if os.environ.get("BLOCKFIELD_MENU_VANILLA") == "0"
+        else DEV_SETTINGS
+    )
     text = settings.read_text(encoding="utf-8") if settings.is_file() else ""
     # The final property wins, including files with a commented or disabled dev flag.
     lines = text.splitlines()
-    if not lines or lines[-1] != DEV_SETTINGS.strip():
+    if not lines or lines[-1] != wanted.strip():
         settings.write_text(
-            text.rstrip("\r\n") + ("\n" if text else "") + DEV_SETTINGS,
+            text.rstrip("\r\n") + ("\n" if text else "") + wanted,
             encoding="utf-8",
         )
 
@@ -1549,18 +1881,24 @@ def build_client_pack(client_pack, out):
 # ── client ─────────────────────────────────────────────────────────────────────────────────────
 
 
-def default_game_dir():
-    return HOME / "play"
+def default_game_dir(number=1):
+    return HOME / CLIENTS[number]["game"]
 
 
 def client_prepare(args):
-    game_dir = Path(args.game_dir) if args.game_dir else default_game_dir()
+    number = client_number(args)
+    game_dir = Path(args.game_dir) if args.game_dir else default_game_dir(number)
     if not game_dir.is_dir():
-        die(
-            f"{game_dir} does not exist: run `just setup` to install the workspace client, "
-            f"or pass --game-dir"
-        )
-    if client_pid():
+        if number == 2 and not args.game_dir and default_game_dir(1).is_dir():
+            # The second client starts as a copy of the set-up first client
+            # (same pack, own saves/options); testbot + localmods sync below.
+            clone_tree(default_game_dir(1), game_dir)
+        else:
+            die(
+                f"{game_dir} does not exist: run `just setup` to install the workspace client, "
+                f"or pass --game-dir"
+            )
+    if client_pid(number):
         die("stop this stack's client before preparing its files")
     patch_client_settings(game_dir)
     (game_dir / "mods").mkdir(parents=True, exist_ok=True)
@@ -1692,7 +2030,9 @@ def prepare_client(
     """Install client files and assets, returning a command without launching Java."""
     java_exe()
     game_dir = (
-        Path(args.game_dir) if getattr(args, "game_dir", None) else default_game_dir()
+        Path(args.game_dir)
+        if getattr(args, "game_dir", None)
+        else default_game_dir(client_number(args))
     )
     client_pack = modpack_dir(
         getattr(args, "client_modpack", getattr(args, "modpack", None)), side="client"
@@ -1845,16 +2185,19 @@ def client_launch_command(args, game_dir, name, client_pack, testbot_port):
                 "--fabric",
                 versions["fabric"],
                 "--xmx",
-                getattr(args, "xmx", "4G"),
+                getattr(args, "xmx", "3G"),
                 "--resolution",
                 getattr(args, "resolution", "1280x720"),
                 *([f"--testbot-port={testbot_port}"] if testbot_port else []),
                 *(
-                    [f"--debug-port={args.debug_port}"]
+                    [
+                        f"--debug-port={args.debug_port or CLIENT_DEBUG_PORTS[client_number(args)]}"
+                    ]
                     if getattr(args, "debug", False)
                     else []
                 ),
                 *([f"--server={args.server}"] if getattr(args, "server", None) else []),
+                *(["--leak-paranoid"] if getattr(args, "leak_paranoid", False) else []),
             ],
             message="Preparing Minecraft, Fabric, assets and libraries",
             capture_output=True,
@@ -1882,16 +2225,41 @@ def client_launch_command(args, game_dir, name, client_pack, testbot_port):
 
 
 def check_agent_server(server):
-    local = (server or "").rsplit(":", 1)[0] in ("127.0.0.1", "localhost")
+    # The stand proxy speaks RakNet on its own port; strip the transport prefix first.
+    addr = server or ""
+    if addr.startswith("raknet;"):
+        addr = addr[len("raknet;") :]
+    host = addr.rsplit(":", 1)[0] if ":" in addr else addr
+    port = addr.rsplit(":", 1)[1] if ":" in addr else ""
+    local = host in ("127.0.0.1", "localhost")
     if not local or process_owner().startswith("developer:"):
         return
+    import proxy_stand
+
+    if port in (
+        str(proxy_stand.PROXY_TCP),
+        str(proxy_stand.PROXY_UDP),
+        str(proxy_stand.WORKSHOP_UDP),
+    ):
+        record = process_record(proxy_stand.proxy_pid_file(HOME))
+        if (
+            record
+            and record.get("live")
+            and record.get("native") in ("linux", "windows")
+            and record.get("owner") == process_owner()
+        ):
+            return
+        die(
+            "agent proxy join requires this session's own stand proxy "
+            "(just server start --via-proxy)"
+        )
     record = process_record(PID_FILE)
     if (
         not record
         or not record.get("live")
         or record.get("native") not in ("linux", "windows")
         or record.get("owner") != process_owner()
-        or server.rsplit(":", 1)[1] != str(PORT)
+        or port != str(PORT)
         or not listener_owned(record["pid"], PORT)
     ):
         die(
@@ -1910,16 +2278,20 @@ def play(args):
         headless_check(args)
         return
     if getattr(args, "stop", False):
-        client_stop()
+        client_stop(client_number(args))
         return
-    if client_pid():
-        die("this stack's client is already running: stop it before changing its files")
-    game_dir = Path(args.game_dir) if args.game_dir else default_game_dir()
-    ports = (
-        [int(args.testbot_port or "47777")] if testbot_enabled(args, game_dir) else []
-    )
+    number = client_number(args)
+    if client_pid(number):
+        die(
+            f"this stack's client {number} is already running:"
+            " stop it before changing its files"
+        )
+    stand_preflight(_xmx_gib((f"-Xmx{getattr(args, 'xmx', '3G')}",)))
+    game_dir = Path(args.game_dir) if args.game_dir else default_game_dir(number)
+    testbot_port = int(args.testbot_port or BOT_PORTS[number])
+    ports = [testbot_port] if testbot_enabled(args, game_dir) else []
     if args.debug:
-        ports.append(int(args.debug_port))
+        ports.append(int(args.debug_port or CLIENT_DEBUG_PORTS[number]))
     if any(port_open(port) for port in ports):
         die(
             "client testbot/debug port is busy: inspect the existing client before starting another"
@@ -1928,7 +2300,11 @@ def play(args):
     headless = getattr(args, "headless", False) or agent
     name = args.name or f"Player{random.randint(1000, 9999)}"
     # The local server owns its marker; remote play keeps the archive's marker.
-    local = (args.server or "").rsplit(":", 1)[0] in ("127.0.0.1", "localhost")
+    # A raknet; join still lands on the local server behind the stand proxy.
+    addr = args.server or ""
+    if addr.startswith("raknet;"):
+        addr = addr[len("raknet;") :]
+    local = addr.rsplit(":", 1)[0] in ("127.0.0.1", "localhost")
     check_agent_server(args.server)
     game_dir, command = prepare_client(args, sync_marker=local, name=name)
     if headless:
@@ -1942,7 +2318,7 @@ def play(args):
         gpu = headless and gpu_render_node()
     environment = client_environment(headless, gpu)
     step(f"starting as {_bold(name)} in {game_dir}")
-    CLIENT_CMD_FILE.write_text(
+    client_cmd_file(number).write_text(
         json.dumps(
             {
                 "command": [str(c) for c in command],
@@ -1953,30 +2329,31 @@ def play(args):
             }
         )
     )
+    log_file = client_log_file(number)
     pid, process = start_process(
         [str(c) for c in command],
         game_dir,
-        CLIENT_PID_FILE,
-        HOME / "client.out",
+        client_pid_file(number),
+        log_file,
         env=environment,
         headless=headless,
     )
     if process is None:
-        wait_client_ready(pid)
-        ok(f"client renderer ready (pid {pid}); log: {HOME / 'client.out'}")
+        wait_client_ready(pid, log_file, number)
+        ok(f"client renderer ready (pid {pid}); log: {log_file}")
         return
     try:
         code = process.wait()
     finally:
-        CLIENT_PID_FILE.unlink(missing_ok=True)
+        client_pid_file(number).unlink(missing_ok=True)
     logs = snapshot_logs(f"{stamp()}-{name}", game_dir)
     rotate_temp()
     ok(f"saved {logs.name}/")
     raise SystemExit(code)
 
 
-def wait_client_ready(pid):
-    log = HOME / "client.out"
+def wait_client_ready(pid, log=None, number=1):
+    log = HOME / "client.out" if log is None else log
     deadline = time.monotonic() + 360
     with (
         progress("Starting Minecraft client"),
@@ -1984,14 +2361,14 @@ def wait_client_ready(pid):
     ):
         pending = ""
         while time.monotonic() < deadline:
-            if client_pid() != pid:
+            if client_pid(number) != pid:
                 die(f"client exited before its renderer was ready, see {log}")
             pending += source.read()
             if re.search(
                 r"Created: \d+x\d+(?:x\d+)? minecraft:textures/atlas/gui\.png-atlas",
                 pending,
             ):
-                if client_pid() != pid:
+                if client_pid(number) != pid:
                     die(f"client exited before its renderer was ready, see {log}")
                 return
             pending = pending[-512:]
@@ -2221,6 +2598,7 @@ COMMANDS = {
     "mod": "install a locally built blockfield-server jar",
     "watch": "rebuild + hotswap localmods/ sources into the running stack (server|client)",
     "server": "run the local server (start|stop|rcon|log)",
+    "proxy": "stand proxy: pinned Velocity + raknetify hop (start|stop|restart|log)",
     "client": "prepare the workspace client directory",
     "play": "launch the client directly, no launcher, random offline name",
     "bot": "send a command to the testbot inside a running client",
@@ -2245,7 +2623,7 @@ def print_help():
     print("usage: just <recipe> [options]")
     groups = {
         "Prepare": ("setup", "build-mods", "build-testbot", "client", "mod"),
-        "Run": ("server", "play", "watch"),
+        "Run": ("server", "proxy", "play", "watch"),
         "Inspect": ("status", "bot", "scenario"),
         "Quality": ("check", "lint", "format-check", "format", "test", "compile-check"),
         "Tools": ("dev", "mcp", "assets", "rclone"),
@@ -2421,12 +2799,30 @@ def main():
     start.add_argument("--xmx", default="3G")
     start.add_argument("--xms", default="1G")
     start.add_argument(
+        "--jvm-opt",
+        action="append",
+        default=[],
+        help="extra JVM flag for the server process (repeatable; GC A/B)",
+    )
+    start.add_argument(
         "--debug", action="store_true", help="JDWP on 127.0.0.1:5005 for hotswap"
     )
     start.add_argument(
         "--gate",
         action="store_true",
         help="keep the production login gate (pack contract/hash) instead of the dev bypass",
+    )
+    start.add_argument(
+        "--via-proxy",
+        action="store_true",
+        help="run the pinned prod proxy (Velocity + raknetify) in front of this server; "
+        "the client joins through it over RakNet like in prod",
+    )
+    start.add_argument(
+        "--leak-paranoid",
+        action="store_true",
+        help="run the server (and the proxy, with --via-proxy) with "
+        "-Dio.netty.leakDetection.level=paranoid for transport leak hunts",
     )
     start.add_argument("--pose-debug", action="store_true")
     start.set_defaults(func=server_start)
@@ -2437,6 +2833,21 @@ def main():
     log_parser = server_sub.add_parser("log")
     log_parser.add_argument("lines", nargs="?", type=int, default=40)
     log_parser.set_defaults(func=server_log)
+
+    p = sub.add_parser("proxy", help="stand proxy: pinned Velocity + raknetify hop")
+    proxy_sub = p.add_subparsers(dest="proxy_action", required=True)
+    for action in ("start", "stop", "restart"):
+        ap = proxy_sub.add_parser(action)
+        if action != "stop":
+            ap.add_argument(
+                "--paranoid",
+                action="store_true",
+                help="run Velocity with -Dio.netty.leakDetection.level=paranoid",
+            )
+        ap.set_defaults(func=proxy_cmd)
+    proxy_log = proxy_sub.add_parser("log")
+    proxy_log.add_argument("lines", nargs="?", type=int, default=40)
+    proxy_log.set_defaults(func=proxy_cmd)
 
     p = sub.add_parser("client", help="prepare the workspace client directory")
     p.add_argument("--game-dir")
@@ -2463,6 +2874,13 @@ def main():
         "play", help="launch the client directly, no launcher, random offline name"
     )
     p.add_argument(
+        "--client",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="which stack client to run (2 shares this stack's server)",
+    )
+    p.add_argument(
         "--probe",
         action="store_true",
         help="verify the isolated Minecraft renderer, capture and restart without a private pack",
@@ -2478,7 +2896,7 @@ def main():
     p.add_argument("--game-dir", default=None)
     p.add_argument("--modpack")
     p.add_argument("--mod-repo", default=None)
-    p.add_argument("--xmx", default="4G")
+    p.add_argument("--xmx", default="3G")
     p.add_argument("--resolution", default="1280x720")
     p.add_argument(
         "--headless",
@@ -2509,9 +2927,15 @@ def main():
         "--mod", action="store_true", help="use the locally built blockfield-client jar"
     )
     p.add_argument(
+        "--leak-paranoid",
+        action="store_true",
+        help="run the client with -Dio.netty.leakDetection.level=paranoid "
+        "for transport leak hunts",
+    )
+    p.add_argument(
         "--debug", action="store_true", help="JDWP on 127.0.0.1:5006 for hotswap"
     )
-    p.add_argument("--debug-port", default="5006", help="JDWP port for --debug")
+    p.add_argument("--debug-port", default=None, help="JDWP port for --debug")
     p.set_defaults(func=play)
 
     p = sub.add_parser(

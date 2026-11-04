@@ -38,3 +38,9 @@ fractional/signed offsets, axis defaults, duration bounds and invalid input.
 It is also part of `check`; it does not apply mixins. Use the shared build lock,
 the pinned JDK and `-Dorg.gradle.daemon.idletimeout=600000 --max-workers=2` as described in the workspace
 [development guide](../../../docs/DEVELOPING.md).
+
+Tablet diagnostics: `bftablet` reports open/tab/menu/deployment, framebuffer size,
+requested/actual GUI scale and frame sequence without changing UI state. `uisize WIDTH HEIGHT`
+resizes the isolated game window (640–3840 × 360–2160); `uiscale 1..4` retains Minecraft's
+scale clamping. `bfui` includes keyboard focus for normal Tab/Enter navigation.
+Use `just scenario tablet --plan` for lifecycle and capture-matrix coverage.

@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Ship one branch once: merge base into published history, refuse conflicts, push once,
-wait for CI, print the verdict. Enforces the one-push rule.
+print the PR URL, head SHA and current check/review state, exit 0. Never waits.
 
 Re-running on an already pushed, unchanged branch pushes nothing: it just
-resumes waiting, so a timed-out wait (exit 75) is resumed with the exact
-command printed, never with a copy of this script. Every wait fits one
-shell call (timeout capped at 540 s). The wait is gate-aware: first the
-bot-review commit status on the head, then the gated CI run.
+reports the current state again. History rule: rebase only before publish
+(no remote branch and no PR); a published branch gets a merge of the base,
+never a rewrite. Force-push is never used.
 
-Usage: just pr-ship <repo> <branch> [--timeout SEC]
+Usage: just pr-ship <repo> <branch>
 <repo> is the owning repo checkout (workspace or a submodule path),
 <branch> the task branch. The branch must be checked out work complete and
 committed (uncommitted changes are refused: a push would silently skip them).
-Exit 75 means still pending: re-run the printed resume command.
 """
 
 import json
@@ -23,9 +21,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import agent_preflight  # noqa: E402  (worktree + staleness checks)
-
-MAX_TIMEOUT = 540.0  # keep in sync with await.py: one wait per shell call
-STILL_PENDING = 75  # keep in sync with await.py: re-run the resume command
 
 
 def run(repo, *args, check=True):
@@ -70,30 +65,11 @@ def default_branch(repo):
 
 
 def main(argv):
-    if len(argv) < 2:
-        raise SystemExit("usage: pr_ship.py <repo> <branch> [--timeout SEC]")
+    if len(argv) != 2:
+        raise SystemExit("usage: pr_ship.py <repo> <branch>")
     repo_arg = argv[0]
     repo = Path(repo_arg).resolve()
     branch = argv[1]
-    timeout = "540"
-    rest = argv[2:]
-    while rest:
-        arg = rest.pop(0)
-        if arg == "--timeout" and rest:
-            timeout = rest.pop(0)
-        else:
-            raise SystemExit("usage: pr_ship.py <repo> <branch> [--timeout SEC]")
-    try:
-        if float(timeout) > MAX_TIMEOUT:
-            print(
-                f"--timeout {timeout} capped to {MAX_TIMEOUT:.0f}s: one wait "
-                f"must fit a single shell call; re-run the resume command "
-                f"on exit {STILL_PENDING}",
-                flush=True,
-            )
-            timeout = f"{MAX_TIMEOUT:.0f}"
-    except ValueError:
-        raise SystemExit(f"--timeout must be seconds, got {timeout!r}")
     if not (repo / ".git").exists():
         raise SystemExit(f"{repo} is not a repo checkout")
     agent_preflight.assert_worktree(repo)
@@ -162,7 +138,7 @@ def main(argv):
             )
     elif number and data.get("mergeable") == "CONFLICTING":
         raise SystemExit(
-            f"PR #{number} is CONFLICTING: merge {base} into {branch} before pushing or waiting"
+            f"PR #{number} is CONFLICTING: merge {base} into {branch} before pushing"
         )
     head = run(repo, "rev-parse", "HEAD").stdout.strip()
     if remote != head:
@@ -183,32 +159,52 @@ def main(argv):
                 f"pushed {head[:12]} but no PR exists and creation failed:\n"
                 f"{created.stderr.strip()}"
             )
-        view = gh(repo, "pr", "view", branch, "--json", "number,url")
-        data = json.loads(view.stdout or "{}")
-        number, url = data.get("number"), data.get("url", "")
-    print(f"waiting on PR #{number} {url or ''} head {head[:12]}", flush=True)
-    awaited = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(HERE / "await.py"),
-            "--pr",
-            str(repo),
-            str(number),
-            "--timeout",
-            timeout,
-        ],
-        check=False,
+        # gh pr create prints the new PR URL: keep it so a later lookup
+        # failure cannot hide the PR identity.
+        lines = created.stdout.strip().splitlines()
+        if lines and lines[-1].strip():
+            url = lines[-1].strip()
+    # One non-blocking read of the currently known state; never wait on it.
+    state = gh(
+        repo,
+        "pr",
+        "view",
+        branch,
+        "--json",
+        "number,url,headRefOid,mergeable,mergeStateStatus,reviewDecision,"
+        "statusCheckRollup",
     )
-    verdict = "GREEN" if awaited.returncode == 0 else "NOT GREEN"
-    print(f"{verdict}: PR #{number} {url or ''} head {head[:12]}")
-    if awaited.returncode == STILL_PENDING:  # unchanged branch: resume, no re-push
-        print(
-            f"still pending (exit {STILL_PENDING}): resume in the same turn: "
-            f"just pr-ship {repo_arg} {branch} --timeout {timeout}",
-            flush=True,
+    if state.returncode == 0:
+        try:
+            info = json.loads(state.stdout or "{}")
+        except ValueError:
+            info = {}
+        number, url = info.get("number", number), info.get("url", url or "")
+        rhead = info.get("headRefOid") or head
+        checks = " ".join(
+            f"{k}={info.get(k) or '-'}"
+            for k in ("mergeable", "mergeStateStatus", "reviewDecision")
         )
-    raise SystemExit(awaited.returncode)
+        # per-check states: a failed and a pending bot-review share the
+        # same aggregate merge state, so each check is listed individually.
+        states = ",".join(
+            f"{c.get('name') or c.get('context') or '?'}:"
+            f"{c.get('conclusion') or c.get('state') or '?'}"
+            for c in (info.get("statusCheckRollup") or [])
+            if isinstance(c, dict)
+        )
+        checks += f" checks={states or '-'}"
+    else:
+        rhead, checks = head, "state unknown"
+    if number is None:
+        raise SystemExit(
+            f"pushed {head[:12]} but the PR lookup failed "
+            f"({state.stderr.strip() or 'no output'}); new PR URL from "
+            f"creation: {url or 'unknown'} — rerun just pr-ship to report state"
+        )
+    print(f"PR #{number} {url or ''} head {rhead[:12]}".strip(), flush=True)
+    print(f"checks and reviews: {checks}", flush=True)
+    raise SystemExit(0)
 
 
 if __name__ == "__main__":

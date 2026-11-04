@@ -7,6 +7,8 @@ helper refuses or waits correctly. No network, no Boat, no Gradle.
 """
 
 import importlib.util
+import contextlib
+import io
 import os
 import stat
 import sys
@@ -318,7 +320,7 @@ class PrShipCheckoutGate(unittest.TestCase, FixtureRepos):
         os.chdir(other)
         agent_preflight.assert_worktree(other)
 
-    def test_pr_ship_from_cache_clone_pushes_and_reports_green(self):
+    def test_pr_ship_from_cache_clone_pushes_and_reports_state(self):
         main = self.fresh_clone("main")
         self.blockfield(main, name="blockfield-workspace")
         repo = self.fresh_clone("repo")
@@ -346,13 +348,21 @@ class PrShipCheckoutGate(unittest.TestCase, FixtureRepos):
         git(repo, "add", "new.txt")
         git(repo, "commit", "-qm", "new")
         os.chdir(main)
+        out = io.StringIO()
         with patch.dict(os.environ, env):
-            with self.assertRaises(SystemExit) as ctx:
+            with (
+                contextlib.redirect_stdout(out),
+                self.assertRaises(SystemExit) as ctx,
+            ):
                 pr_ship.main([str(repo), "feature"])
         self.assertEqual(ctx.exception.code, 0)
         pushed = git(self.origin, "rev-parse", "refs/heads/feature")
         local = git(repo, "rev-parse", "HEAD")
         self.assertEqual(pushed.stdout.strip(), local.stdout.strip())
+        self.assertIn("PR #42", out.getvalue())
+        self.assertIn("http://x/42", out.getvalue())
+        self.assertIn(local.stdout.strip()[:12], out.getvalue())
+        self.assertIn("checks and reviews", out.getvalue())
 
 
 class PreflightPins(unittest.TestCase):
@@ -509,8 +519,25 @@ args = sys.argv[1:]
 if args[:2] == ["pr", "view"]:
     sha = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
-    print(json.dumps({"number": 42, "mergeable": os.environ.get("FAKE_GH_MERGEABLE", "MERGEABLE"),
-                      "mergeStateStatus": "CLEAN", "headRefOid": sha, "url": "http://x/42"}))
+    if "statusCheckRollup" in args[-1]:
+        # final state read: reports the per-check rollup, or fails transiently
+        if os.environ.get("FAKE_GH_STATE_FAIL"):
+            print("transient API failure", file=sys.stderr)
+            sys.exit(1)
+        state = os.environ.get("FAKE_GH_BOT", "SUCCESS")
+        print(json.dumps({"number": 42, "mergeable": os.environ.get("FAKE_GH_MERGEABLE", "MERGEABLE"),
+                          "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED",
+                          "headRefOid": sha, "url": "http://x/42",
+                          "statusCheckRollup": [{"__typename": "StatusContext", "context": "bot-review",
+                                                 "state": state, "description": "fake"},
+                                                {"__typename": "CheckRun", "name": "ci",
+                                                 "status": "COMPLETED", "conclusion": "SUCCESS"}]}))
+    elif os.environ.get("FAKE_GH_NO_PR"):
+        print("no pull requests found for branch", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(json.dumps({"number": 42, "mergeable": os.environ.get("FAKE_GH_MERGEABLE", "MERGEABLE"),
+                          "mergeStateStatus": "CLEAN", "headRefOid": sha, "url": "http://x/42"}))
 elif args[:2] == ["repo", "view"]:
     print(json.dumps({"nameWithOwner": "Blockfield/fake"}))
 elif args[:1] == ["api"] and args[1].endswith("/status"):
@@ -593,20 +620,24 @@ class PrShip(unittest.TestCase, FixtureRepos):
         )
         self.assertNotEqual(remote.returncode, 0)
 
-    def test_stale_branch_rebases_pushes_once_and_reports_green(self):
+    def test_stale_branch_rebases_pushes_once_and_reports_state(self):
         git(self.repo, "checkout", "-qb", "feature")
         (self.repo / "new.txt").write_text("new\n")
         git(self.repo, "add", "new.txt")
         git(self.repo, "commit", "-qm", "new")
         self.advance_origin("remote")
-        with self.assertRaises(SystemExit) as ctx:
-            pr_ship.main([str(self.repo), "feature"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                pr_ship.main([str(self.repo), "feature"])
         self.assertEqual(ctx.exception.code, 0)
         pushed = git(self.origin, "rev-parse", "refs/heads/feature").stdout.strip()
         local = git(self.repo, "rev-parse", "HEAD").stdout.strip()
         self.assertEqual(pushed, local)
         # single push: origin main is the remote change, feature contains both
         self.assertIn("remote", (self.repo / "file.txt").read_text())
+        self.assertIn("PR #42", out.getvalue())
+        self.assertIn(local[:12], out.getvalue())
 
     def test_conflicting_pr_is_never_waited_on(self):
         git(self.repo, "checkout", "-qb", "feat")
@@ -615,6 +646,35 @@ class PrShip(unittest.TestCase, FixtureRepos):
             with self.assertRaises(SystemExit) as ctx:
                 pr_ship.main([str(self.repo), "feat"])
         self.assertIn("CONFLICTING", str(ctx.exception))
+
+    def test_state_report_includes_per_check_rollup(self):
+        git(self.repo, "checkout", "-qb", "feature")
+        (self.repo / "new.txt").write_text("new\n")
+        git(self.repo, "add", "new.txt")
+        git(self.repo, "commit", "-qm", "new")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                pr_ship.main([str(self.repo), "feature"])
+        self.assertEqual(ctx.exception.code, 0)
+        # a failed bot-review status and a pending one share the same
+        # aggregate merge state, so each check is printed individually.
+        self.assertIn("bot-review:SUCCESS", out.getvalue())
+        self.assertIn("ci:SUCCESS", out.getvalue())
+
+    def test_create_then_failed_lookup_keeps_url_and_fails(self):
+        git(self.repo, "checkout", "-qb", "fresh")
+        (self.repo / "new.txt").write_text("new\n")
+        git(self.repo, "add", "new.txt")
+        git(self.repo, "commit", "-qm", "new")
+        env = {**self.env, "FAKE_GH_NO_PR": "1", "FAKE_GH_STATE_FAIL": "1"}
+        with patch.dict(os.environ, env):
+            with self.assertRaises(SystemExit) as ctx:
+                pr_ship.main([str(self.repo), "fresh"])
+        # identity unknown: non-zero so the caller notices, with the
+        # creation URL kept so the PR can be recovered.
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("http://x/42", str(ctx.exception))
 
 
 class BoatBuildKeep(unittest.TestCase):

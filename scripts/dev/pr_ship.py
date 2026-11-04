@@ -159,6 +159,11 @@ def main(argv):
                 f"pushed {head[:12]} but no PR exists and creation failed:\n"
                 f"{created.stderr.strip()}"
             )
+        # gh pr create prints the new PR URL: keep it so a later lookup
+        # failure cannot hide the PR identity.
+        lines = created.stdout.strip().splitlines()
+        if lines and lines[-1].strip():
+            url = lines[-1].strip()
     # One non-blocking read of the currently known state; never wait on it.
     state = gh(
         repo,
@@ -166,7 +171,8 @@ def main(argv):
         "view",
         branch,
         "--json",
-        "number,url,headRefOid,mergeable,mergeStateStatus,reviewDecision",
+        "number,url,headRefOid,mergeable,mergeStateStatus,reviewDecision,"
+        "statusCheckRollup",
     )
     if state.returncode == 0:
         try:
@@ -179,8 +185,23 @@ def main(argv):
             f"{k}={info.get(k) or '-'}"
             for k in ("mergeable", "mergeStateStatus", "reviewDecision")
         )
+        # per-check states: a failed and a pending bot-review share the
+        # same aggregate merge state, so each check is listed individually.
+        states = ",".join(
+            f"{c.get('name') or c.get('context') or '?'}:"
+            f"{c.get('conclusion') or c.get('state') or '?'}"
+            for c in (info.get("statusCheckRollup") or [])
+            if isinstance(c, dict)
+        )
+        checks += f" checks={states or '-'}"
     else:
         rhead, checks = head, "state unknown"
+    if number is None:
+        raise SystemExit(
+            f"pushed {head[:12]} but the PR lookup failed "
+            f"({state.stderr.strip() or 'no output'}); new PR URL from "
+            f"creation: {url or 'unknown'} — rerun just pr-ship to report state"
+        )
     print(f"PR #{number} {url or ''} head {rhead[:12]}".strip(), flush=True)
     print(f"checks and reviews: {checks}", flush=True)
     raise SystemExit(0)

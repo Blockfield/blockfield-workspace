@@ -152,7 +152,11 @@ def kotlin(files, format=False):
 
 
 def lint(files):
-    run("actionlint")
+    workflows = ROOT / ".github/workflows"
+    if workflows.is_dir() and (
+        list(workflows.glob("*.yml")) + list(workflows.glob("*.yaml"))
+    ):
+        run("actionlint")
     each(["ruff", "check"], [f for f in files if f.endswith(".py")])
     each(["shellcheck", "--severity=error"], [f for f in files if f.endswith(".sh")])
     kotlin([f for f in files if f.endswith((".kt", ".kts"))])

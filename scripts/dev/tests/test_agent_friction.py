@@ -7,6 +7,8 @@ helper refuses or waits correctly. No network, no Boat, no Gradle.
 """
 
 import importlib.util
+import contextlib
+import io
 import os
 import stat
 import sys
@@ -318,7 +320,7 @@ class PrShipCheckoutGate(unittest.TestCase, FixtureRepos):
         os.chdir(other)
         agent_preflight.assert_worktree(other)
 
-    def test_pr_ship_from_cache_clone_pushes_and_reports_green(self):
+    def test_pr_ship_from_cache_clone_pushes_and_reports_state(self):
         main = self.fresh_clone("main")
         self.blockfield(main, name="blockfield-workspace")
         repo = self.fresh_clone("repo")
@@ -346,13 +348,21 @@ class PrShipCheckoutGate(unittest.TestCase, FixtureRepos):
         git(repo, "add", "new.txt")
         git(repo, "commit", "-qm", "new")
         os.chdir(main)
+        out = io.StringIO()
         with patch.dict(os.environ, env):
-            with self.assertRaises(SystemExit) as ctx:
+            with (
+                contextlib.redirect_stdout(out),
+                self.assertRaises(SystemExit) as ctx,
+            ):
                 pr_ship.main([str(repo), "feature"])
         self.assertEqual(ctx.exception.code, 0)
         pushed = git(self.origin, "rev-parse", "refs/heads/feature")
         local = git(repo, "rev-parse", "HEAD")
         self.assertEqual(pushed.stdout.strip(), local.stdout.strip())
+        self.assertIn("PR #42", out.getvalue())
+        self.assertIn("http://x/42", out.getvalue())
+        self.assertIn(local.stdout.strip()[:12], out.getvalue())
+        self.assertIn("checks and reviews", out.getvalue())
 
 
 class PreflightPins(unittest.TestCase):
@@ -593,20 +603,24 @@ class PrShip(unittest.TestCase, FixtureRepos):
         )
         self.assertNotEqual(remote.returncode, 0)
 
-    def test_stale_branch_rebases_pushes_once_and_reports_green(self):
+    def test_stale_branch_rebases_pushes_once_and_reports_state(self):
         git(self.repo, "checkout", "-qb", "feature")
         (self.repo / "new.txt").write_text("new\n")
         git(self.repo, "add", "new.txt")
         git(self.repo, "commit", "-qm", "new")
         self.advance_origin("remote")
-        with self.assertRaises(SystemExit) as ctx:
-            pr_ship.main([str(self.repo), "feature"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                pr_ship.main([str(self.repo), "feature"])
         self.assertEqual(ctx.exception.code, 0)
         pushed = git(self.origin, "rev-parse", "refs/heads/feature").stdout.strip()
         local = git(self.repo, "rev-parse", "HEAD").stdout.strip()
         self.assertEqual(pushed, local)
         # single push: origin main is the remote change, feature contains both
         self.assertIn("remote", (self.repo / "file.txt").read_text())
+        self.assertIn("PR #42", out.getvalue())
+        self.assertIn(local[:12], out.getvalue())
 
     def test_conflicting_pr_is_never_waited_on(self):
         git(self.repo, "checkout", "-qb", "feat")

@@ -1,0 +1,8 @@
+[submodule "client"]
+	path = client
+	url = https://github.com/Blockfield/blockfield-client.git
+	branch = main
+[submodule "localmods/blockfield-mod"]
+	path = localmods/blockfield-mod
+	url = https://github.com/Blockfield/blockfield-mod.git
+	branch = main

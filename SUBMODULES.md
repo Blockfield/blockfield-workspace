@@ -1,14 +1,16 @@
-# Submodules in the private workspace
+# Submodules in the public workspace
 
-This public export contains no submodule contents: every gitlink present
-in the private tree was dropped, and `.gitmodules` was removed, so no
-private repository is referenced here as cloneable.
+This repo tracks the public sources as submodules:
 
-Paths that were submodule gitlinks in the private tree:
+- `client/` → `Blockfield/blockfield-client`
+- `localmods/blockfield-mod/` → `Blockfield/blockfield-mod`
 
-- `client/`
+The private server is not a submodule (a public repo cannot track a
+private one): its pinned commit is recorded in `pins/server.sha`.
+
+Paths that remain private-only checkouts in the private workspace:
+
 - `localmods/blockfield-decor/`
-- `localmods/blockfield-mod/`
 - `localmods/blockfield-music/`
 - `localmods/cozy-home/`
 - `localmods/create-fabric/`
@@ -24,6 +26,6 @@ Paths that were submodule gitlinks in the private tree:
 - `localmods/yuushya/`
 - `server/`
 
-Jobs and docs that need these checkouts stay in the private repo.
+Jobs and docs that need those checkouts stay in the private repo.
 The export only keeps jobs that run on `ubuntu-24.04` without private
 submodules or secrets (see `.github/workflows/public-export-check.yml`).

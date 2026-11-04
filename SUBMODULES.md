@@ -33,5 +33,3 @@ Paths that remain private-only checkouts in the private workspace:
 - `server/`
 
 Jobs and docs that need those checkouts stay in the private repo.
-The export only keeps jobs that run on `ubuntu-24.04` without private
-submodules or secrets (see `.github/workflows/public-export-check.yml`).

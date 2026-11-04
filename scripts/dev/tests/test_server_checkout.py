@@ -74,6 +74,12 @@ class ServerCheckout(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "not a git checkout"):
             server_checkout.checkout_server(self.root, url=str(self.origin))
 
+    def test_dirty_checkout_is_refused(self):
+        server_checkout.checkout_server(self.root, url=str(self.origin))
+        (self.root / "server" / "pack.toml").write_text("[versions]\ndirty\n")
+        with self.assertRaisesRegex(SystemExit, "local changes"):
+            server_checkout.checkout_server(self.root, url=str(self.origin))
+
 
 if __name__ == "__main__":
     unittest.main()

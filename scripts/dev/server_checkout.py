@@ -33,6 +33,19 @@ def run_git(*args, cwd):
         die(f"git {' '.join(args)} failed in {cwd}: {error}")
 
 
+def git_output(*args, cwd):
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        die(f"git {' '.join(args)} failed in {cwd}: {error}")
+
+
 def checkout_server(root=ROOT, url=SERVER_URL):
     """Clone server/ beside the workspace and pin it detached at pins/server.sha."""
     sha = pinned_sha(root)
@@ -42,16 +55,11 @@ def checkout_server(root=ROOT, url=SERVER_URL):
     if not target.exists():
         run_git("clone", url, str(target), cwd=root)
     run_git("fetch", "origin", cwd=target)
+    if git_output("status", "--porcelain", "--untracked-files=no", cwd=target):
+        die(f"{target} has local changes: stash, commit or reset them first")
     run_git("checkout", "--detach", sha, cwd=target)
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=target,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if head != sha:
-        die(f"{target} is at {head}, expected {sha}")
+    if git_output("rev-parse", "HEAD", cwd=target) != sha:
+        die(f"{target} is not at {sha} after checkout")
     return target
 
 

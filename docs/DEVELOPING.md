@@ -136,7 +136,7 @@ Rust — собственный кеш с разделением runner images. 
 Сайт использует собственные команды pnpm; бот — native Go. Они не входят
 в devstack workspace и не требуют Just.
 Серверные map/package/release checks доступны на обеих ОС. Контроллер мастерской
-и ZIP-validator выделены в [blockfield-workshop](<private-repo>);
+и ZIP-validator выделены в [blockfield-workshop](private-repo);
 server получает validator по полному SHA и checksum. Production Docker
 controller использует Linux и проверяется полным Linux CI. Его
 операционные команды на Windows завершаются явной ошибкой, без подмены результата.

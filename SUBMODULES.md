@@ -8,6 +8,12 @@ This repo tracks the public sources as submodules:
 The private server is not a submodule (a public repo cannot track a
 private one): its pinned commit is recorded in `pins/server.sha`.
 
+Developers with access to the private server repo materialize it with
+`just server-checkout`: it clones `Blockfield/blockfield-server` into
+`server/` (if missing) and checks out the pinned SHA detached. The recipe is
+idempotent; without access the clone fails loudly. `server/` is git-ignored —
+never commit it.
+
 Paths that remain private-only checkouts in the private workspace:
 
 - `localmods/blockfield-decor/`

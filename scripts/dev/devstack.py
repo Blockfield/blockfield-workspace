@@ -234,6 +234,8 @@ def modpack_dir(argument=None, side="server"):
             return path.resolve()
     die(
         f"{side} pack not found: run from the blockfield-workspace checkout or pass --modpack"
+        if side != "server"
+        else f"{side} pack not found: run `just server-checkout` first (needs access to the private server repo)"
     )
 
 

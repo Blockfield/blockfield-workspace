@@ -84,6 +84,11 @@ setup *args:
     sys.argv = ["bf.py", *["setup", *sys.argv[1:]]]
     runpy.run_path("bf.py", run_name="__main__")
 
+server-checkout *args:
+    import runpy, sys
+    sys.argv = ["scripts/dev/server_checkout.py", *sys.argv[1:]]
+    runpy.run_path("scripts/dev/server_checkout.py", run_name="__main__")
+
 build-mods *args:
     import runpy, sys
     sys.argv = ["bf.py", *["build-mods", *sys.argv[1:]]]

@@ -21,6 +21,79 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import boat_build as bb  # noqa: E402
 
+# Golden VMs predate the public migration: their workspace clone still points
+# at the archived private repo, whose main pins a private-only client
+# (FALLBACK-MAIN want 7ad39817, unfetchable from the public client repo).
+PUBLIC_WORKSPACE_URL = "https://github.com/Blockfield/blockfield-workspace.git"
+
+# Pack-host probe for the client-pack warm (client PR #3 pattern: upstream
+# release asset, bounded fetch). A dead host must fail in seconds, not hang
+# the warm: urllib applies the timeout to the connect and to every read.
+PACK_HOST_URL = "https://blockfield.pro/pack.toml"
+FETCH_TIMEOUT = 20
+
+
+def host_reachable(probe_output):
+    """True when the pack-host probe printed PACK-HOST-UP (HTTP errors count:
+    the host answered, only the probe path may be missing)."""
+    return "PACK-HOST-UP" in probe_output
+
+
+def checkout_script(remote_root):
+    return (
+        f"cd {remote_root} && git remote set-url origin {PUBLIC_WORKSPACE_URL} && "
+        "git remote -v && git fetch origin -q && "
+        "git checkout -q origin/main && git submodule init -q && "
+        # A workspace pin can name an object the submodule origin does not
+        # serve (rewritten history, mid-push race): fall back to the
+        # submodule's origin/main so the bake (a cache, not a build input)
+        # stays green and warm.
+        "for m in client localmods/blockfield-mod; do "
+        "want=$(git ls-tree HEAD \"$m\" | awk '{print $3}'); "
+        'if git submodule update -q -- "$m" 2>/dev/null && '
+        'git -C "$m" cat-file -e "$want" 2>/dev/null; then '
+        'echo "PIN-OK $m $want"; else '
+        'git -C "$m" fetch origin -q && '
+        'git -C "$m" checkout -q origin/main && '
+        'echo "FALLBACK-MAIN $m $(git -C "$m" rev-parse HEAD) '
+        '(want was $want)"; fi; done && '
+        "git rev-parse HEAD && git submodule status | sed 's/^ *//'"
+    )
+
+
+def probe_script():
+    lines = [
+        "import urllib.request, urllib.error",
+        f"req = urllib.request.Request({PACK_HOST_URL!r}, "
+        "headers={'User-Agent': 'boat-bake/1.0'})",
+        "try:",
+        f"    urllib.request.urlopen(req, timeout={FETCH_TIMEOUT})",
+        "    print('PACK-HOST-UP')",
+        "except urllib.error.HTTPError:",
+        "    print('PACK-HOST-UP')",
+        "except Exception as error:",
+        "    print('PACK-HOST-DOWN', type(error).__name__, str(error)[:120])",
+    ]
+    return "python3 - <<'BOAT_BAKE_EOF'\n" + "\n".join(lines) + "\nBOAT_BAKE_EOF"
+
+
+def launcher_deps_script():
+    # plans/next-release/boat-deps-launcher.txt: mingw-w64 + rustup target,
+    # Tauri/WebKitGTK build libs, Xvfb + fonts (launcher Layer-2 e2e).
+    return (
+        "sudo apt-get update -qq && "
+        "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "
+        "mingw-w64 xvfb xauth fonts-dejavu-core fonts-liberation "
+        "mesa-vulkan-drivers libgl1 libfontconfig-dev libxkbcommon-x11-0 libx11-xcb1 "
+        "libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf "
+        "xdotool mesa-utils imagemagick && "
+        "rustup target add x86_64-pc-windows-gnu --toolchain 1.99.0 && "
+        "cargo clippy --version && "
+        "x86_64-w64-mingw32-gcc --version | head -1 && "
+        "Xvfb -help 2>&1 | head -1 && "
+        "pkg-config --modversion webkit2gtk-4.1 gtk+-3.0"
+    )
+
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -114,22 +187,7 @@ def main(argv=None):
             vm_id,
             timings,
             "checkout-main",
-            f"cd {remote_root} && git fetch origin -q && "
-            "git checkout -q origin/main && git submodule init -q && "
-            # A workspace pin can name an object the submodule origin does not
-            # serve (rewritten history, mid-push race): fall back to the
-            # submodule's origin/main so the bake (a cache, not a build input)
-            # stays green and warm.
-            "for m in client localmods/blockfield-mod; do "
-            "want=$(git ls-tree HEAD \"$m\" | awk '{print $3}'); "
-            'if git submodule update -q -- "$m" 2>/dev/null && '
-            'git -C "$m" cat-file -e "$want" 2>/dev/null; then '
-            'echo "PIN-OK $m $want"; else '
-            'git -C "$m" fetch origin -q && '
-            'git -C "$m" checkout -q origin/main && '
-            'echo "FALLBACK-MAIN $m $(git -C "$m" rev-parse HEAD) '
-            '(want was $want)"; fi; done && '
-            "git rev-parse HEAD && git submodule status | sed 's/^ *//'",
+            checkout_script(remote_root),
             args.timeout,
         )
         print(out.strip())
@@ -154,6 +212,14 @@ def main(argv=None):
             'export PATH="$HOME/.local/bin:$PATH" && just --version',
             args.timeout,
         )
+        out = step(
+            vm_id,
+            timings,
+            "launcher-deps",
+            launcher_deps_script(),
+            args.timeout,
+        )
+        print(out.strip()[-1500:])
         # Boat images run a broken snapd that burns CPU on every fork; the mask survives snapshots.
         step(
             vm_id,
@@ -182,16 +248,31 @@ def main(argv=None):
         out = step(
             vm_id,
             timings,
-            "setup-testbot",
-            f"source {env_file} && cd {remote_root} && "
-            "just setup --testbot > /tmp/bake-setup.log 2>&1; rc=$?; "
-            "tail -c 6000 /tmp/bake-setup.log; exit $rc",
-            args.timeout,
-            # Client-pack fetch needs blockfield.pro, which is down: warm what
-            # we can (JDK, Gradle/Loom, testbot build), keep baking caches.
+            "pack-host-probe",
+            probe_script(),
+            FETCH_TIMEOUT + 60,
             check=False,
         )
-        print(out.strip()[-2000:])
+        print(out.strip())
+        if host_reachable(out):
+            out = step(
+                vm_id,
+                timings,
+                "setup-testbot",
+                f"source {env_file} && cd {remote_root} && "
+                "just setup --testbot > /tmp/bake-setup.log 2>&1; rc=$?; "
+                "tail -c 6000 /tmp/bake-setup.log; exit $rc",
+                args.timeout,
+            )
+            print(out.strip()[-2000:])
+        else:
+            # Client-pack fetch needs blockfield.pro: skip the warm when the
+            # host is down, keep baking the caches that need no pack host.
+            print(
+                "boat-bake [setup-testbot]: PACK-HOST-DOWN-SKIP "
+                "(JDK/Gradle/Loom warm below needs no pack host)",
+                flush=True,
+            )
         out = step(
             vm_id,
             timings,

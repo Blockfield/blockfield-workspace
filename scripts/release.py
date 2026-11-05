@@ -1,8 +1,9 @@
 """Release tooling: status, preflight, prepare, candidate, pin, ship.
 
 Never creates or pushes tags and never starts Deploy, except through
-`release ship`: tags and Deploy start production deploys and stay with the
-owner, so ship refuses to run without --confirmed-by-owner. Other mutating
+`release ship` and `release rollback-client`: tags and Deploy start
+production deploys and stay with the owner, so both refuse to run without
+--confirmed-by-owner. Other mutating
 commands go through mutate() and honour --dry-run; ship's own merges and tags
 go through ship_mutate(), which has the same dry-run behaviour.
 
@@ -1314,7 +1315,9 @@ def wait_release_run(side, sha, timeout_s, interval_s, tag):
     return found
 
 
-def wait_run_success(side, run_id, timeout_s, interval_s):
+def wait_run_success(side, run_id, timeout_s, interval_s, repo=None):
+    repo = repo or REPO[side]
+
     def ready():
         found = json.loads(
             gh(
@@ -1322,7 +1325,7 @@ def wait_run_success(side, run_id, timeout_s, interval_s):
                 "view",
                 str(run_id),
                 "--repo",
-                REPO[side],
+                repo,
                 "--json",
                 "status,conclusion,url",
             )
@@ -1588,6 +1591,11 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s, client_stage_run=
     return verify_publication(side, tag)
 
 
+def deploy_repo(side):
+    """Repo hosting side's Deploy workflow (client deploys from the server repo)."""
+    return REPO["server"] if side == "client" else REPO[side]
+
+
 def deploy_command(side, tag, client_tag=None):
     if side == "client":
         # The public client repo only publishes the release: its deploy.yml
@@ -1640,7 +1648,7 @@ def dispatch_deploy(side, tag, timeout_s, interval_s, client_tag=None, dry=False
             f"{side} Deploy dispatched without a run ID; inspect Actions, do not retry"
         )
     say(f"  Deploy {side}: {data['html_url']}")
-    wait_run_success(side, run_id, timeout_s, interval_s)
+    wait_run_success(side, run_id, timeout_s, interval_s, deploy_repo(side))
 
 
 def verify_pair(tags, client, timeout_s, interval_s):
@@ -2060,6 +2068,12 @@ def cmd_ship(args):
 
 def cmd_rollback_client(args):
     """Roll the served client back to an older tag via the server workflow."""
+    if not args.confirmed_by_owner and not args.dry_run:
+        raise SystemExit(
+            "refusing: `release rollback-client` switches production serving, "
+            "and serving switches stay with the owner. "
+            "Rerun with --confirmed-by-owner after the owner confirms this release explicitly in the conversation."
+        )
     if not parse(args.tag):
         raise SystemExit(f"rollback-client requires a vX.Y.Z tag, got {args.tag!r}")
     dispatch_deploy("client", args.tag, args.timeout, args.interval, dry=args.dry_run)
@@ -2166,6 +2180,11 @@ def parser():
         help="roll the served client back to an older tag via the server deploy-client workflow",
     )
     s.add_argument("tag", metavar="vX.Y.Z")
+    s.add_argument(
+        "--confirmed-by-owner",
+        action="store_true",
+        help="the owner confirmed this release explicitly in the conversation (serving switches stay with the owner)",
+    )
     s.add_argument(
         "--timeout",
         type=int,

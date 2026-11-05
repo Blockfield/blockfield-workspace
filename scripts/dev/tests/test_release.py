@@ -1699,7 +1699,7 @@ class PairGates(unittest.TestCase):
             ),
         )
         self.assertEqual(dispatch.call_count, 1)
-        success.assert_called_once_with("server", 12, 1, 0)
+        success.assert_called_once_with("server", 12, 1, 0, release.REPO["server"])
 
     def test_dispatch_without_run_id_stops_without_retry(self):
         with (
@@ -1737,6 +1737,126 @@ class PairGates(unittest.TestCase):
         ):
             release.verify_pair(tags, client, 1, 0)
         promoted.assert_called_once_with(tags["client"], False, latest=True)
+
+
+class ClientDeploy(unittest.TestCase):
+    def test_client_dispatch_targets_server_workflow(self):
+        self.assertEqual(
+            release.deploy_command("client", "v2.77.0"),
+            (
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/Blockfield/blockfield-server/actions/workflows/deploy-client.yml/dispatches",
+                "-H",
+                "X-GitHub-Api-Version: 2022-11-28",
+                "-f",
+                "ref=main",
+                "-F",
+                "return_run_details=true",
+                "-f",
+                "inputs[tag]=v2.77.0",
+                "-f",
+                "inputs[dry_run]=false",
+            ),
+        )
+        with (
+            mock.patch.object(
+                release,
+                "ship_mutate",
+                return_value=json.dumps({"workflow_run_id": 12, "html_url": "run-url"}),
+            ) as dispatch,
+            mock.patch.object(release, "wait_run_success") as success,
+        ):
+            release.dispatch_deploy("client", "v2.77.0", 1, 0)
+        self.assertEqual(
+            dispatch.call_args.args[1:],
+            release.deploy_command("client", "v2.77.0"),
+        )
+        success.assert_called_once_with("client", 12, 1, 0, release.REPO["server"])
+
+    def test_deploy_waiter_uses_dispatch_repo_for_every_side(self):
+        for side in ("client", "server"):
+            with (
+                mock.patch.object(
+                    release,
+                    "ship_mutate",
+                    return_value=json.dumps(
+                        {"workflow_run_id": 12, "html_url": "run-url"}
+                    ),
+                ),
+                mock.patch.object(release, "wait_run_success") as success,
+            ):
+                release.dispatch_deploy(side, "v2.77.0", 1, 0)
+            success.assert_called_once_with(side, 12, 1, 0, release.deploy_repo(side))
+        self.assertEqual(release.deploy_repo("client"), release.REPO["server"])
+        self.assertEqual(release.deploy_repo("server"), release.REPO["server"])
+
+    def test_wait_run_success_polls_given_repo(self):
+        with mock.patch.object(
+            release,
+            "gh",
+            return_value=json.dumps({"conclusion": "success", "url": "run-url"}),
+        ) as gh:
+            release.wait_run_success("client", 12, 1, 0, release.REPO["server"])
+        repo_flag = gh.call_args.args
+        self.assertIn(release.REPO["server"], repo_flag)
+        self.assertNotIn(release.REPO["client"], repo_flag)
+
+    def test_server_dispatch_still_targets_server_deploy(self):
+        self.assertIn(
+            "repos/Blockfield/blockfield-server/actions/workflows/deploy.yml/dispatches",
+            release.deploy_command("server", "v2.77.0", client_tag="v2.77.0"),
+        )
+        self.assertIn(
+            "inputs[client_tag]=v2.77.0",
+            release.deploy_command("server", "v2.77.0", client_tag="v2.77.0"),
+        )
+
+    def test_rollback_client_dispatches_older_tag(self):
+        args = release.parser().parse_args(
+            ["rollback-client", "v2.76.3", "--confirmed-by-owner"]
+        )
+        with mock.patch.object(release, "dispatch_deploy") as dispatch:
+            self.assertTrue(release.cmd_rollback_client(args))
+        dispatch.assert_called_once_with("client", "v2.76.3", 1800, 5, dry=False)
+
+    def test_rollback_client_rejects_bad_tag(self):
+        args = release.parser().parse_args(
+            ["rollback-client", "nope", "--confirmed-by-owner"]
+        )
+        with (
+            mock.patch.object(
+                release, "dispatch_deploy", side_effect=AssertionError("no dispatch")
+            ),
+        ):
+            with self.assertRaises(SystemExit):
+                release.cmd_rollback_client(args)
+
+    def test_rollback_client_dry_run_dispatches_nothing(self):
+        args = release.parser().parse_args(["rollback-client", "v2.76.3", "--dry-run"])
+        with mock.patch.object(release, "say"):
+            with mock.patch.object(
+                release, "run", side_effect=AssertionError("no dispatch")
+            ):
+                with mock.patch.object(release, "wait_run_success") as success:
+                    self.assertTrue(release.cmd_rollback_client(args))
+        success.assert_not_called()
+
+    def test_rollback_client_refuses_without_owner_confirmation(self):
+        args = release.parser().parse_args(["rollback-client", "v2.76.3"])
+        with mock.patch.object(
+            release, "dispatch_deploy", side_effect=AssertionError("no dispatch")
+        ):
+            with self.assertRaisesRegex(SystemExit, "--confirmed-by-owner"):
+                release.cmd_rollback_client(args)
+
+    def test_rollback_client_dry_run_needs_no_confirmation(self):
+        args = release.parser().parse_args(["rollback-client", "v2.76.3", "--dry-run"])
+        with mock.patch.object(release, "dispatch_deploy") as dispatch:
+            self.assertTrue(release.cmd_rollback_client(args))
+        dispatch.assert_called_once_with("client", "v2.76.3", 1800, 5, dry=True)
 
 
 class PendingServerPins(unittest.TestCase):

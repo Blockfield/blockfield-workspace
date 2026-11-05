@@ -786,7 +786,13 @@ def chat(system, user, model, key, temperature=0.2):
     req = urllib.request.Request(
         API_URL,
         data=body,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            # OpenRouter показывает приложение в Activity только по этим заголовкам.
+            "HTTP-Referer": "https://blockfield.pro",
+            "X-Title": "Blockfield Release Text",
+        },
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
         return json.load(resp)["choices"][0]["message"]["content"]

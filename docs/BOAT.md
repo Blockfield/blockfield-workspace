@@ -213,9 +213,13 @@ client/server `compile`/`build` при наличии wrapper), отказыва
 Правки — локально, VM — только на сборку. Один вызов helper на сборку:
 
 ```sh
-just boat-build --fork-from bx_GOLDEN --name bf-task --branch my-branch --timeout 1800 -- \
+just boat-build --name bf-task --branch my-branch --timeout 1800 -- \
   'cd localmods/blockfield-mod && ./gradlew :server:test --max-workers=2'
 ```
+
+(`--name` один: helper сначала resume'ит собственную остановленную VM с
+этим именем, иначе форкает newest golden; `--vm`/`--fork-from` прикалывают
+источник явно.)
 
 Helper сам resume/fork'ает VM, переносит точные коммиты без push в origin
 (git bundle от merge-base с origin/main либо полный ref, когда база неизвестна;
@@ -243,14 +247,21 @@ evidence перед ручным stop. Незакоммиченные правк
 не медленнее `default` (замер: small ~259 с, default ~296 с — медианы
 `--rerun-tasks` после прогрева; оба упираются в один предсуществующий
 падающий тест) и вдвое дешевле — используйте `small`, если VM не
-упирается в память. Golden VM `bf-golden-20261031` (`bx_7ah8ntd6`,
-пины ws 58c0b588, JDK 21, прогретые кеши, `just setup --testbot` готов):
-задачи делают fork неё и сразу собирают. Fork всегда с re-pin окружения
+упирается в память. Задачи по умолчанию стартуют с newest golden
+(`bf-golden-*`, без суффикса ` fork`, свежий `snapshotCompletedAt`;
+`latest_golden_vm` в `scripts/dev/boat_build.py`): сначала resume
+собственной остановленной VM (`--name`), иначе fork golden. Golden v2
+печётся скриптом (`scripts/dev/boat_bake.py`, рецепт `just boat-bake
+--name bf-golden-YYYYMMDD`): pinned Temurin 21, репозитории на
+origin/main, прогрев `just setup --testbot` + один compile+remap проход
+(`:common:compileJava :client:compileJava :client:remapJar`), кеши
+cargo/npm/uv, лимиты в `~/.gradle/gradle.properties` (caching + cleanup,
+14 дней). Перепекайте раз в месяц или при материальных сменах пинов
+workspace/submodules: fork newest golden, bake, stop; старый golden
+оставляйте остановленным, не удаляйте. Fork всегда с re-pin окружения
 (`--environment blockfield`, helper делает это сам): GitHub-авторизация
 только из окружения Boat, в golden нет baked-конфига `gh`
-(протухший baked токен даёт 401 на скачивании релизов). Обновляйте golden,
-когда пины workspace/submodules материально меняются: fork, checkout новых
-пинов, прогрев, stop; старый golden оставляйте остановленным, не удаляйте.
+(протухший baked токен даёт 401 на скачивании релизов).
 При подготовке golden замаскируйте snapd (`sudo -n systemctl mask --now
 snapd.service snapd.socket snapd.seeded.service snapd.snap-repair.service
 snapd.refresh.timer`): в образе Boat он падает с кодом 42 примерно раз в

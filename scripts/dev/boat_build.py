@@ -5,8 +5,10 @@ install locally built fork jars, run a command with a hard timeout, fetch logs,
 and stop the VM only after a terminal verdict and preserved evidence.
 
 Example:
-  just boat-build --fork-from bx_abc --name bf-task --workspace-sha <sha> \\
-      --submodule localmods/blockfield-mod=<sha> -- ./gradlew :server:test
+  just boat-build --name bf-task --branch my-branch --timeout 1800 -- \
+      'cd localmods/blockfield-mod && ./gradlew :server:test --max-workers=2'
+  (--name alone resumes the own stopped VM of that name, else forks the
+  newest golden; --vm/--fork-from pin the source explicitly.)
   just boat-build --vm bx_mine --local-jar tacz-refabricated=/tmp/TACZ.jar -- \\
       'just setup --force'
 """
@@ -83,13 +85,18 @@ def run_git(*args, cwd=ROOT, check=True):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
-    target = parser.add_mutually_exclusive_group(required=True)
+    target = parser.add_mutually_exclusive_group(required=False)
     target.add_argument(
         "--resume-run", help="resume the saved run without dispatching again"
     )
     target.add_argument("--vm", help="resume this stopped VM (with --no-wait)")
     target.add_argument("--fork-from", help="fork this VM's latest snapshot")
-    parser.add_argument("--name", help="name for the fork (required with --fork-from)")
+    parser.add_argument(
+        "--name",
+        help="task VM name: with --fork-from it names the fork; alone it "
+        "resumes the own stopped VM of that name, else forks the newest "
+        "golden (required with --fork-from)",
+    )
     parser.add_argument(
         "--type", choices=("small", "default"), help="machine size for resume/fork"
     )
@@ -169,6 +176,8 @@ def parse_args(argv):
     args = parser.parse_args(argv)
     if args.fork_from and not args.name:
         parser.error("--name is required with --fork-from")
+    if not args.resume_run and not args.vm and not args.fork_from and not args.name:
+        parser.error("need --resume-run, --vm, --fork-from, or --name")
     command = [c for c in args.command if c != "--"]
     if not command and not args.resume_run:
         parser.error("no command to run (append -- <command> [args...])")
@@ -800,6 +809,103 @@ def current_state(vm_id):
         return "?", None
 
 
+GOLDEN_PREFIX = "bf-golden-"
+
+
+def list_vms():
+    """All VMs from `boat list --all` ([] when unparseable)."""
+    result = run_boat("list", "--all", "--json", check=False)
+    text = result.stdout or ""
+
+    def unwrap(data):
+        if isinstance(data, dict):
+            for key in ("sandboxes", "vms", "items"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+            return []
+        return data if isinstance(data, list) else []
+
+    try:
+        return [v for v in unwrap(json.loads(text)) if isinstance(v, dict)]
+    except ValueError:
+        pass
+    match = re.search(r"\[.*\]", text, re.S)
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return []
+    return [v for v in unwrap(data) if isinstance(v, dict)]
+
+
+def latest_golden_vm():
+    """Newest snapshot-ready golden (forks excluded): task VMs start here."""
+    goldens = [
+        v
+        for v in list_vms()
+        if str(v.get("name", "")).startswith(GOLDEN_PREFIX)
+        and not str(v.get("name", "")).endswith(" fork")
+        and v.get("snapshotAvailable")
+    ]
+    if not goldens:
+        raise RuntimeError("no golden VM with a snapshot; bake one: just boat-bake")
+    goldens.sort(key=lambda v: v.get("snapshotCompletedAt") or v.get("createdAt") or "")
+    return goldens[-1]["id"]
+
+
+def find_vm_by_name(name, states=("stopped",)):
+    """ID of the VM with this exact name in one of the states (None when absent)."""
+    for vm in list_vms():
+        if vm.get("name") == name and (not states or vm.get("state") in states):
+            return vm.get("id")
+    return None
+
+
+def attach_vm(vm_id, vm_type):
+    """Resume a stopped VM, or reuse a running one (refuses silent resize)."""
+    state, cur_type = current_state(vm_id)
+    if state != "stopped":
+        if vm_type and vm_type != cur_type:
+            # Size change on a running VM is refused; stop first.
+            raise RuntimeError(
+                "stop and preserve prior run evidence before resizing a running VM"
+            )
+        return vm_id, "running"  # already up; exec runs against it
+    resume = ["resume", "--no-wait", vm_id]
+    if vm_type:
+        resume += ["--type", vm_type]
+    run_boat(*resume)
+    return vm_id, "resumed"
+
+
+def fork_vm(source, vm_type, out_dir):
+    """Fork source's latest snapshot and wait until ready."""
+    fork_args = ["fork", source, "--json", "--ttl", "5400"]
+    if vm_type:
+        fork_args += ["--type", vm_type]
+    result = run_boat(*fork_args)
+    try:
+        events = [
+            json.loads(line)
+            for line in result.stdout.splitlines()
+            if line.strip().startswith("{")
+        ]
+        vm_id = events[-1].get("id") or events[-1].get("sandbox", {}).get("id")
+    except (ValueError, KeyError):
+        vm_id = None
+    if not vm_id:
+        raise RuntimeError(f"fork gave no id:\n{result.stdout}")
+    print(f"boat_build provisioned vm={vm_id}", flush=True)
+    (out_dir / "provision.json").write_text(json.dumps({"vm": vm_id}))
+    state = wait_state(vm_id, want=("running", "idle"), timeout=240)
+    if state not in ("running", "idle"):
+        raise RuntimeError(
+            f"VM {vm_id} not ready (state={state}); inspect before cleanup"
+        )
+    return vm_id
+
+
 def wait_state(vm_id, want=("stopped",), timeout=240):
     deadline = time.time() + timeout
     state = "?"
@@ -1053,45 +1159,20 @@ def main(argv=None):
             )
 
     started = time.time()
+    forked = False
     if args.fork_from:
-        fork_args = ["fork", args.fork_from, "--json", "--ttl", "5400"]
-        if args.type:
-            fork_args += ["--type", args.type]
-        result = run_boat(*fork_args)
-        try:
-            events = [
-                json.loads(line)
-                for line in result.stdout.splitlines()
-                if line.strip().startswith("{")
-            ]
-            vm_id = events[-1].get("id") or events[-1].get("sandbox", {}).get("id")
-        except (ValueError, KeyError):
-            vm_id = None
-        if not vm_id:
-            raise RuntimeError(f"fork gave no id:\n{result.stdout}")
-        print(f"boat_build provisioned vm={vm_id}", flush=True)
-        (out_dir / "provision.json").write_text(json.dumps({"vm": vm_id}))
-        state = wait_state(vm_id, want=("running", "idle"), timeout=240)
-        if state not in ("running", "idle"):
-            raise RuntimeError(
-                f"VM {vm_id} not ready (state={state}); inspect before cleanup"
-            )
+        vm_id = fork_vm(args.fork_from, args.type, out_dir)
+        forked = True
+    elif args.vm:
+        vm_id, _ = attach_vm(args.vm, args.type)
     else:
-        vm_id = args.vm
-        state, cur_type = current_state(vm_id)
-        if state != "stopped":
-            if args.type and args.type != cur_type:
-                # Size change on a running VM is refused; stop first.
-                raise RuntimeError(
-                    "stop and preserve prior run evidence before resizing a running VM"
-                )
-            else:
-                state = "running"  # already up; exec runs against it
-        if state == "stopped":
-            resume = ["resume", "--no-wait", vm_id]
-            if args.type:
-                resume += ["--type", args.type]
-            run_boat(*resume)
+        # --name alone: resume the own stopped VM first, else fork newest golden.
+        vm_id = find_vm_by_name(args.name)
+        if vm_id is None:
+            vm_id = fork_vm(latest_golden_vm(), args.type, out_dir)
+            forked = True
+        else:
+            vm_id, _ = attach_vm(vm_id, args.type)
 
     rc = 3  # shortcut: setup failed before the command ran, <when> helper grows more steps
     # Never lose the id: with --keep a setup failure leaves the VM running,
@@ -1115,7 +1196,7 @@ def main(argv=None):
         "out": str(Path(args.out).resolve()) if args.out else None,
     }
     try:
-        if args.fork_from:
+        if forked:
             # Inside try: a failed rename must still stop the new fork.
             run_boat("rename", vm_id, args.name)
         home = remote_home(vm_id)

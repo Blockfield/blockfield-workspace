@@ -35,6 +35,72 @@ class Args(unittest.TestCase):
             (args.vm, args.timeout, args.command), ("bx_x", 60, ["echo", "hi"])
         )
 
+    def test_name_alone_is_auto_target(self):
+        args = boat_build.parse_args(["--name", "bf-task", "--", "true"])
+        self.assertEqual((args.name, args.vm, args.fork_from), ("bf-task", None, None))
+
+
+class GoldenSelect(unittest.TestCase):
+    def vms(self):
+        return json.dumps(
+            [
+                {
+                    "id": "bx_old",
+                    "name": "bf-golden-20261029",
+                    "state": "stopped",
+                    "snapshotAvailable": True,
+                    "snapshotCompletedAt": "2026-10-29T18:57:27.615Z",
+                },
+                {
+                    "id": "bx_new",
+                    "name": "bf-golden-20261031",
+                    "state": "stopped",
+                    "snapshotAvailable": True,
+                    "snapshotCompletedAt": "2026-10-31T21:20:36.819Z",
+                },
+                {
+                    "id": "bx_fork",
+                    "name": "bf-golden-20261031 fork",
+                    "state": "stopped",
+                    "snapshotAvailable": True,
+                    "snapshotCompletedAt": "2026-11-03T22:18:45.188Z",
+                },
+                {
+                    "id": "bx_mine",
+                    "name": "bf-task",
+                    "state": "stopped",
+                    "snapshotAvailable": True,
+                    "snapshotCompletedAt": "2026-11-04T00:00:00.000Z",
+                },
+            ]
+        )
+
+    def test_latest_golden_skips_forks(self):
+        with patch.object(
+            boat_build, "run_boat", return_value=FakeResult(0, self.vms())
+        ):
+            self.assertEqual(boat_build.latest_golden_vm(), "bx_new")
+
+    def test_list_unwraps_sandboxes_envelope(self):
+        envelope = json.dumps({"pageInfo": {"hasMore": False}, "sandboxes": []})
+        with patch.object(boat_build, "run_boat", return_value=FakeResult(0, envelope)):
+            self.assertEqual(boat_build.list_vms(), [])
+        wrapped = json.dumps({"sandboxes": json.loads(self.vms())})
+        with patch.object(boat_build, "run_boat", return_value=FakeResult(0, wrapped)):
+            self.assertEqual(boat_build.latest_golden_vm(), "bx_new")
+
+    def test_find_own_stopped_vm_by_name(self):
+        with patch.object(
+            boat_build, "run_boat", return_value=FakeResult(0, self.vms())
+        ):
+            self.assertEqual(boat_build.find_vm_by_name("bf-task"), "bx_mine")
+            self.assertIsNone(boat_build.find_vm_by_name("bf-absent"))
+
+    def test_no_golden_names_a_bake(self):
+        with patch.object(boat_build, "run_boat", return_value=FakeResult(0, "[]")):
+            with self.assertRaisesRegex(RuntimeError, "just boat-bake"):
+                boat_build.latest_golden_vm()
+
 
 class ExecEnvelope(unittest.TestCase):
     def test_parses_json_envelope(self):

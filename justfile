@@ -54,6 +54,11 @@ boat-build *args:
     sys.argv = ["scripts/dev/boat_build.py", *sys.argv[1:]]
     runpy.run_path("scripts/dev/boat_build.py", run_name="__main__")
 
+boat-bake *args:
+    import runpy, sys
+    sys.argv = ["scripts/dev/boat_bake.py", *sys.argv[1:]]
+    runpy.run_path("scripts/dev/boat_bake.py", run_name="__main__")
+
 agent-preflight *args:
     import runpy, sys
     sys.argv = ["scripts/dev/agent_preflight.py", *sys.argv[1:]]

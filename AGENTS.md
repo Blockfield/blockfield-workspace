@@ -137,3 +137,10 @@ Gradle 2 ГБ. Стенд один; Gradle — до двух одновреме�
   агент прозу не пишет, `release-notes/vX.Y.Z.md` не готовит, PR достаточно названия. [Формат](client/docs/RELEASE-NOTES.md). Контракт: Minecraft/Fabric, protocol, общие моды/ресурсы.
   Изменение `side = "both"` — парный выпуск, сервер первым: [DEPLOY](server/docs/DEPLOY.md).
 - Отчёт раздельно: **слито / опубликовано / развёрнуто / проверено в игре**; реальные команды/ссылки/SHA и ограничения.
+
+## Дочерние агенты
+
+- Evidence — в `.dev/<задача>/`, никогда только в `/tmp`; «pre-existing» — только с проверкой на базовом коммите (см. «Проверки и выпуск»).
+- Push budget — из брифа (по умолчанию 2); опубликованную ветку не rebase/force — только merge `origin/main`; на PR/CI/бота не ждать — push и финал (см. скилл `blockfield-agent`, шаги 4–6).
+- Перед финалом — все свои Boat VM в `state=stopped` (см. «Удалённые стенды Boat»).
+- Финал: первая строка `DONE:/PARTIAL:/BLOCKED:`, далее каждый пункт ACCEPTANCE с evidence, PR URL + head SHA + состояние checks, VM-минуты.

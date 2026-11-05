@@ -1589,6 +1589,27 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s, client_stage_run=
 
 
 def deploy_command(side, tag, client_tag=None):
+    if side == "client":
+        # The public client repo only publishes the release: its deploy.yml
+        # is a stub with no blockfield-deploy runner. Staging, serving and
+        # Latest run from the server repo's deploy-client.yml instead.
+        return (
+            "gh",
+            "api",
+            "--method",
+            "POST",
+            f"repos/{REPO['server']}/actions/workflows/deploy-client.yml/dispatches",
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28",
+            "-f",
+            "ref=main",
+            "-F",
+            "return_run_details=true",
+            "-f",
+            f"inputs[tag]={tag}",
+            "-f",
+            "inputs[dry_run]=false",
+        )
     return (
         "gh",
         "api",
@@ -2037,6 +2058,14 @@ def cmd_ship(args):
     return True
 
 
+def cmd_rollback_client(args):
+    """Roll the served client back to an older tag via the server workflow."""
+    if not parse(args.tag):
+        raise SystemExit(f"rollback-client requires a vX.Y.Z tag, got {args.tag!r}")
+    dispatch_deploy("client", args.tag, args.timeout, args.interval, dry=args.dry_run)
+    return True
+
+
 def parser():
     p = argparse.ArgumentParser(
         prog="just release", description=__doc__.split("\n\n")[0]
@@ -2132,6 +2161,24 @@ def parser():
         help="successful main Deploy client staging run for resume when automatic tag Deploy was skipped",
     )
     s.set_defaults(run=cmd_ship)
+    s = sub.add_parser(
+        "rollback-client",
+        help="roll the served client back to an older tag via the server deploy-client workflow",
+    )
+    s.add_argument("tag", metavar="vX.Y.Z")
+    s.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="seconds per wait: dispatch run and deploy gate (default 1800)",
+    )
+    s.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="seconds between status polls (default 5)",
+    )
+    s.set_defaults(run=cmd_rollback_client)
     for name in ("prepare", "ship"):
         sub.choices[name].add_argument(
             "--server-merge",
@@ -2139,7 +2186,7 @@ def parser():
             help="merge origin server branch(es) into current main in the release PR "
             "before preflight, comma-separated in merge order (includes all their changes)",
         )
-    for name in ("prepare", "candidate", "pin", "ship"):
+    for name in ("prepare", "candidate", "pin", "ship", "rollback-client"):
         sub.choices[name].add_argument(
             "--dry-run", action="store_true", help="print push/PR commands, run none"
         )

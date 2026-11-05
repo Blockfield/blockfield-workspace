@@ -1091,6 +1091,7 @@ notes с `backfilled: false` и последней опубликованной 
 | `just release candidate vC --branch release/server-X.Y.Z [--dry-run]`                              | Пин опубликованного клиента в `client_candidate` сервера, preflight, коммит в ветку PR                                                                   |
 | `just release pin [--dry-run]`                                                                     | После выпуска переводит submodules `client`, `server` и их моды на то, что работает на проде, и открывает PR «Pin released ...»                          |
 | `just release ship --mod vX --confirmed-by-owner [--only ...] [--server-merge BRANCH] [--dry-run]` | Сквозной выпуск после подтверждения владельца: ждёт публикации мода, `prepare`, слияние PR, теги, ожидание запусков, `pin` и слияние pin-PR              |
+| `just release rollback-client vX.Y.Z [--dry-run]`                                                  | Откат раздаваемого клиента на более старый тег через workflow `deploy-client.yml` в server-репозитории (тот же вызов, что делает `ship` для клиента)     |
 
 `status` и `prepare` также показывают открытые client/server issues с меткой
 `next-release`: отложенные пины, теги ресурсов и проверки. Список загружается
@@ -1110,6 +1111,13 @@ notes с `backfilled: false` и последней опубликованной 
   `just release candidate`, слияние серверного PR, тег сервера (его Deploy отказывает, это ожидаемо),
   Deploy server с `client_tag`, затем Deploy client; PR сервера красный до шага `candidate`;
 - контракт изменился на одной стороне или стороны расходятся: выпуск невозможен, `status` и `prepare` сообщают об этом.
+
+Клиентский Deploy (`deploy` в паре и `rollback-client`) идёт не в публичный
+`blockfield-client` — его `deploy.yml` заглушка без раннера `blockfield-deploy`, —
+а workflow `deploy-client.yml` в `blockfield-server` (`inputs: tag, dry_run`;
+`ship` всегда шлёт `dry_run=false`). Откат не пересобирает пак: workflow
+переключает раздачу на указанный старый тег и Latest. До слияния
+blockfield-server#276 следующий `ship` не стартует.
 
 `--dry-run` выполняет всё локально (скачивание, сборку, коммит во временном worktree) и только печатает
 `git push` и `gh pr create`. Release notes инструмент не пишет: пока workflow тега их требует, `prepare`

@@ -255,43 +255,12 @@ DEFAULT_TIMEOUT = 1800
 DEAD_EXEC_GRACE = 120
 
 
-def _probe_vm(vm_id, timeout=30):
-    """One bounded exec proving the VM still runs commands (False when not)."""
-    try:
-        probe = run_boat(
-            "exec",
-            "--json",
-            "--stream",
-            "--timeout",
-            str(timeout),
-            vm_id,
-            "bash",
-            "-lc",
-            "true",
-            check=False,
-        )
-    except Exception:
-        return False
-    return dispatched_output(probe.stdout)
-
-
 def _now_iso():
     return (
         datetime.now(timezone.utc)
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
-
-
-def _entry_age_seconds(entry):
-    """Seconds since the history entry started (None when unknown)."""
-    try:
-        started = datetime.fromisoformat(
-            str(entry.get("startedAt")).replace("Z", "+00:00")
-        )
-    except (TypeError, ValueError):
-        return None
-    return (datetime.now(timezone.utc) - started).total_seconds()
 
 
 def _entry_verdict(vm_id, command_id, entry, record):
@@ -312,69 +281,33 @@ def _entry_verdict(vm_id, command_id, entry, record):
     )
 
 
-def _reaped_path(vm_id):
-    """Persisted per-VM set of reaped command ids (survives across runs)."""
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(vm_id or "unknown"))
-    return ROOT / ".dev" / "boat-build" / f"reaped-{safe}.json"
-
-
-def _load_reaped_ids(vm_id):
-    """Ids this VM's commands reaped to 124 (Boat history keeps them running)."""
+def _boat_start_epoch(entry):
+    """Boat's own start timestamp for a history entry (None when absent)."""
     try:
-        payload = json.loads(_reaped_path(vm_id).read_text())
-        ids = payload.get("commandIds", [])
-    except (OSError, ValueError, AttributeError):
-        return set()
-    return {i for i in ids if isinstance(i, str)}
-
-
-def _mark_reaped(vm_id, command_id):
-    """Remember a reaped command so the VM stop guard skips its leftover."""
-    if not vm_id or not command_id:
-        return
-    try:
-        path = _reaped_path(vm_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        ids = _load_reaped_ids(vm_id) | {command_id}
-        path.write_text(json.dumps({"commandIds": sorted(ids)}) + "\n")
-    except OSError:
-        pass
-
-
-def _find_history_entry(vm_id, command_id):
-    """Entry for command_id among the newest 100, or None; raise if evicted.
-
-    Missing from a full window may be eviction, not never-recorded: raise
-    like the strict history failures instead of reporting a dead exec.
-    """
-    entries = history_entries(vm_id, limit=100, strict=True)
-    entry = next((e for e in entries if e.get("commandId") == command_id), None)
-    if entry is None and len(entries) >= 100:
-        raise RuntimeError("history window full; refusing VM stop")
-    return entry
+        return datetime.fromisoformat(
+            str(entry.get("startedAt")).replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _dead_exec_verdict(vm_id, command_id, record, reason):
-    """Terminal failure for a dead exec: late verdict wins, else fail.
+    """Terminal failure for a dead exec: late verdict wins, else fail 124.
 
-    Re-reads history once with strict=True (a failed read raises instead of
-    looking like "no verdict"), then runs one bounded probe; a responsive
-    VM with no verdict means the process is gone, so mark failed with an
-    exit status instead of hanging RUNNING forever. The verdict may land
-    while the probe runs, so history is re-read once more after the probe
-    and a finished entry reports its real exit code, never 124. The record
-    flag lets the caller consider one retry, and the reaped id — kept in
-    the per-VM persisted set (plus the record for old runs) — lets the VM
-    stop guard skip this entry (Boat history keeps listing it as running).
+    Past its own timeout + grace a verdict-less exec is dead (its process is
+    gone but history never recorded it), so fail with an exit status instead
+    of hanging RUNNING forever. A stopped VM keeps its disk, so evidence is
+    not lost; stopping also kills a hung exec.
     """
     if command_id:
-        entry = _find_history_entry(vm_id, command_id)
-        if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
-            verdict = _entry_verdict(vm_id, command_id, entry, record)
-            if verdict is not None:
-                return verdict
-        alive = _probe_vm(vm_id)
-        entry = _find_history_entry(vm_id, command_id)
+        entry = next(
+            (
+                e
+                for e in history_entries(vm_id, limit=100, strict=True)
+                if e.get("commandId") == command_id
+            ),
+            None,
+        )
         if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
             verdict = _entry_verdict(vm_id, command_id, entry, record)
             if verdict is not None:
@@ -382,19 +315,13 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
         partial = history_output(vm_id, command_id) + history_output(
             vm_id, command_id, stderr=True
         )
-        detail = f"probe dispatched={alive}"
     else:
-        partial, detail = "", "no probe without a command"
-    if command_id:
-        _mark_reaped(vm_id, command_id)
-    if command_id and record is not None:
+        partial = ""
+    if record is not None:
         record.update(exitCode=DEAD_EXEC_CODE, finishedAt=_now_iso(), deadExec=True)
-        reaped = record.get("deadExecIds") or []
-        if command_id not in reaped:
-            record["deadExecIds"] = [*reaped, command_id]
     msg = (
-        f"dead exec: command {command_id or '<none>'} {reason} "
-        f"({detail}); marked failed with exit {DEAD_EXEC_CODE}"
+        f"dead exec: command {command_id or '<none>'} {reason}; "
+        f"marked failed with exit {DEAD_EXEC_CODE}"
     )
     if partial:
         msg += f"\npartial output:\n{partial}"
@@ -558,20 +485,15 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
 
     The budget is the command's own timeout plus grace — never the 540 s
     stream window: a command still inside its budget stays pending (the
-    caller raises Running for a later resume). Past the budget — or stale
-    long after dispatch — the exec is dead (its process is gone but history
-    never recorded it): fail with an exit status instead of hanging RUNNING
-    forever. A verdict landing inside the polling horizon returns
-    in-process; past it the caller raises Running for a later resume. A few
-    settle polls absorb the lag between the stream end and
-    the history write.
+    caller raises Running for a later resume). Past the budget the exec is
+    dead (its process is gone but history never recorded it): fail with an
+    exit status instead of hanging RUNNING forever.
     """
     budget = timeout + DEAD_EXEC_GRACE
     if not command_id:
         # Nothing was dispatched: no resume could ever match history.
         return _dead_exec_verdict(vm_id, command_id, record, "no command dispatched")
-    deadline = exec_start + budget
-    poll_end = min(exec_start + min(timeout, 540), deadline)
+    poll_end = exec_start + min(timeout, 540)
     while True:
         entry = next(
             (
@@ -585,69 +507,18 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
             verdict = _entry_verdict(vm_id, command_id, entry, record)
             if verdict is not None:
                 return verdict
-        if entry and not (
-            entry.get("finishedAt") and entry.get("exitCode") is not None
-        ):
-            age = _entry_age_seconds(entry)
-            if age is not None and age > budget:
-                # Stale running record (e.g. the 70-min empty one): reap it
-                # to failed now instead of polling a dead command.
-                return _dead_exec_verdict(
-                    vm_id,
-                    command_id,
-                    record,
-                    f"no verdict {int(age)}s after dispatch (budget {budget}s)",
-                )
-        if time.time() >= deadline:
+        # Measure the deadline from Boat's own start timestamp when the
+        # history record has one; fall back to the local dispatch instant.
+        started = _boat_start_epoch(entry) if entry else None
+        deadline = (started if started is not None else exec_start) + budget
+        now = time.time()
+        if now >= deadline:
             return _dead_exec_verdict(
                 vm_id, command_id, record, "no verdict past the deadline"
             )
-        if time.time() >= poll_end:
+        if now >= poll_end:
             return False, None, ""
-        time.sleep(min(10, max(0, poll_end - time.time())))
-
-
-def _dead_dispatch_confirmed(vm_id, record, timeout):
-    """True only when the reaped dispatch provably cannot still be alive.
-
-    Retry gate: the dispatch is past its own --timeout + grace AND history
-    shows no finishedAt for it. Anything unsure (no dispatch recorded,
-    still inside the budget, or history unreadable) means the first command
-    may still run: report 124 without a second dispatch. In-process path
-    only: a dead dispatch found on resume (--resume-run) is never
-    re-dispatched, it ends 124 (see finish_run).
-    """
-    command_id, dispatched_at = record.get("commandId"), record.get("dispatchedAt")
-    if not command_id or dispatched_at is None:
-        return False
-    if time.time() < dispatched_at + timeout + DEAD_EXEC_GRACE:
-        return False
-    try:
-        entry = _find_history_entry(vm_id, command_id)
-    except RuntimeError:
-        return False
-    return entry is None or not (
-        entry.get("finishedAt") and entry.get("exitCode") is not None
-    )
-
-
-def _unresolved_entries(vm_id, record=None):
-    """History entries without a verdict, except reaped leftovers.
-
-    ANY unfinished command on the VM blocks the stop — including live work
-    from another run sharing this VM — minus ids this VM reaped to 124: a
-    reaped id stays "running" in Boat history after the local record went
-    terminal, so the persisted per-VM set (plus the record's own ids for
-    runs written before the set existed) is skipped, never a reason to bill.
-    """
-    record = record or {}
-    reaped = _load_reaped_ids(vm_id) | set(record.get("deadExecIds") or [])
-    return [
-        e
-        for e in history_entries(vm_id, limit=100, strict=True)
-        if e.get("commandId") not in reaped
-        and (not e.get("finishedAt") or e.get("exitCode") is None)
-    ]
+        time.sleep(min(10, max(0, poll_end - now)))
 
 
 def remote_shas(vm_id, remote_root):
@@ -1288,11 +1159,12 @@ def vm_minutes(vm_id):
 
 
 def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
-    """Copy before stop; a failed copy keeps the VM available for recovery.
+    """Copy before stop; an unmatched pattern only warns when warn_unmatched.
 
     A dead exec or a setup-phase resume may never have produced the files
     its patterns name: with warn_unmatched those patterns only log a
     warning, so the run still writes its manifest and reaches the stop.
+    A failed copy still raises, keeping the VM available for recovery.
     """
     for index, pattern in enumerate(patterns):
         script = "python3 -c " + shlex.quote(
@@ -1322,16 +1194,7 @@ def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
         for match_index, path in enumerate(paths):
             dest = out_dir / f"evidence-{index}" / str(match_index)
             dest.mkdir(parents=True, exist_ok=True)
-            try:
-                run_boat("scp", "-r", f"{vm_id}:{path}", str(dest))
-            except RuntimeError as exc:
-                if not warn_unmatched:
-                    raise
-                print(
-                    f"warning: evidence copy failed for {path}: {exc}",
-                    file=sys.stderr,
-                )
-                continue
+            run_boat("scp", "-r", f"{vm_id}:{path}", str(dest))
     record["files"] = {
         str(p.relative_to(out_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
         for p in out_dir.rglob("*")
@@ -1343,8 +1206,8 @@ def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
 def _legacy_verdict(vm_id, record):
     """Finished history entry for a resume file without dispatchedAt.
 
-    No dispatch timestamp means no budget, so this never reaps: a finished
-    verdict completes the run, anything else stays pending for a later resume.
+    No dispatch timestamp means no budget, so this never fails dead: a
+    finished verdict completes the run, anything else stays pending.
     """
     command_id = record.get("commandId")
     if not command_id:
@@ -1377,7 +1240,7 @@ def finish_run(saved, out_dir):
     timeout = saved.get("timeout", DEFAULT_TIMEOUT)
     if record.get("dispatchedAt") is None:
         # Legacy resume file: no dispatch timestamp, so no budget and never
-        # a reap — but a finished verdict still completes the run normally.
+        # a dead verdict — but a finished verdict still completes the run.
         done, code, out = _legacy_verdict(vm_id, record)
     else:
         exec_start = record["dispatchedAt"]
@@ -1405,8 +1268,6 @@ def finish_run(saved, out_dir):
     if saved.get("out"):
         shutil.copytree(out_dir, saved["out"], dirs_exist_ok=True)
     if not saved["keep"]:
-        if _unresolved_entries(vm_id, record):
-            raise RuntimeError("RUNNING command in history; refusing VM stop")
         run_boat("stop", vm_id)
         if wait_state(vm_id) != "stopped":
             raise RuntimeError(f"{vm_id} did not reach stopped")
@@ -1535,12 +1396,9 @@ def main(argv=None):
         (out_dir / "resume.json").write_text(json.dumps(saved, indent=2))
         try:
             rc, out = vm_exec(vm_id, script, timeout=args.timeout, record=record)
-            if record.get("deadExec") and _dead_dispatch_confirmed(
-                vm_id, record, args.timeout
-            ):
+            if record.get("deadExec"):
                 # One retry: the first dispatch died past its own deadline
-                # with no verdict; a fresh dispatch may succeed. A first
-                # command that may still be alive is never re-dispatched.
+                # with no verdict; a fresh dispatch may succeed.
                 record.pop("deadExec", None)
                 rc, out = vm_exec(vm_id, script, timeout=args.timeout, record=record)
         finally:
@@ -1584,8 +1442,6 @@ def main(argv=None):
             and copies_ok
             and (out_dir / "manifest.json").exists()
         ):
-            if _unresolved_entries(vm_id, record):
-                raise RuntimeError("RUNNING command in history; refusing VM stop")
             run_boat("stop", vm_id)
             state = wait_state(vm_id)
             if state != "stopped":

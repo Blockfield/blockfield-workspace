@@ -1115,7 +1115,11 @@ class RemoteStatus(unittest.TestCase):
             out.mkdir()
             saved = {
                 "vm": "bx_x",
-                "record": {"commandId": "cmd", "command": "true"},
+                "record": {
+                    "commandId": "cmd",
+                    "command": "true",
+                    "dispatchedAt": time.time(),
+                },
                 "patterns": [],
                 "keep": False,
                 "out": str(Path(tmp) / "copy"),
@@ -1804,7 +1808,11 @@ class StaleReaper(unittest.TestCase):
             out.mkdir()
             saved = {
                 "vm": "bx_x",
-                "record": {"commandId": "cmd_old", "command": "true"},
+                "record": {
+                    "commandId": "cmd_old",
+                    "command": "true",
+                    "dispatchedAt": time.time() - 10000,
+                },
                 "patterns": [],
                 "keep": True,
             }
@@ -1836,7 +1844,11 @@ class StaleReaper(unittest.TestCase):
             out.mkdir()
             saved = {
                 "vm": "bx_x",
-                "record": {"commandId": "cmd_old", "command": "true"},
+                "record": {
+                    "commandId": "cmd_old",
+                    "command": "true",
+                    "dispatchedAt": time.time() - 10000,
+                },
                 "patterns": [],
                 "keep": True,
             }
@@ -2038,3 +2050,83 @@ class StaleReaper(unittest.TestCase):
             )
         self.assertEqual(rc, 124)
         self.assertEqual(stops, ["bx_mine"])
+
+    def test_recordless_reaped_exec_does_not_block_stop(self):
+        # workspace#22 round 4: a setup vm_exec with no record is reaped to
+        # 124; its id lands in the run-scoped set, so the stop guard still
+        # stops the VM instead of refusing on the running history entry.
+        with (
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[self.stale_entry("cmd_setup")],
+            ),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=True),
+            patch("time.time", return_value=10000),
+            patch("time.sleep"),
+        ):
+            done, code, _ = boat_build.remote_status("bx_x", "cmd_setup", 0, 1800, None)
+        self.assertTrue(done)
+        self.assertEqual(code, 124)
+        with patch.object(
+            boat_build,
+            "history_entries",
+            return_value=[self.stale_entry("cmd_setup")],
+        ):
+            self.assertEqual(boat_build._unresolved_entries("bx_x", {}), [])
+
+    def test_legacy_resume_without_timeout_stays_pending(self):
+        # workspace#22 round 4: a pre-change resume file (no timeout, no
+        # dispatchedAt) resumed while the default --timeout 1800 build is
+        # still inside its own budget stays pending (75) — never reaps to
+        # 124 on the old 540 s fallback budget.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {"commandId": "cmd_old", "command": "true"},
+                "patterns": [],
+                "keep": True,
+            }
+            with patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[self.stale_entry("cmd_old", minutes=12)],
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 75)
+
+    def test_resume_without_timeout_uses_default_budget(self):
+        # workspace#22 round 4: a resume file without "timeout" uses the
+        # argparse default (1800), not the 540 s stream window — a build
+        # 17 min in stays pending instead of reaping to 124.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {
+                    "commandId": "cmd_old",
+                    "command": "true",
+                    "dispatchedAt": time.time() - 1000,
+                },
+                "patterns": [],
+                "keep": True,
+            }
+
+            def fake_save(vm_id, record, out_dir, patterns):
+                (out_dir / "manifest.json").write_text(json.dumps(record))
+
+            with (
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[self.stale_entry("cmd_old", minutes=17)],
+                ),
+                patch.object(boat_build, "history_output", return_value=""),
+                patch.object(boat_build, "_probe_vm", return_value=True),
+                patch.object(boat_build, "save_evidence", side_effect=fake_save),
+                patch("time.sleep"),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 75)

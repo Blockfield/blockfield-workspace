@@ -118,7 +118,7 @@ def parse_args(argv):
     parser.add_argument(
         "--timeout",
         type=int,
-        default=1800,
+        default=DEFAULT_TIMEOUT,
         help="hard timeout in seconds for the remote command",
     )
     parser.add_argument(
@@ -245,6 +245,15 @@ class Running(RuntimeError):
 
 DEAD_EXEC_CODE = 124  # timeout convention: history recorded no verdict
 
+# Argparse default for --timeout: a resumed run whose file predates the
+# "timeout" field gets this budget, never the 540 s stream window.
+DEFAULT_TIMEOUT = 1800
+
+# Ids reaped to dead-exec this run, with or without a record: a record-less
+# setup exec leaves no record behind, so the stop guard consults this set
+# too instead of refusing the VM stop on a running history entry.
+_REAPED_EXEC_IDS = set()
+
 # Extra seconds past the command's own --timeout before a verdict-less exec
 # is declared dead: covers the history write landing just after the command.
 DEAD_EXEC_GRACE = 120
@@ -316,8 +325,9 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
     exit status instead of hanging RUNNING forever. The verdict may land
     while the probe runs, so history is re-read once more after the probe
     and a finished entry reports its real exit code, never 124. The record
-    flag lets the caller consider one retry, and the reaped id lets the VM
-    stop guard skip this entry (Boat history keeps listing it as running).
+    flag lets the caller consider one retry, and the reaped id — kept in
+    the run-scoped set as well as the record — lets the VM stop guard skip
+    this entry (Boat history keeps listing it as running).
     """
     if command_id:
         entry = next(
@@ -351,6 +361,11 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
         detail = f"probe dispatched={alive}"
     else:
         partial, detail = "", "no probe without a command"
+    if command_id:
+        # Run-scoped, not just the record: a record-less setup exec leaves
+        # no record behind, so the stop guard would otherwise refuse the
+        # VM stop on its running history entry forever.
+        _REAPED_EXEC_IDS.add(command_id)
     if record is not None:
         record.update(exitCode=DEAD_EXEC_CODE, finishedAt=_now_iso(), deadExec=True)
         if command_id:
@@ -600,7 +615,7 @@ def _unresolved_entries(vm_id, record):
     record went terminal with 124; blocking the VM stop on it would bill
     forever instead of stopping.
     """
-    reaped = set((record or {}).get("deadExecIds") or [])
+    reaped = set((record or {}).get("deadExecIds") or []) | _REAPED_EXEC_IDS
     return [
         e
         for e in history_entries(vm_id, limit=100, strict=True)
@@ -1278,8 +1293,17 @@ def finish_run(saved, out_dir):
     """
     vm_id, record = saved["vm"], saved["record"]
     # Same budget as the dispatch: the command's own --timeout plus grace.
-    timeout = saved.get("timeout", 540)
-    exec_start = record.get("dispatchedAt") or time.time()
+    # Pre-change resume files lack "timeout": fall back to the argparse
+    # default, never the stream window.
+    timeout = saved.get("timeout", DEFAULT_TIMEOUT)
+    if record.get("dispatchedAt") is None:
+        # Legacy resume file: no dispatch timestamp, so the budget is
+        # unknown — never reap, stay pending for a later resume.
+        print(
+            f"RUNNING vm={vm_id}; resume: just boat-build --resume-run {out_dir / 'resume.json'}"
+        )
+        return 75
+    exec_start = record["dispatchedAt"]
     done, code, out = remote_status(
         vm_id, record.get("commandId"), exec_start, timeout, record
     )

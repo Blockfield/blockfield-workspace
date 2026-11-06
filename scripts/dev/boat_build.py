@@ -341,6 +341,19 @@ def _mark_reaped(vm_id, command_id):
         pass
 
 
+def _find_history_entry(vm_id, command_id):
+    """Entry for command_id among the newest 100, or None; raise if evicted.
+
+    Missing from a full window may be eviction, not never-recorded: raise
+    like the strict history failures instead of reporting a dead exec.
+    """
+    entries = history_entries(vm_id, limit=100, strict=True)
+    entry = next((e for e in entries if e.get("commandId") == command_id), None)
+    if entry is None and len(entries) >= 100:
+        raise RuntimeError("history window full; refusing VM stop")
+    return entry
+
+
 def _dead_exec_verdict(vm_id, command_id, record, reason):
     """Terminal failure for a dead exec: late verdict wins, else fail.
 
@@ -355,27 +368,13 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
     stop guard skip this entry (Boat history keeps listing it as running).
     """
     if command_id:
-        entry = next(
-            (
-                e
-                for e in history_entries(vm_id, limit=100, strict=True)
-                if e.get("commandId") == command_id
-            ),
-            None,
-        )
+        entry = _find_history_entry(vm_id, command_id)
         if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
             verdict = _entry_verdict(vm_id, command_id, entry, record)
             if verdict is not None:
                 return verdict
         alive = _probe_vm(vm_id)
-        entry = next(
-            (
-                e
-                for e in history_entries(vm_id, limit=100, strict=True)
-                if e.get("commandId") == command_id
-            ),
-            None,
-        )
+        entry = _find_history_entry(vm_id, command_id)
         if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
             verdict = _entry_verdict(vm_id, command_id, entry, record)
             if verdict is not None:
@@ -624,10 +623,9 @@ def _dead_dispatch_confirmed(vm_id, record, timeout):
     if time.time() < dispatched_at + timeout + DEAD_EXEC_GRACE:
         return False
     try:
-        entries = history_entries(vm_id, limit=100, strict=True)
+        entry = _find_history_entry(vm_id, command_id)
     except RuntimeError:
         return False
-    entry = next((e for e in entries if e.get("commandId") == command_id), None)
     return entry is None or not (
         entry.get("finishedAt") and entry.get("exitCode") is not None
     )
@@ -1302,8 +1300,17 @@ def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
             + repr(pattern)
             + ", recursive=True)))"
         )
-        _, raw = vm_exec(vm_id, script)
-        paths = json.loads(raw)
+        try:
+            _, raw = vm_exec(vm_id, script)
+            paths = json.loads(raw)
+        except (RuntimeError, ValueError) as exc:
+            if not warn_unmatched:
+                raise
+            print(
+                f"warning: evidence lookup failed for {pattern}: {exc}",
+                file=sys.stderr,
+            )
+            continue
         if not paths:
             if warn_unmatched:
                 print(
@@ -1315,7 +1322,16 @@ def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
         for match_index, path in enumerate(paths):
             dest = out_dir / f"evidence-{index}" / str(match_index)
             dest.mkdir(parents=True, exist_ok=True)
-            run_boat("scp", "-r", f"{vm_id}:{path}", str(dest))
+            try:
+                run_boat("scp", "-r", f"{vm_id}:{path}", str(dest))
+            except RuntimeError as exc:
+                if not warn_unmatched:
+                    raise
+                print(
+                    f"warning: evidence copy failed for {path}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
     record["files"] = {
         str(p.relative_to(out_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
         for p in out_dir.rglob("*")

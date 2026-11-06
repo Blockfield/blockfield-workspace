@@ -2501,3 +2501,102 @@ class StaleReaper(unittest.TestCase):
                 patch("time.sleep"),
             ):
                 self.assertEqual(boat_build.finish_run(saved, out), 75)
+
+
+class DeadExecEvidence(unittest.TestCase):
+    """W12-c9/1: dead exec with an unanswering VM still writes its manifest."""
+
+    def test_unanswering_vm_warns_and_writes_manifest(self):
+        # Fail-before: vm_exec/scp raise, save_evidence propagates, no manifest.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            record = {"commandId": "cmd_dead", "deadExec": True, "exitCode": 124}
+            with (
+                patch.object(
+                    boat_build,
+                    "vm_exec",
+                    side_effect=RuntimeError("boat exec failed before dispatch"),
+                ),
+                patch.object(boat_build, "run_boat") as scp,
+            ):
+                boat_build.save_evidence(
+                    "bx_x", record, out, ["/remote/*.xml"], warn_unmatched=True
+                )
+                scp.assert_not_called()
+            self.assertTrue((out / "manifest.json").exists())
+
+    def test_scp_failure_warns_and_writes_manifest(self):
+        # Fail-before: a dead-VM scp raises, skipping the manifest and stop.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            record = {"commandId": "cmd_dead", "deadExec": True, "exitCode": 124}
+            with (
+                patch.object(
+                    boat_build, "vm_exec", return_value=(0, '["/remote/a.xml"]')
+                ),
+                patch.object(
+                    boat_build,
+                    "run_boat",
+                    side_effect=RuntimeError("scp: connection lost"),
+                ),
+            ):
+                boat_build.save_evidence(
+                    "bx_x", record, out, ["/remote/*.xml"], warn_unmatched=True
+                )
+            self.assertTrue((out / "manifest.json").exists())
+
+    def test_strict_still_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with (
+                patch.object(
+                    boat_build,
+                    "vm_exec",
+                    side_effect=RuntimeError("boat exec failed before dispatch"),
+                ),
+                patch.object(boat_build, "run_boat"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    boat_build.save_evidence("bx_x", {}, out, ["/remote/*.xml"])
+
+
+class HistoryWindowFull(unittest.TestCase):
+    """W12-c9/2: a full 100-entry window is eviction, never never-recorded."""
+
+    def full_window(self, command_id="cmd_old"):
+        return [{"commandId": f"cmd_{i}", "status": "running"} for i in range(100)]
+
+    def test_full_window_missing_raises_not_dead(self):
+        # Fail-before: missing id in a full window returns (True, 124, ...).
+        with patch.object(
+            boat_build, "history_entries", return_value=self.full_window()
+        ):
+            with self.assertRaisesRegex(RuntimeError, "history window full"):
+                boat_build._find_history_entry("bx_x", "cmd_old")
+            with self.assertRaisesRegex(RuntimeError, "history window full"):
+                boat_build._dead_exec_verdict("bx_x", "cmd_old", {}, "past deadline")
+        with patch.object(
+            boat_build, "history_entries", return_value=self.full_window()
+        ):
+            self.assertFalse(
+                boat_build._dead_dispatch_confirmed(
+                    "bx_x",
+                    {"commandId": "cmd_old", "dispatchedAt": 0},
+                    1800,
+                )
+            )
+
+    def test_short_window_missing_is_still_dead(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
+            patch.object(boat_build, "history_entries", return_value=[]),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=False),
+        ):
+            done, code, _ = boat_build._dead_exec_verdict(
+                "bx_x", "cmd_old", {}, "past deadline"
+            )
+        self.assertTrue(done)
+        self.assertEqual(code, 124)

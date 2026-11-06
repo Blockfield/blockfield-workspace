@@ -12,7 +12,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cp import contract  # noqa: E402
 
-METHODS = ("get", "post", "patch", "delete", "put")
+OPENAPI_METHODS = (
+    "get",
+    "put",
+    "post",
+    "delete",
+    "options",
+    "head",
+    "patch",
+    "trace",
+)
 
 
 def check(doc):
@@ -26,7 +35,7 @@ def check(doc):
         f"{method.upper()} {path}"
         for path, item in paths.items()
         for method in item
-        if method in METHODS
+        if method in OPENAPI_METHODS
     }
     for route in sorted(set(contract.ROUTES) - found):
         failures.append(f"missing route: {route}")
@@ -48,8 +57,13 @@ def check(doc):
         if smuggled:
             failures.append(f"{name} smuggles authority fields: {sorted(smuggled)}")
         role = schema.get("properties", {}).get("role")
+        # Fail closed: only an explicit enum without "owner" passes. A
+        # missing enum, $ref, anyOf or any other shape is a failure.
+        enum = role.get("enum") if isinstance(role, dict) else None
         if role is not None and (
-            name != contract.ROLE_FIELD_OWNER or "owner" in role.get("enum", [])
+            name != contract.ROLE_FIELD_OWNER
+            or not isinstance(enum, list)
+            or "owner" in enum
         ):
             failures.append(f"{name} carries an authority role field")
         if schema.get("additionalProperties", True):

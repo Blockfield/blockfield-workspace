@@ -11,6 +11,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 TESTS = Path(__file__).resolve().parent
 DEV = TESTS.parent
@@ -39,7 +40,7 @@ class ContractPinTest(unittest.TestCase):
             f"{method.upper()} {path}"
             for path, item in doc["paths"].items()
             for method in item
-            if method in ("get", "post", "patch", "delete", "put")
+            if method in verify.OPENAPI_METHODS
         }
         self.assertEqual(found, set(contract.ROUTES))
 
@@ -58,7 +59,9 @@ class ContractPinTest(unittest.TestCase):
         doc = load_fixture()
         schemas = doc["components"]["schemas"]
         grant_role = schemas["GrantChange"]["properties"]["role"]
-        self.assertNotIn("owner", grant_role.get("enum", []))
+        enum = grant_role.get("enum")
+        self.assertIsNotNone(enum, "GrantChange.role must declare an explicit enum")
+        self.assertNotIn("owner", enum)
         for name in contract.MUTATION_SCHEMAS:
             if name == contract.ROLE_FIELD_OWNER:
                 continue
@@ -93,6 +96,73 @@ class HarnessTest(unittest.TestCase):
         del doc["info"]["x-blockfield-contract-sha"]
         self.assertNotEqual(verify.check(doc), [])
 
+    def test_harness_rejects_owner_admitting_role_ref(self):
+        doc = load_fixture()
+        doc["components"]["schemas"]["GrantChange"]["properties"]["role"] = {
+            "$ref": "#/components/schemas/Role"
+        }
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_role_without_enum(self):
+        doc = load_fixture()
+        doc["components"]["schemas"]["GrantChange"]["properties"]["role"] = {
+            "type": "string"
+        }
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_unexpected_options_method(self):
+        doc = load_fixture()
+        doc["paths"]["/v2/staff/grants"]["options"] = {
+            "operationId": "grantOptions",
+            "responses": {"200": {"description": "invented"}},
+        }
+        self.assertNotEqual(verify.check(doc), [])
+
+
+class FakeConnection:
+    """http.client stand-in without the context-manager protocol."""
+
+    last = None
+
+    def __init__(self, *args, **kwargs):
+        self.args, self.kwargs = args, kwargs
+        self.sent = {}
+        self.closed = False
+        FakeConnection.last = self
+
+    def request(self, method, url, body=None, headers=None):
+        self.sent = {
+            "method": method,
+            "url": url,
+            "body": body,
+            "headers": headers,
+        }
+
+    def getresponse(self):
+        body = json.dumps({"ok": True}).encode("utf-8")
+
+        class Response:
+            status = 200
+
+            @staticmethod
+            def read():
+                return body
+
+        return Response()
+
+    def close(self):
+        self.closed = True
+
+
+def send_through_fake(base_url, body):
+    request = client.build_request("POST", "/v2/actions/moderation.kick", body)
+    with (
+        patch("http.client.HTTPConnection", FakeConnection),
+        patch("http.client.HTTPSConnection", FakeConnection),
+    ):
+        status, parsed = client.send(base_url, request, "bearer-1")
+    return status, parsed, FakeConnection.last
+
 
 class ClientTest(unittest.TestCase):
     def test_client_refuses_actor_fields(self):
@@ -102,6 +172,41 @@ class ClientTest(unittest.TestCase):
                 "/v2/settings/gameplay/game",
                 {"expectedRevision": 3, "idempotencyKey": "k", "actor": "x"},
             )
+
+    def test_send_completes_request_and_closes(self):
+        status, parsed, connection = send_through_fake(
+            "https://cp.internal.example",
+            {"idempotencyKey": "k", "reason": "spam"},
+        )
+        self.assertEqual((status, parsed), (200, {"ok": True}))
+        self.assertEqual(connection.sent["method"], "POST")
+        self.assertTrue(connection.closed, "connection must be closed")
+
+    def test_send_encodes_non_ascii_body_as_utf8(self):
+        _, _, connection = send_through_fake(
+            "https://cp.internal.example",
+            {"idempotencyKey": "k", "reason": "spam — repeat café"},
+        )
+        body = connection.sent["body"]
+        self.assertIsInstance(body, bytes)
+        self.assertEqual(
+            json.loads(body.decode("utf-8"))["reason"], "spam — repeat café"
+        )
+        self.assertIn("charset=utf-8", connection.sent["headers"]["Content-Type"])
+
+    def test_send_refuses_cleartext_bearer_off_loopback(self):
+        with self.assertRaises(ValueError):
+            send_through_fake("http://cp.internal.example", {"idempotencyKey": "k"})
+
+    def test_send_allows_http_only_on_loopback(self):
+        for base_url in (
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+        ):
+            status, _, connection = send_through_fake(base_url, {"idempotencyKey": "k"})
+            self.assertEqual(status, 200)
+            self.assertTrue(connection.closed)
 
     def test_client_builds_minimal_mutation(self):
         request = client.build_request(

@@ -1744,6 +1744,9 @@ class DeadExecVerdict(unittest.TestCase):
     def test_vm_exec_raises_running_within_budget(self):
         # Fail-before: old code reports 124 here (540 s stream cut); the
         # command is still inside its --timeout, so vm_exec raises Running.
+        # The dispatch is at t=0 and the polls see t=600: past the 540 s
+        # polling horizon but inside the 1800+120 budget.
+        clock = iter([0, 600, 600, 600])
         with (
             patch.object(
                 boat_build,
@@ -1753,7 +1756,7 @@ class DeadExecVerdict(unittest.TestCase):
             patch.object(
                 boat_build, "history_entries", return_value=[self.fresh_entry()]
             ),
-            patch("time.time", return_value=600),
+            patch("time.time", side_effect=lambda: next(clock)),
             patch("time.sleep"),
         ):
             with self.assertRaises(boat_build.Running):
@@ -1785,6 +1788,43 @@ class DeadExecVerdict(unittest.TestCase):
         self.assertEqual(record["exitCode"], 124)
         self.assertEqual(record["deadExecIds"], ["cmd_long"])
         nap.assert_not_called()
+
+    def test_dropped_stream_verdict_inside_horizon_returns_in_process(self):
+        # workspace#22 round 7: the stream drops at ~5 s but the command
+        # finishes at ~60 s — inside the polling horizon — so the verdict
+        # returns in-process instead of pending (no Running/resume needed).
+        # Fail-before: the 5-poll cap stops near ~55 s and returns pending.
+        for timeout in (1800, 120):
+            record = {}
+            clock = {"t": 5.0}
+
+            def fake_entries(vm_id, limit=100, strict=False):
+                if clock["t"] >= 60:
+                    return [
+                        {
+                            "commandId": "cmd_drop",
+                            "exitCode": 3,
+                            "finishedAt": "2026-11-05T00:01:00.000Z",
+                        }
+                    ]
+                return [{"commandId": "cmd_drop", "status": "running"}]
+
+            def fake_sleep(s):
+                clock["t"] += s
+
+            with (
+                patch.object(boat_build, "history_entries", side_effect=fake_entries),
+                patch.object(boat_build, "history_output", return_value="out"),
+                patch("time.time", side_effect=lambda: clock["t"]),
+                patch("time.sleep", side_effect=fake_sleep) as nap,
+            ):
+                done, code, out = boat_build.remote_status(
+                    "bx_x", "cmd_drop", 0, timeout, record
+                )
+            self.assertTrue(done, f"timeout={timeout}")
+            self.assertEqual(code, 3, f"timeout={timeout}")
+            self.assertEqual(out, "outout", f"timeout={timeout}")
+            self.assertGreater(nap.call_count, 5, f"timeout={timeout}")
 
     def test_failed_history_reread_raises(self):
         # workspace#22 round 2: a failed history read on the late-verdict

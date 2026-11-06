@@ -562,7 +562,9 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
     caller raises Running for a later resume). Past the budget — or stale
     long after dispatch — the exec is dead (its process is gone but history
     never recorded it): fail with an exit status instead of hanging RUNNING
-    forever. A few settle polls absorb the lag between the stream end and
+    forever. A verdict landing inside the polling horizon returns
+    in-process; past it the caller raises Running for a later resume. A few
+    settle polls absorb the lag between the stream end and
     the history write.
     """
     budget = timeout + DEAD_EXEC_GRACE
@@ -570,7 +572,8 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
         # Nothing was dispatched: no resume could ever match history.
         return _dead_exec_verdict(vm_id, command_id, record, "no command dispatched")
     deadline = exec_start + budget
-    for _ in range(5):
+    poll_end = min(exec_start + min(timeout, 540), deadline)
+    while True:
         entry = next(
             (
                 e
@@ -600,8 +603,9 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
             return _dead_exec_verdict(
                 vm_id, command_id, record, "no verdict past the deadline"
             )
-        time.sleep(min(10, max(0, deadline - time.time())))
-    return False, None, ""
+        if time.time() >= poll_end:
+            return False, None, ""
+        time.sleep(min(10, max(0, poll_end - time.time())))
 
 
 def _dead_dispatch_confirmed(vm_id, record, timeout):

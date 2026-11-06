@@ -1650,6 +1650,36 @@ class DeadExecVerdict(unittest.TestCase):
             )
         probe.assert_not_called()
 
+    def test_verdict_landing_during_probe_wins(self):
+        # workspace#22 round 3: a verdict landing while the probe runs
+        # reports the real exit code, never 124 with deadExec.
+        record = {}
+        reads = [
+            [self.running_entry("cmd_p")],  # remote_status settle poll
+            [self.running_entry("cmd_p")],  # late-verdict re-read
+            [  # post-probe re-read: the verdict landed during the probe
+                {
+                    "commandId": "cmd_p",
+                    "exitCode": 0,
+                    "finishedAt": "now",
+                }
+            ],
+        ]
+        with (
+            patch.object(boat_build, "history_entries", side_effect=reads),
+            patch.object(boat_build, "history_output", return_value="ok"),
+            patch.object(boat_build, "_probe_vm", return_value=True) as probe,
+            patch("time.time", return_value=1000),
+            patch("time.sleep"),
+        ):
+            done, code, out = boat_build.remote_status("bx_x", "cmd_p", 0, 1, record)
+        self.assertTrue(done)
+        self.assertEqual((code, out), (0, "okok"))
+        self.assertEqual(record["exitCode"], 0)
+        self.assertNotIn("deadExec", record)
+        self.assertNotIn("deadExecIds", record)
+        probe.assert_called_once_with("bx_x")
+
     def test_no_command_id_fails_fast(self):
         # Fail-before: a record with no dispatch never resolves; fail, don't poll.
         with (
@@ -1797,6 +1827,47 @@ class StaleReaper(unittest.TestCase):
             self.assertEqual(manifest["exitCode"], 124)
             self.assertTrue(manifest["finishedAt"])
             self.assertTrue((out / "build.log").exists())
+
+    def test_resume_dead_dispatch_not_retried(self):
+        # workspace#22 round 3: a dead dispatch found on resume ends 124
+        # with deadExec, prints the rerun hint, and never re-dispatches.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {"commandId": "cmd_old", "command": "true"},
+                "patterns": [],
+                "keep": True,
+            }
+
+            def fake_save(vm_id, record, out_dir, patterns):
+                (out_dir / "manifest.json").write_text(json.dumps(record))
+
+            err = io.StringIO()
+            with (
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[self.stale_entry()],
+                ),
+                patch.object(boat_build, "history_output", return_value=""),
+                patch.object(boat_build, "_probe_vm", return_value=True),
+                patch.object(boat_build, "save_evidence", side_effect=fake_save),
+                patch.object(
+                    boat_build,
+                    "vm_exec",
+                    side_effect=AssertionError("resume must not dispatch"),
+                ),
+                contextlib.redirect_stderr(err),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 124)
+            self.assertIn(
+                "dead exec, not retried on resume; rerun the build", err.getvalue()
+            )
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["exitCode"], 124)
+            self.assertTrue(manifest.get("deadExec"))
 
     def test_single_retry_succeeds(self):
         # Fail-before: old code has no retry; the dead first dispatch ends rc 124.

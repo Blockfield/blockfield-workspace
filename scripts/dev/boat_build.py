@@ -313,9 +313,11 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
     Re-reads history once with strict=True (a failed read raises instead of
     looking like "no verdict"), then runs one bounded probe; a responsive
     VM with no verdict means the process is gone, so mark failed with an
-    exit status instead of hanging RUNNING forever. The record flag lets
-    the caller consider one retry, and the reaped id lets the VM stop guard
-    skip this entry (Boat history keeps listing it as running).
+    exit status instead of hanging RUNNING forever. The verdict may land
+    while the probe runs, so history is re-read once more after the probe
+    and a finished entry reports its real exit code, never 124. The record
+    flag lets the caller consider one retry, and the reaped id lets the VM
+    stop guard skip this entry (Boat history keeps listing it as running).
     """
     if command_id:
         entry = next(
@@ -331,6 +333,18 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
             if verdict is not None:
                 return verdict
         alive = _probe_vm(vm_id)
+        entry = next(
+            (
+                e
+                for e in history_entries(vm_id, limit=100, strict=True)
+                if e.get("commandId") == command_id
+            ),
+            None,
+        )
+        if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
+            verdict = _entry_verdict(vm_id, command_id, entry, record)
+            if verdict is not None:
+                return verdict
         partial = history_output(vm_id, command_id) + history_output(
             vm_id, command_id, stderr=True
         )
@@ -560,7 +574,9 @@ def _dead_dispatch_confirmed(vm_id, record, timeout):
     Retry gate: the dispatch is past its own --timeout + grace AND history
     shows no finishedAt for it. Anything unsure (no dispatch recorded,
     still inside the budget, or history unreadable) means the first command
-    may still run: report 124 without a second dispatch.
+    may still run: report 124 without a second dispatch. In-process path
+    only: a dead dispatch found on resume (--resume-run) is never
+    re-dispatched, it ends 124 (see finish_run).
     """
     command_id, dispatched_at = record.get("commandId"), record.get("dispatchedAt")
     if not command_id or dispatched_at is None:
@@ -1255,6 +1271,11 @@ def save_evidence(vm_id, record, out_dir, patterns):
 
 
 def finish_run(saved, out_dir):
+    """Complete a resumed run: never dispatches, never retries a dead exec.
+
+    A dead dispatch found here ends 124 with deadExec set (the one retry
+    applies only to the in-process path); rerun the build for a fresh run.
+    """
     vm_id, record = saved["vm"], saved["record"]
     # Same budget as the dispatch: the command's own --timeout plus grace.
     timeout = saved.get("timeout", 540)
@@ -1267,6 +1288,11 @@ def finish_run(saved, out_dir):
             f"RUNNING vm={vm_id}; resume: just boat-build --resume-run {out_dir / 'resume.json'}"
         )
         return 75
+    if record.get("deadExec"):
+        print(
+            "dead exec, not retried on resume; rerun the build",
+            file=sys.stderr,
+        )
     (out_dir / "build.log").write_text(out)
     save_evidence(vm_id, record, out_dir, saved["patterns"])
     if saved.get("out"):

@@ -28,6 +28,5 @@ __pycache__/
 /scripts/dev/testbot/bin/
 bin/
 
-.cache/quality/
-
-.cache/dev-inputs/
+# Local tool caches; boat-build would otherwise ship stray untracked files from here.
+.cache/

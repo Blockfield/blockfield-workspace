@@ -1873,7 +1873,7 @@ class StaleReaper(unittest.TestCase):
                 "keep": True,
             }
 
-            def fake_save(vm_id, record, out_dir, patterns):
+            def fake_save(vm_id, record, out_dir, patterns, **kwargs):
                 (out_dir / "manifest.json").write_text(json.dumps(record))
 
             with (
@@ -1910,7 +1910,7 @@ class StaleReaper(unittest.TestCase):
                 "keep": True,
             }
 
-            def fake_save(vm_id, record, out_dir, patterns):
+            def fake_save(vm_id, record, out_dir, patterns, **kwargs):
                 (out_dir / "manifest.json").write_text(json.dumps(record))
 
             err = io.StringIO()
@@ -1938,6 +1938,144 @@ class StaleReaper(unittest.TestCase):
             manifest = json.loads((out / "manifest.json").read_text())
             self.assertEqual(manifest["exitCode"], 124)
             self.assertTrue(manifest.get("deadExec"))
+
+    def test_dead_exec_unmatched_evidence_warns_and_stops(self):
+        # workspace#22 round 8: a dead exec whose build died before writing
+        # its evidence files warns on the unmatched pattern, still writes
+        # the 124 manifest, and stops the VM instead of raising.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {
+                    "commandId": "cmd_old",
+                    "command": "true",
+                    "dispatchedAt": time.time() - 10000,
+                },
+                "patterns": ["/remote/out/report.xml"],
+                "keep": False,
+                "phase": "run",
+            }
+            stops = []
+            err = io.StringIO()
+
+            def fake_run_boat(*args, **kwargs):
+                if args[0] == "stop":
+                    stops.append(args[1])
+                return FakeResult(0, "{}")
+
+            with (
+                patch.object(boat_build, "ROOT", Path(tmp)),
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[self.stale_entry()],
+                ),
+                patch.object(boat_build, "history_output", return_value=""),
+                patch.object(boat_build, "_probe_vm", return_value=True),
+                patch.object(boat_build, "vm_exec", return_value=(0, "[]")),
+                patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+                patch.object(boat_build, "wait_state", return_value="stopped"),
+                contextlib.redirect_stderr(err),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 124)
+            self.assertIn("evidence pattern matched nothing", err.getvalue())
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["exitCode"], 124)
+            self.assertTrue(manifest.get("deadExec"))
+            self.assertEqual(stops, ["bx_x"])
+
+    def test_setup_phase_resume_unmatched_evidence_warns(self):
+        # workspace#22 round 8: a setup-phase resume completes via history,
+        # but the run never produced its patterns' files — warn, write the
+        # manifest, and stop instead of raising before the stop.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {
+                    "commandId": "cmd_setup",
+                    "command": "true",
+                    "dispatchedAt": time.time() - 100,
+                },
+                "patterns": ["/remote/out/report.xml"],
+                "keep": False,
+                "phase": "setup",
+            }
+            stops = []
+            err = io.StringIO()
+
+            def fake_run_boat(*args, **kwargs):
+                if args[0] == "stop":
+                    stops.append(args[1])
+                return FakeResult(0, "{}")
+
+            with (
+                patch.object(boat_build, "ROOT", Path(tmp)),
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[
+                        {
+                            "commandId": "cmd_setup",
+                            "exitCode": 0,
+                            "finishedAt": "now",
+                        }
+                    ],
+                ),
+                patch.object(boat_build, "history_output", return_value="ok"),
+                patch.object(boat_build, "vm_exec", return_value=(0, "[]")),
+                patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+                patch.object(boat_build, "wait_state", return_value="stopped"),
+                contextlib.redirect_stderr(err),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 3)
+            self.assertIn("evidence pattern matched nothing", err.getvalue())
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["exitCode"], 0)
+            self.assertEqual(stops, ["bx_x"])
+
+    def test_normal_run_unmatched_evidence_still_raises(self):
+        # workspace#22 round 8: a normal successful run keeps the strict
+        # raise — no manifest, no stop.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {
+                    "commandId": "cmd_ok",
+                    "command": "true",
+                    "dispatchedAt": time.time() - 100,
+                },
+                "patterns": ["/remote/out/report.xml"],
+                "keep": False,
+                "phase": "run",
+            }
+            with (
+                patch.object(boat_build, "ROOT", Path(tmp)),
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[
+                        {"commandId": "cmd_ok", "exitCode": 0, "finishedAt": "now"}
+                    ],
+                ),
+                patch.object(boat_build, "history_output", return_value="ok"),
+                patch.object(boat_build, "vm_exec", return_value=(0, "[]")),
+                patch.object(
+                    boat_build,
+                    "run_boat",
+                    side_effect=AssertionError("must not stop without manifest"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "evidence pattern matched nothing"
+                ):
+                    boat_build.finish_run(saved, out)
+            self.assertFalse((out / "manifest.json").exists())
 
     def test_single_retry_succeeds(self):
         # Fail-before: old code has no retry; the dead first dispatch ends rc 124.
@@ -1985,7 +2123,7 @@ class StaleReaper(unittest.TestCase):
             patch.object(
                 boat_build,
                 "save_evidence",
-                side_effect=lambda *a: (
+                side_effect=lambda *a, **k: (
                     Path(a[2]).joinpath("manifest.json").write_text("{}")
                 ),
             ),
@@ -2040,7 +2178,7 @@ class StaleReaper(unittest.TestCase):
             patch.object(
                 boat_build,
                 "save_evidence",
-                side_effect=lambda *a: (
+                side_effect=lambda *a, **k: (
                     Path(a[2]).joinpath("manifest.json").write_text("{}")
                 ),
             ),
@@ -2098,7 +2236,7 @@ class StaleReaper(unittest.TestCase):
             patch.object(
                 boat_build,
                 "save_evidence",
-                side_effect=lambda *a: (
+                side_effect=lambda *a, **k: (
                     Path(a[2]).joinpath("manifest.json").write_text("{}")
                 ),
             ),
@@ -2254,7 +2392,7 @@ class StaleReaper(unittest.TestCase):
         self.assertEqual(saved["record"]["commandId"], "cmd_setup")
         self.assertEqual(saved["record"]["dispatchedAt"], start)
 
-        def fake_save(vm_id, record, out_dir, patterns):
+        def fake_save(vm_id, record, out_dir, patterns, **kwargs):
             (out_dir / "manifest.json").write_text(json.dumps(record))
 
         saved["keep"] = True  # completion is under test, not the stop
@@ -2306,7 +2444,7 @@ class StaleReaper(unittest.TestCase):
                 "keep": True,
             }
 
-            def fake_save(vm_id, record, out_dir, patterns):
+            def fake_save(vm_id, record, out_dir, patterns, **kwargs):
                 (out_dir / "manifest.json").write_text(json.dumps(record))
 
             with (
@@ -2348,7 +2486,7 @@ class StaleReaper(unittest.TestCase):
                 "keep": True,
             }
 
-            def fake_save(vm_id, record, out_dir, patterns):
+            def fake_save(vm_id, record, out_dir, patterns, **kwargs):
                 (out_dir / "manifest.json").write_text(json.dumps(record))
 
             with (

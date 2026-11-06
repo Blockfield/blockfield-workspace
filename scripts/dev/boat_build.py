@@ -1289,8 +1289,13 @@ def vm_minutes(vm_id):
         return 0.0, {"raw": result.stdout[-500:]}
 
 
-def save_evidence(vm_id, record, out_dir, patterns):
-    """Copy before stop; a failed copy keeps the VM available for recovery."""
+def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
+    """Copy before stop; a failed copy keeps the VM available for recovery.
+
+    A dead exec or a setup-phase resume may never have produced the files
+    its patterns name: with warn_unmatched those patterns only log a
+    warning, so the run still writes its manifest and reaches the stop.
+    """
     for index, pattern in enumerate(patterns):
         script = "python3 -c " + shlex.quote(
             "import glob,json; print(json.dumps(glob.glob("
@@ -1300,6 +1305,12 @@ def save_evidence(vm_id, record, out_dir, patterns):
         _, raw = vm_exec(vm_id, script)
         paths = json.loads(raw)
         if not paths:
+            if warn_unmatched:
+                print(
+                    f"warning: evidence pattern matched nothing: {pattern}",
+                    file=sys.stderr,
+                )
+                continue
             raise RuntimeError(f"evidence pattern matched nothing: {pattern}")
         for match_index, path in enumerate(paths):
             dest = out_dir / f"evidence-{index}" / str(match_index)
@@ -1368,7 +1379,13 @@ def finish_run(saved, out_dir):
             file=sys.stderr,
         )
     (out_dir / "build.log").write_text(out)
-    save_evidence(vm_id, record, out_dir, saved["patterns"])
+    save_evidence(
+        vm_id,
+        record,
+        out_dir,
+        saved["patterns"],
+        warn_unmatched=bool(record.get("deadExec")) or saved.get("phase") == "setup",
+    )
     if saved.get("out"):
         shutil.copytree(out_dir, saved["out"], dirs_exist_ok=True)
     if not saved["keep"]:
@@ -1513,7 +1530,14 @@ def main(argv=None):
         finally:
             (out_dir / "resume.json").write_text(json.dumps(saved, indent=2))
         log_path.write_text(out, encoding="utf-8")
-        save_evidence(vm_id, record, out_dir, saved["patterns"])
+        save_evidence(
+            vm_id,
+            record,
+            out_dir,
+            saved["patterns"],
+            warn_unmatched=bool(record.get("deadExec"))
+            or saved.get("phase") == "setup",
+        )
         if args.out:
             try:
                 shutil.copytree(out_dir, args.out, dirs_exist_ok=True)

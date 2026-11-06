@@ -162,6 +162,8 @@ class StopAlways(unittest.TestCase):
             return FakeResult(0, "{}")
 
         self.patches = [
+            # Run manifests/logs land under ROOT/.dev/<task>: keep them out of the real checkout.
+            patch.object(boat_build, "ROOT", Path(self.tmp.name)),
             patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
             patch.object(boat_build, "local_shas", return_value={"": "abc"}),
             patch.object(boat_build, "remote_shas", return_value={"": "abc"}),

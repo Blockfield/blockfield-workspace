@@ -373,7 +373,8 @@ def vm_exec(vm_id, script, timeout=120, record=None):
             f"`boat history {vm_id} --mode commands --limit 5 --json` for a "
             "command started just now. If it is there, put its commandId into "
             "the run record and resume with --resume-run; otherwise rerun the "
-            "build. Giving up instead of polling exit 75 with no command."
+            "build. Giving up instead of polling exit 75 with no command.\n"
+            f"boat exec rc={result.returncode}, output tail:\n{detail[-2000:]}"
         )
     if record is not None:
         record.update(commandId=command_id, dispatchedAt=start)

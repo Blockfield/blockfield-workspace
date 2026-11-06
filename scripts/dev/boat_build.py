@@ -243,6 +243,105 @@ class Running(RuntimeError):
         super().__init__(f"RUNNING vm={vm_id} command={command_id}")
 
 
+DEAD_EXEC_CODE = 124  # timeout convention: history recorded no verdict
+
+
+def _probe_vm(vm_id, timeout=30):
+    """One bounded exec proving the VM still runs commands (False when not)."""
+    try:
+        probe = run_boat(
+            "exec",
+            "--json",
+            "--stream",
+            "--timeout",
+            str(timeout),
+            vm_id,
+            "bash",
+            "-lc",
+            "true",
+            check=False,
+        )
+    except Exception:
+        return False
+    return dispatched_output(probe.stdout)
+
+
+def _now_iso():
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _entry_age_seconds(entry):
+    """Seconds since the history entry started (None when unknown)."""
+    try:
+        started = datetime.fromisoformat(
+            str(entry.get("startedAt")).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now(timezone.utc) - started).total_seconds()
+
+
+def _entry_verdict(vm_id, command_id, entry, record):
+    """Terminal (True, code, output) for an entry with both verdict fields."""
+    try:
+        code = int(entry["exitCode"])
+    except (TypeError, ValueError):
+        return None
+    if record is not None:
+        record.update(exitCode=code, finishedAt=entry["finishedAt"])
+    return (
+        True,
+        code,
+        (
+            history_output(vm_id, command_id, strict=True)
+            + history_output(vm_id, command_id, stderr=True, strict=True)
+        ),
+    )
+
+
+def _dead_exec_verdict(vm_id, command_id, record, reason):
+    """Terminal failure for a dead exec: late verdict wins, else fail.
+
+    Re-reads history once (a verdict that landed late still completes the
+    run), then runs one bounded probe; a responsive VM with no verdict means
+    the process is gone, so mark failed with an exit status instead of
+    hanging RUNNING forever. The record flag lets the caller retry once.
+    """
+    if command_id:
+        entry = next(
+            (
+                e
+                for e in history_entries(vm_id, limit=100)
+                if e.get("commandId") == command_id
+            ),
+            None,
+        )
+        if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
+            verdict = _entry_verdict(vm_id, command_id, entry, record)
+            if verdict is not None:
+                return verdict
+        alive = _probe_vm(vm_id)
+        partial = history_output(vm_id, command_id) + history_output(
+            vm_id, command_id, stderr=True
+        )
+        detail = f"probe dispatched={alive}"
+    else:
+        partial, detail = "", "no probe without a command"
+    if record is not None:
+        record.update(exitCode=DEAD_EXEC_CODE, finishedAt=_now_iso(), deadExec=True)
+    msg = (
+        f"dead exec: command {command_id or '<none>'} {reason} "
+        f"({detail}); marked failed with exit {DEAD_EXEC_CODE}"
+    )
+    if partial:
+        msg += f"\npartial output:\n{partial}"
+    return True, DEAD_EXEC_CODE, msg
+
+
 def dispatched_output(text):
     """True when exec output shows the VM ran something (not a bare CLI error)."""
     try:
@@ -396,8 +495,17 @@ def history_output(vm_id, command_id, stderr=False, strict=False):
 
 
 def remote_status(vm_id, command_id, exec_start, timeout, record=None):
-    """Only matching history with both verdict fields can complete a run."""
-    deadline = exec_start + min(timeout, 540)
+    """Only matching history with both verdict fields can complete a run.
+
+    Past the deadline — or for a stale entry with no verdict long after
+    dispatch — the exec is dead (its process is gone but history never
+    recorded it): fail with an exit status instead of hanging RUNNING forever.
+    """
+    budget = min(timeout, 540)
+    if not command_id:
+        # Nothing was dispatched: no resume could ever match history.
+        return _dead_exec_verdict(vm_id, command_id, record, "no command dispatched")
+    deadline = exec_start + budget
     while True:
         entry = next(
             (
@@ -408,23 +516,26 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
             None,
         )
         if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
-            try:
-                code = int(entry["exitCode"])
-            except (TypeError, ValueError):
-                code = None
-            if code is not None:
-                if record is not None:
-                    record.update(exitCode=code, finishedAt=entry["finishedAt"])
-                return (
-                    True,
-                    code,
-                    (
-                        history_output(vm_id, command_id, strict=True)
-                        + history_output(vm_id, command_id, stderr=True, strict=True)
-                    ),
+            verdict = _entry_verdict(vm_id, command_id, entry, record)
+            if verdict is not None:
+                return verdict
+        if entry and not (
+            entry.get("finishedAt") and entry.get("exitCode") is not None
+        ):
+            age = _entry_age_seconds(entry)
+            if age is not None and age > budget:
+                # Stale running record (e.g. the 70-min empty one): reap it
+                # to failed now instead of polling a dead command.
+                return _dead_exec_verdict(
+                    vm_id,
+                    command_id,
+                    record,
+                    f"no verdict {int(age)}s after dispatch (budget {budget}s)",
                 )
         if time.time() >= deadline:
-            return False, None, ""
+            return _dead_exec_verdict(
+                vm_id, command_id, record, "no verdict past the deadline"
+            )
         time.sleep(min(10, max(0, deadline - time.time())))
 
 
@@ -1236,6 +1347,11 @@ def main(argv=None):
         (out_dir / "resume.json").write_text(json.dumps(saved, indent=2))
         try:
             rc, out = vm_exec(vm_id, script, timeout=args.timeout, record=record)
+            if record.get("deadExec"):
+                # One retry: the first dispatch died without a verdict; a
+                # fresh dispatch may succeed. Single retry only.
+                record.pop("deadExec", None)
+                rc, out = vm_exec(vm_id, script, timeout=args.timeout, record=record)
         finally:
             (out_dir / "resume.json").write_text(json.dumps(saved, indent=2))
         log_path.write_text(out, encoding="utf-8")

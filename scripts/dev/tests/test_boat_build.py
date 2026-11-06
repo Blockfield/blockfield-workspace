@@ -1065,22 +1065,34 @@ class RemoteStatus(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
-    def test_running_past_deadline_is_pending(self):
+    def test_running_past_deadline_is_failed(self):
+        # workspace#22: a verdict-less entry past the deadline is a dead
+        # exec — failed with an exit status, never RUNNING forever.
         with (
             patch.object(
                 boat_build, "history_entries", return_value=[{"commandId": "cmd_y"}]
             ),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=True),
             patch("time.time", return_value=1000),
         ):
-            self.assertEqual(
-                boat_build.remote_status("bx_x", "cmd_y", 0, 1), (False, None, "")
-            )
+            done, code, out = boat_build.remote_status("bx_x", "cmd_y", 0, 1)
+        self.assertTrue(done)
+        self.assertEqual(code, 124)
+        self.assertIn("cmd_y", out)
 
-    def test_missing_history_is_pending(self):
-        with patch.object(boat_build, "history_entries", return_value=[]):
-            self.assertEqual(
-                boat_build.remote_status("bx_x", "cmd_x", 0, -1), (False, None, "")
-            )
+    def test_missing_history_is_failed(self):
+        # workspace#22: no history entry at all past the deadline is also a
+        # dead exec — failed, never pending.
+        with (
+            patch.object(boat_build, "history_entries", return_value=[]),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=False),
+        ):
+            done, code, out = boat_build.remote_status("bx_x", "cmd_x", 0, -1)
+        self.assertTrue(done)
+        self.assertEqual(code, 124)
+        self.assertIn("cmd_x", out)
 
     def test_history_failure_verdict(self):
         with (
@@ -1559,3 +1571,196 @@ class UninitializedSubmodules(unittest.TestCase):
                 )
         self.assertIn("gone", str(ctx.exception))
         self.assertIn("cannot initialize submodule", str(ctx.exception))
+
+
+class DeadExecVerdict(unittest.TestCase):
+    """W1: a dead exec (no verdict past the deadline) fails, never hangs RUNNING."""
+
+    def running_entry(self, command_id="cmd_dead"):
+        return {
+            "commandId": command_id,
+            "status": "running",
+            "startedAt": "2026-11-05T00:00:00.000Z",
+        }
+
+    def test_dead_exec_returns_failed_not_pending(self):
+        # Fail-before: old code returns (False, None, "") and vm_exec raises Running.
+        record = {}
+        with (
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[self.running_entry()],
+            ),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=True),
+            patch("time.time", return_value=1000),
+            patch("time.sleep") as nap,
+        ):
+            done, code, out = boat_build.remote_status("bx_x", "cmd_dead", 0, 1, record)
+        self.assertTrue(done)
+        self.assertEqual(code, 124)
+        self.assertIn("cmd_dead", out)
+        self.assertEqual(record["exitCode"], 124)
+        self.assertTrue(record["finishedAt"])
+        nap.assert_not_called()
+
+    def test_killed_exec_goes_failed_not_running(self):
+        # Fail-before: old code raises Running here (empty record hangs forever).
+        record = {}
+        ticks = {"n": 0}
+
+        def clock():
+            ticks["n"] += 1
+            return 0 if ticks["n"] == 1 else 10**9
+
+        with (
+            patch.object(
+                boat_build,
+                "run_boat",
+                return_value=FakeResult(1, '{"commandId": "cmd_k"}'),
+            ),
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[self.running_entry("cmd_k")],
+            ),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=True),
+            patch("time.time", side_effect=clock),
+            patch("time.sleep"),
+        ):
+            code, out = boat_build.vm_exec("bx_x", "true", record=record)
+        self.assertEqual(code, 124)
+        self.assertIn("cmd_k", out)
+
+    def test_late_verdict_still_wins(self):
+        # Fail-before: a verdict landing on the re-read completes normally.
+        entry = {"commandId": "cmd_l", "exitCode": 0, "finishedAt": "now"}
+        with (
+            patch.object(boat_build, "history_entries", return_value=[entry]),
+            patch.object(boat_build, "history_output", return_value="ok"),
+            patch("time.time", return_value=1000),
+            patch("time.sleep"),
+            patch.object(boat_build, "_probe_vm") as probe,
+        ):
+            self.assertEqual(
+                boat_build.remote_status("bx_x", "cmd_l", 0, 1), (True, 0, "okok")
+            )
+        probe.assert_not_called()
+
+    def test_no_command_id_fails_fast(self):
+        # Fail-before: a record with no dispatch never resolves; fail, don't poll.
+        with (
+            patch("time.time", return_value=1000),
+            patch("time.sleep") as nap,
+            patch.object(boat_build, "_probe_vm") as probe,
+        ):
+            done, code, out = boat_build.remote_status("bx_x", "", 0, 540, {})
+        self.assertTrue(done)
+        self.assertEqual(code, 124)
+        self.assertIn("no command", out)
+        nap.assert_not_called()
+        probe.assert_not_called()
+
+
+class StaleReaper(unittest.TestCase):
+    """W2: a stale running record reaps to failed; one retry may succeed."""
+
+    def stale_entry(self, command_id="cmd_old", minutes=70):
+        from datetime import datetime, timedelta, timezone
+
+        started = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(
+            timespec="milliseconds"
+        )
+        return {
+            "commandId": command_id,
+            "status": "running",
+            "startedAt": started.replace("+00:00", "Z"),
+        }
+
+    def test_stale_record_reaps_to_failed(self):
+        # Fail-before: old code returns 75 with no manifest (RUNNING forever).
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {"commandId": "cmd_old", "command": "true"},
+                "patterns": [],
+                "keep": True,
+            }
+
+            def fake_save(vm_id, record, out_dir, patterns):
+                (out_dir / "manifest.json").write_text(json.dumps(record))
+
+            with (
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[self.stale_entry()],
+                ),
+                patch.object(boat_build, "history_output", return_value=""),
+                patch.object(boat_build, "_probe_vm", return_value=True),
+                patch.object(boat_build, "save_evidence", side_effect=fake_save),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 124)
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["exitCode"], 124)
+            self.assertTrue(manifest["finishedAt"])
+            self.assertTrue((out / "build.log").exists())
+
+    def test_single_retry_succeeds(self):
+        # Fail-before: old code has no retry; the dead first dispatch ends rc 124.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out_dir = str(Path(tmp.name) / "logs")
+        attempts = []
+
+        def fake_vm_exec(vm_id, script, timeout=120, record=None):
+            if record is None:
+                if "echo $HOME" in script:
+                    return 0, "/h"
+                return 0, "blockfield-workspace\n"
+            attempts.append(script)
+            if len(attempts) == 1:
+                record.update(
+                    commandId="cmd_dead",
+                    exitCode=124,
+                    finishedAt="now",
+                    deadExec=True,
+                )
+                return 124, "dead exec: no verdict"
+            record.update(commandId="cmd_new", exitCode=0, finishedAt="now")
+            return 0, "ok"
+
+        def fake_run_boat(*args, **kwargs):
+            if args[0] == "history":
+                return FakeResult(0, '{"commands": []}')
+            if args[0] == "info":
+                return FakeResult(0, '{"state": "stopped"}')
+            if args[0] == "usage":
+                return FakeResult(0, '{"seconds": 0, "billingMultiplier": 1}')
+            return FakeResult(0, "{}")
+
+        with (
+            patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+            patch.object(boat_build, "local_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "remote_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "ensure_worktree", return_value=0),
+            patch.object(boat_build, "write_env", return_value="/remote/env"),
+            patch.object(boat_build, "vm_minutes", return_value=(0.0, {})),
+            patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec),
+            patch.object(
+                boat_build,
+                "save_evidence",
+                side_effect=lambda *a: (
+                    Path(a[2]).joinpath("manifest.json").write_text("{}")
+                ),
+            ),
+        ):
+            rc = boat_build.main(
+                ["--vm", "bx_mine", "--task", "unit-r", "--out", out_dir, "--", "true"]
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(attempts), 2)

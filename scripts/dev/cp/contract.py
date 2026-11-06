@@ -53,6 +53,21 @@ MUTATION_SCHEMAS = (
     "Challenge",
 )
 
+# "METHOD path" routes that take a JSON body, bound to their schema component.
+# The harness resolves each route's requestBody $ref and runs the authority
+# checks on the referenced schema; an unbound mutating route is a failure.
+ROUTE_BODY = {
+    "POST /v2/owner/challenges": "Challenge",
+    "PATCH /v2/settings/{namespace}/{target}": "SettingsChange",
+    "POST /v2/settings/{namespace}/{target}/validate": "SettingsChange",
+    "POST /v2/settings/{namespace}/{target}/rollback": "Rollback",
+    "POST /v2/staff/grants": "GrantChange",
+    "POST /v2/accounts/{account_id}/test-status": "TestStatus",
+    "POST /v2/actions/{kind}": "Action",
+    "POST /v2/delegations": "Delegation",
+    "POST /v2/agents/{cid}/acks": "Ack",
+}
+
 # core.py:428 — the only typed action kinds the server accepts.
 ACTION_KINDS = ("moderation.ban", "moderation.kick")
 

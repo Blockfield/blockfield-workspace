@@ -40,7 +40,7 @@ class ContractPinTest(unittest.TestCase):
             f"{method.upper()} {path}"
             for path, item in doc["paths"].items()
             for method in item
-            if method in verify.OPENAPI_METHODS
+            if method.lower() in verify.OPENAPI_METHODS
         }
         self.assertEqual(found, set(contract.ROUTES))
 
@@ -116,6 +116,57 @@ class HarnessTest(unittest.TestCase):
             "operationId": "grantOptions",
             "responses": {"200": {"description": "invented"}},
         }
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_uppercase_invented_method(self):
+        doc = load_fixture()
+        doc["paths"]["/v2/staff/grant"] = {
+            "x-blockfield-provenance": "cpv2/app.py@6df1f95:446",
+            "POST": {
+                "operationId": "grantTypo",
+                "responses": {"200": {"description": "invented"}},
+            },
+        }
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_unknown_path_item_key(self):
+        doc = load_fixture()
+        doc["paths"]["/v2/staff/grants"]["summary2"] = "invented key"
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_mutating_route_without_body(self):
+        doc = load_fixture()
+        doc["paths"]["/v2/staff/grants"]["post"].pop("requestBody", None)
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_inline_owner_body(self):
+        doc = load_fixture()
+        doc["paths"]["/v2/staff/grants"]["post"]["requestBody"] = {
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {"role": {"enum": ["admin", "owner"]}},
+                    }
+                }
+            }
+        }
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_empty_additional_properties(self):
+        doc = load_fixture()
+        doc["components"]["schemas"]["Mutation"]["additionalProperties"] = {}
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_missing_additional_properties(self):
+        doc = load_fixture()
+        del doc["components"]["schemas"]["Mutation"]["additionalProperties"]
+        self.assertNotEqual(verify.check(doc), [])
+
+    def test_harness_rejects_grantchange_without_role(self):
+        doc = load_fixture()
+        del doc["components"]["schemas"]["GrantChange"]["properties"]["role"]
         self.assertNotEqual(verify.check(doc), [])
 
 
@@ -228,13 +279,22 @@ class ClientTest(unittest.TestCase):
 
 class McpBoundaryTest(unittest.TestCase):
     def test_mcp_consumes_section7_api_only(self):
-        offenders = []
-        for path in sorted((DEV / "mcp").glob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            for marker in contract.FORBIDDEN_MCP_MARKERS:
-                if marker in text:
-                    offenders.append(f"{path.name}: {marker}")
+        offenders, scanned = verify.check_mcp(DEV / "mcp")
+        self.assertGreaterEqual(scanned, 1, "boundary test scanned nothing")
         self.assertEqual(offenders, [])
+
+    def test_mcp_scan_finds_nested_marker(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "pkg"
+            nested.mkdir()
+            (nested / "bridge.py").write_text(
+                "TOKEN = BLOCKFIELD_CP_GATE_WRITE_TOKEN", encoding="utf-8"
+            )
+            offenders, scanned = verify.check_mcp(Path(tmp))
+            self.assertGreaterEqual(scanned, 1)
+            self.assertEqual(len(offenders), 1)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,68 @@ OPENAPI_METHODS = (
     "trace",
 )
 
+PATH_ITEM_KEYS = set(OPENAPI_METHODS) | {
+    "parameters",
+    "summary",
+    "description",
+    "servers",
+    "$ref",
+}
+
+
+def _operation(paths, method, path):
+    """Find the operation for METHOD path, matching the method case-insensitively."""
+    item = paths.get(path, {})
+    for key, value in item.items():
+        if key.lower() == method.lower() and key.lower() in OPENAPI_METHODS:
+            return value if isinstance(value, dict) else None
+    return None
+
+
+def _body_ref(operation):
+    """Resolve a requestBody $ref; None when missing, inline or unresolvable."""
+    if not isinstance(operation, dict):
+        return None
+    try:
+        ref = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    except (KeyError, TypeError):
+        return None
+    return ref if isinstance(ref, str) else None
+
+
+def _schema_failures(name, schema):
+    """Authority checks on one schema; fail closed on every gap."""
+    if schema is None:
+        return [f"missing schema: {name}"]
+    failures = []
+    smuggled = set(schema.get("properties", {})) & set(contract.FORBIDDEN_BODY_FIELDS)
+    if smuggled:
+        failures.append(f"{name} smuggles authority fields: {sorted(smuggled)}")
+    # Strict: only an explicit `false` passes; {} / missing / true all fail.
+    if schema.get("additionalProperties") is not False:
+        failures.append(f"{name} must set additionalProperties: false (Strict)")
+    role = schema.get("properties", {}).get("role")
+    if name == contract.ROLE_FIELD_OWNER:
+        # A missing or renamed `role` is a failure, not a skip.
+        enum = role.get("enum") if isinstance(role, dict) else None
+        if not isinstance(enum, list) or "owner" in enum:
+            failures.append(f"{name} must pin role to an explicit enum without owner")
+    elif role is not None:
+        failures.append(f"{name} carries an authority role field")
+    return failures
+
+
+def check_mcp(root):
+    """Scan root recursively for §7-bypass markers; return (offenders, scanned)."""
+    offenders, scanned = [], 0
+    for path in sorted(Path(root).rglob("*.py")):
+        scanned += 1
+        text = path.read_text(encoding="utf-8")
+        for marker in contract.FORBIDDEN_MCP_MARKERS:
+            if marker in text:
+                offenders.append(f"{path.name}: {marker}")
+    return offenders, scanned
+
 
 def check(doc):
     """Return a list of failure reasons; empty means the fixture is green."""
@@ -31,12 +93,16 @@ def check(doc):
     if info.get("x-blockfield-contract-sha") != contract.CONTRACT_SHA:
         failures.append("info.x-blockfield-contract-sha != frozen pin")
     paths = doc.get("paths", {})
-    found = {
-        f"{method.upper()} {path}"
-        for path, item in paths.items()
-        for method in item
-        if method in OPENAPI_METHODS
-    }
+    found = set()
+    for path, item in paths.items():
+        if not isinstance(item, dict):
+            continue
+        for key in item:
+            low = key.lower()
+            if low in OPENAPI_METHODS:
+                found.add(f"{low.upper()} {path}")
+            elif key not in PATH_ITEM_KEYS and not low.startswith("x-"):
+                failures.append(f"unknown path-item key: {path} {key}")
     for route in sorted(set(contract.ROUTES) - found):
         failures.append(f"missing route: {route}")
     for route in sorted(found - set(contract.ROUTES)):
@@ -47,27 +113,12 @@ def check(doc):
             failures.append(f"unprovenanced path (transcribe, never invent): {path}")
     schemas = doc.get("components", {}).get("schemas", {})
     for name in contract.MUTATION_SCHEMAS:
-        schema = schemas.get(name)
-        if schema is None:
-            failures.append(f"missing schema: {name}")
-            continue
-        smuggled = set(schema.get("properties", {})) & set(
-            contract.FORBIDDEN_BODY_FIELDS
-        )
-        if smuggled:
-            failures.append(f"{name} smuggles authority fields: {sorted(smuggled)}")
-        role = schema.get("properties", {}).get("role")
-        # Fail closed: only an explicit enum without "owner" passes. A
-        # missing enum, $ref, anyOf or any other shape is a failure.
-        enum = role.get("enum") if isinstance(role, dict) else None
-        if role is not None and (
-            name != contract.ROLE_FIELD_OWNER
-            or not isinstance(enum, list)
-            or "owner" in enum
-        ):
-            failures.append(f"{name} carries an authority role field")
-        if schema.get("additionalProperties", True):
-            failures.append(f"{name} must set additionalProperties: false (Strict)")
+        failures.extend(_schema_failures(name, schemas.get(name)))
+    for route, name in contract.ROUTE_BODY.items():
+        method, _, path = route.partition(" ")
+        ref = _body_ref(_operation(paths, method, path))
+        if ref != f"#/components/schemas/{name}":
+            failures.append(f"{route} must bind requestBody to {name} via $ref")
     extensions = info.get("x-blockfield", {})
     if sorted(extensions.get("action-kinds", [])) != sorted(contract.ACTION_KINDS):
         failures.append("x-blockfield.action-kinds drifted from core.py:428")

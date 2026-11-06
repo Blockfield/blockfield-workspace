@@ -1216,6 +1216,33 @@ class DeadExecBoatStart(unittest.TestCase):
             )
 
 
+class DeadExecHistoryWindow(unittest.TestCase):
+    def test_command_pushed_out_of_the_window_is_not_marked_dead(self):
+        # Fail-before: 100 newer execs hid the command and it got exit 124.
+        newer = [{"commandId": f"cmd_{i}"} for i in range(100)]
+        record = {}
+        with (
+            patch.object(boat_build, "history_entries", return_value=newer),
+            patch.object(boat_build, "history_output", return_value=""),
+            self.assertRaises(RuntimeError),
+        ):
+            boat_build._dead_exec_verdict("bx_x", "cmd_old", record, "timed out")
+        self.assertNotIn("exitCode", record)
+
+
+class EvidenceKeepsRunning(unittest.TestCase):
+    def test_running_lookup_is_not_swallowed_by_warn_unmatched(self):
+        running = boat_build.Running("bx_x", "cmd_glob", "glob")
+        with (
+            patch.object(boat_build, "vm_exec", side_effect=running),
+            tempfile.TemporaryDirectory() as out,
+            self.assertRaises(boat_build.Running),
+        ):
+            boat_build.save_evidence(
+                "bx_x", {}, Path(out), ["*.log"], warn_unmatched=True
+            )
+
+
 class GraftedSender(unittest.TestCase):
     """A grafted (shallow) sender packs parent links the VM cannot read.
 

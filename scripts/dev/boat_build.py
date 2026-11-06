@@ -300,14 +300,14 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
     not lost; stopping also kills a hung exec.
     """
     if command_id:
-        entry = next(
-            (
-                e
-                for e in history_entries(vm_id, limit=100, strict=True)
-                if e.get("commandId") == command_id
-            ),
-            None,
-        )
+        entries = history_entries(vm_id, limit=100, strict=True)
+        entry = next((e for e in entries if e.get("commandId") == command_id), None)
+        if entry is None and len(entries) >= 100:
+            # Pushed out of the newest-100 window is not "never recorded": refuse to guess 124.
+            raise RuntimeError(
+                f"command {command_id} is older than the last 100 history entries; "
+                "its verdict is unknown, check it manually"
+            )
         if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
             verdict = _entry_verdict(vm_id, command_id, entry, record)
             if verdict is not None:
@@ -1175,6 +1175,8 @@ def save_evidence(vm_id, record, out_dir, patterns, warn_unmatched=False):
         try:
             _, raw = vm_exec(vm_id, script)
             paths = json.loads(raw)
+        except Running:
+            raise  # a still-running lookup must keep the VM and its resume
         except (RuntimeError, ValueError) as exc:
             if not warn_unmatched:
                 raise

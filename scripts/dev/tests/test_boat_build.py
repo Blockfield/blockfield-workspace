@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1663,6 +1664,93 @@ class DeadExecVerdict(unittest.TestCase):
         nap.assert_not_called()
         probe.assert_not_called()
 
+    def fresh_entry(self, command_id="cmd_long", minutes=5):
+        from datetime import datetime, timedelta, timezone
+
+        started = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(
+            timespec="milliseconds"
+        )
+        return {
+            "commandId": command_id,
+            "status": "running",
+            "startedAt": started.replace("+00:00", "Z"),
+        }
+
+    def test_within_timeout_stays_pending(self):
+        # workspace#22 round 2: past the 540 s stream cut but inside the
+        # command's own --timeout, a verdict-less run stays pending, never 124.
+        record = {}
+        with (
+            patch.object(
+                boat_build, "history_entries", return_value=[self.fresh_entry()]
+            ),
+            patch("time.time", return_value=600),
+            patch("time.sleep"),
+        ):
+            done, code, _ = boat_build.remote_status(
+                "bx_x", "cmd_long", 0, 1800, record
+            )
+        self.assertFalse(done)
+        self.assertIsNone(code)
+        self.assertNotIn("deadExec", record)
+        self.assertNotIn("exitCode", record)
+
+    def test_vm_exec_raises_running_within_budget(self):
+        # Fail-before: old code reports 124 here (540 s stream cut); the
+        # command is still inside its --timeout, so vm_exec raises Running.
+        with (
+            patch.object(
+                boat_build,
+                "run_boat",
+                return_value=FakeResult(75, '{"commandId": "cmd_long"}'),
+            ),
+            patch.object(
+                boat_build, "history_entries", return_value=[self.fresh_entry()]
+            ),
+            patch("time.time", return_value=600),
+            patch("time.sleep"),
+        ):
+            with self.assertRaises(boat_build.Running):
+                boat_build.vm_exec("bx_x", "true", timeout=1800, record={})
+
+    def test_dead_past_own_timeout_is_124(self):
+        # workspace#22 round 2: past --timeout + grace with no verdict the
+        # run fails with 124 and records the reaped command id.
+        record = {}
+        with (
+            patch.object(
+                boat_build, "history_entries", return_value=[self.fresh_entry()]
+            ),
+            patch.object(boat_build, "history_output", return_value=""),
+            patch.object(boat_build, "_probe_vm", return_value=True),
+            patch("time.time", return_value=10000),
+            patch("time.sleep") as nap,
+        ):
+            done, code, out = boat_build.remote_status(
+                "bx_x", "cmd_long", 0, 1800, record
+            )
+        self.assertTrue(done)
+        self.assertEqual(code, 124)
+        self.assertIn("cmd_long", out)
+        self.assertEqual(record["exitCode"], 124)
+        self.assertEqual(record["deadExecIds"], ["cmd_long"])
+        nap.assert_not_called()
+
+    def test_failed_history_reread_raises(self):
+        # workspace#22 round 2: a failed history read on the late-verdict
+        # re-read raises instead of looking like "no verdict".
+        with (
+            patch.object(
+                boat_build,
+                "history_entries",
+                side_effect=[[], RuntimeError("history unavailable; refusing VM stop")],
+            ),
+            patch("time.time", return_value=10000),
+            patch("time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "history unavailable"):
+                boat_build.remote_status("bx_x", "cmd_x", 0, 1800, {})
+
 
 class StaleReaper(unittest.TestCase):
     """W2: a stale running record reaps to failed; one retry may succeed."""
@@ -1726,9 +1814,11 @@ class StaleReaper(unittest.TestCase):
             if len(attempts) == 1:
                 record.update(
                     commandId="cmd_dead",
+                    dispatchedAt=time.time() - 10000,  # past deadline: retry allowed
                     exitCode=124,
                     finishedAt="now",
                     deadExec=True,
+                    deadExecIds=["cmd_dead"],
                 )
                 return 124, "dead exec: no verdict"
             record.update(commandId="cmd_new", exitCode=0, finishedAt="now")
@@ -1763,4 +1853,117 @@ class StaleReaper(unittest.TestCase):
                 ["--vm", "bx_mine", "--task", "unit-r", "--out", out_dir, "--", "true"]
             )
         self.assertEqual(rc, 0)
-        self.assertEqual(len(attempts), 2)
+
+    def test_no_retry_while_first_may_be_alive(self):
+        # workspace#22 round 2: a dead verdict inside the first dispatch's
+        # own budget never re-dispatches — the first command may still run
+        # beside it. Report 124 without retry.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out_dir = str(Path(tmp.name) / "logs")
+        attempts = []
+
+        def fake_vm_exec(vm_id, script, timeout=120, record=None):
+            if record is None:
+                if "echo $HOME" in script:
+                    return 0, "/h"
+                return 0, "blockfield-workspace\n"
+            attempts.append(script)
+            record.update(
+                commandId="cmd_dead",
+                dispatchedAt=time.time(),  # inside the budget: no retry
+                exitCode=124,
+                finishedAt="now",
+                deadExec=True,
+                deadExecIds=["cmd_dead"],
+            )
+            return 124, "dead exec: no verdict"
+
+        def fake_run_boat(*args, **kwargs):
+            if args[0] == "history":
+                return FakeResult(0, '{"commands": []}')
+            if args[0] == "info":
+                return FakeResult(0, '{"state": "stopped"}')
+            if args[0] == "usage":
+                return FakeResult(0, '{"seconds": 0, "billingMultiplier": 1}')
+            return FakeResult(0, "{}")
+
+        with (
+            patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+            patch.object(boat_build, "local_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "remote_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "ensure_worktree", return_value=0),
+            patch.object(boat_build, "write_env", return_value="/remote/env"),
+            patch.object(boat_build, "vm_minutes", return_value=(0.0, {})),
+            patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec),
+            patch.object(
+                boat_build,
+                "save_evidence",
+                side_effect=lambda *a: (
+                    Path(a[2]).joinpath("manifest.json").write_text("{}")
+                ),
+            ),
+        ):
+            rc = boat_build.main(
+                ["--vm", "bx_mine", "--task", "unit-r2", "--out", out_dir, "--", "true"]
+            )
+        self.assertEqual(rc, 124)
+        self.assertEqual(len(attempts), 1)
+
+    def test_reaped_running_entry_still_stops_vm(self):
+        # workspace#22 round 2: the reaped id stays "running" in history,
+        # but the keep=false stop guard skips it — the VM is stopped.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out_dir = str(Path(tmp.name) / "logs")
+        stops = []
+
+        def fake_vm_exec(vm_id, script, timeout=120, record=None):
+            if record is None:
+                if "echo $HOME" in script:
+                    return 0, "/h"
+                return 0, "blockfield-workspace\n"
+            record.update(
+                commandId="cmd_dead",
+                dispatchedAt=time.time(),
+                exitCode=124,
+                finishedAt="now",
+                deadExec=True,
+                deadExecIds=["cmd_dead"],
+            )
+            return 124, "dead exec: no verdict"
+
+        def fake_run_boat(*args, **kwargs):
+            if args[0] == "history":
+                return FakeResult(
+                    0, json.dumps({"commands": [self.stale_entry("cmd_dead")]})
+                )
+            if args[0] == "stop":
+                stops.append(args[1])
+            if args[0] == "info":
+                return FakeResult(0, '{"state": "stopped"}')
+            if args[0] == "usage":
+                return FakeResult(0, '{"seconds": 0, "billingMultiplier": 1}')
+            return FakeResult(0, "{}")
+
+        with (
+            patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+            patch.object(boat_build, "local_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "remote_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "ensure_worktree", return_value=0),
+            patch.object(boat_build, "write_env", return_value="/remote/env"),
+            patch.object(boat_build, "vm_minutes", return_value=(0.0, {})),
+            patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec),
+            patch.object(
+                boat_build,
+                "save_evidence",
+                side_effect=lambda *a: (
+                    Path(a[2]).joinpath("manifest.json").write_text("{}")
+                ),
+            ),
+        ):
+            rc = boat_build.main(
+                ["--vm", "bx_mine", "--task", "unit-r3", "--out", out_dir, "--", "true"]
+            )
+        self.assertEqual(rc, 124)
+        self.assertEqual(stops, ["bx_mine"])

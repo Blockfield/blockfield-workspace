@@ -238,8 +238,9 @@ def local_shas(args):
 
 
 class Running(RuntimeError):
-    def __init__(self, vm_id, command_id, command):
+    def __init__(self, vm_id, command_id, command, start=None, timeout=None):
         self.vm_id, self.command_id, self.command = vm_id, command_id, command
+        self.start, self.timeout = start, timeout  # dispatch instant + its budget
         super().__init__(f"RUNNING vm={vm_id} command={command_id}")
 
 
@@ -248,11 +249,6 @@ DEAD_EXEC_CODE = 124  # timeout convention: history recorded no verdict
 # Argparse default for --timeout: a resumed run whose file predates the
 # "timeout" field gets this budget, never the 540 s stream window.
 DEFAULT_TIMEOUT = 1800
-
-# Ids reaped to dead-exec this run, with or without a record: a record-less
-# setup exec leaves no record behind, so the stop guard consults this set
-# too instead of refusing the VM stop on a running history entry.
-_REAPED_EXEC_IDS = set()
 
 # Extra seconds past the command's own --timeout before a verdict-less exec
 # is declared dead: covers the history write landing just after the command.
@@ -326,8 +322,9 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
     while the probe runs, so history is re-read once more after the probe
     and a finished entry reports its real exit code, never 124. The record
     flag lets the caller consider one retry, and the reaped id — kept in
-    the run-scoped set as well as the record — lets the VM stop guard skip
-    this entry (Boat history keeps listing it as running).
+    the record — lets the VM stop guard skip this entry (Boat history keeps
+    listing it as running). A record-less setup reap needs no tracking: the
+    stop guard only looks at its own run's record, so it is ignored.
     """
     if command_id:
         entry = next(
@@ -361,17 +358,11 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
         detail = f"probe dispatched={alive}"
     else:
         partial, detail = "", "no probe without a command"
-    if command_id:
-        # Run-scoped, not just the record: a record-less setup exec leaves
-        # no record behind, so the stop guard would otherwise refuse the
-        # VM stop on its running history entry forever.
-        _REAPED_EXEC_IDS.add(command_id)
-    if record is not None:
+    if command_id and record is not None:
         record.update(exitCode=DEAD_EXEC_CODE, finishedAt=_now_iso(), deadExec=True)
-        if command_id:
-            reaped = record.get("deadExecIds") or []
-            if command_id not in reaped:
-                record["deadExecIds"] = [*reaped, command_id]
+        reaped = record.get("deadExecIds") or []
+        if command_id not in reaped:
+            record["deadExecIds"] = [*reaped, command_id]
     msg = (
         f"dead exec: command {command_id or '<none>'} {reason} "
         f"({detail}); marked failed with exit {DEAD_EXEC_CODE}"
@@ -430,9 +421,12 @@ def vm_exec(vm_id, script, timeout=120, record=None):
         )
     if record is not None:
         record.update(commandId=command_id, dispatchedAt=start)
+        ids = record.get("dispatchedIds") or []
+        if command_id not in ids:
+            record["dispatchedIds"] = [*ids, command_id]
     finished, code, stored = remote_status(vm_id, command_id, start, timeout, record)
     if not finished:
-        raise Running(vm_id, command_id, script)
+        raise Running(vm_id, command_id, script, start, timeout)
     return code, stored or out
 
 
@@ -609,17 +603,23 @@ def _dead_dispatch_confirmed(vm_id, record, timeout):
 
 
 def _unresolved_entries(vm_id, record):
-    """History entries without a verdict, ignoring reaped dead execs.
+    """History entries without a verdict, among this run's own dispatches.
 
-    A reaped command id stays "running" in Boat history after the local
-    record went terminal with 124; blocking the VM stop on it would bill
-    forever instead of stopping.
+    Only commands dispatched by THIS run (ids in its record) can block the
+    VM stop, minus the ones this run reaped: a reaped id stays "running" in
+    Boat history after the local record went terminal. An old reaped command
+    from an earlier run on a reused VM is ignored, never a reason to bill.
     """
-    reaped = set((record or {}).get("deadExecIds") or []) | _REAPED_EXEC_IDS
+    record = record or {}
+    reaped = set(record.get("deadExecIds") or [])
+    dispatched = set(record.get("dispatchedIds") or [])
+    if record.get("commandId"):
+        dispatched.add(record["commandId"])
     return [
         e
         for e in history_entries(vm_id, limit=100, strict=True)
-        if e.get("commandId") not in reaped
+        if e.get("commandId") in dispatched
+        and e.get("commandId") not in reaped
         and (not e.get("finishedAt") or e.get("exitCode") is None)
     ]
 
@@ -1477,6 +1477,12 @@ def main(argv=None):
         pending = True
         if record["finishedAt"] is None:
             record.update(commandId=exc.command_id, command=exc.command)
+            if exc.start is not None:
+                # Setup execs dispatch with no record: persist when it ran
+                # and its budget so a resume reads history instead of 75.
+                record["dispatchedAt"] = exc.start
+        if exc.timeout is not None:
+            saved["timeout"] = exc.timeout
         (out_dir / "resume.json").write_text(json.dumps(saved, indent=2))
         print(f"{exc}; resume: just boat-build --resume-run {out_dir / 'resume.json'}")
         return 75

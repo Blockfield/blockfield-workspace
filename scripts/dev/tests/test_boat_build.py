@@ -2051,10 +2051,34 @@ class StaleReaper(unittest.TestCase):
         self.assertEqual(rc, 124)
         self.assertEqual(stops, ["bx_mine"])
 
-    def test_recordless_reaped_exec_does_not_block_stop(self):
-        # workspace#22 round 4: a setup vm_exec with no record is reaped to
-        # 124; its id lands in the run-scoped set, so the stop guard still
-        # stops the VM instead of refusing on the running history entry.
+    def test_reaped_command_from_previous_run_does_not_block_stop(self):
+        # round 5: run A reaped cmd_old (exit 124); the VM is reused by name
+        # and run B completes. B's guard only looks at B's own dispatches,
+        # so the stale running entry never refuses the VM stop.
+        record = {
+            "commandId": "cmd_new",
+            "dispatchedIds": ["cmd_new"],
+            "exitCode": 0,
+            "finishedAt": "now",
+        }
+        with patch.object(
+            boat_build,
+            "history_entries",
+            return_value=[
+                self.stale_entry("cmd_old"),
+                {
+                    "commandId": "cmd_new",
+                    "exitCode": 0,
+                    "finishedAt": "now",
+                },
+            ],
+        ):
+            self.assertEqual(boat_build._unresolved_entries("bx_x", record), [])
+
+    def test_setup_reap_without_record_does_not_block_stop(self):
+        # round 5: a setup vm_exec with no record is still reaped to 124,
+        # but the id is forgotten — no process-global set — so neither this
+        # run's guard nor a later run's guard trips on its running entry.
         with (
             patch.object(
                 boat_build,
@@ -2069,12 +2093,96 @@ class StaleReaper(unittest.TestCase):
             done, code, _ = boat_build.remote_status("bx_x", "cmd_setup", 0, 1800, None)
         self.assertTrue(done)
         self.assertEqual(code, 124)
+        self.assertFalse(hasattr(boat_build, "_REAPED_EXEC_IDS"))
         with patch.object(
             boat_build,
             "history_entries",
             return_value=[self.stale_entry("cmd_setup")],
         ):
-            self.assertEqual(boat_build._unresolved_entries("bx_x", {}), [])
+            self.assertEqual(
+                boat_build._unresolved_entries(
+                    "bx_x", {"commandId": "cmd_new", "dispatchedIds": ["cmd_new"]}
+                ),
+                [],
+            )
+
+    def test_setup_running_resume_completes_via_history(self):
+        # round 5 fail-before: a setup exec whose stream drops raises
+        # Running carrying its dispatch instant and budget; main persists
+        # both, so the resume completes via history instead of 75 forever.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out_dir = str(Path(tmp.name) / "logs")
+        start = time.time()
+
+        def fake_vm_exec(vm_id, script, timeout=120, record=None):
+            if record is None:
+                if "echo $HOME" in script:
+                    return 0, "/h"
+                if "git rev-parse HEAD" in script:
+                    raise boat_build.Running(
+                        "bx_mine", "cmd_setup", script, start, timeout
+                    )
+                if "blockfield" in script:
+                    return 0, "blockfield-workspace\n"
+                raise AssertionError(f"unexpected setup exec: {script}")
+            raise AssertionError("run phase must not dispatch on a setup hang")
+
+        def fake_run_boat(*args, **kwargs):
+            if args[0] == "history":
+                return FakeResult(0, '{"commands": []}')
+            if args[0] == "info":
+                return FakeResult(0, '{"state": "stopped"}')
+            if args[0] == "usage":
+                return FakeResult(0, '{"seconds": 0, "billingMultiplier": 1}')
+            return FakeResult(0, "{}")
+
+        with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
+            patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+            patch.object(boat_build, "local_shas", return_value={"": "abc"}),
+            patch.object(boat_build, "ensure_worktree", return_value=0),
+            patch.object(boat_build, "write_env", return_value="/remote/env"),
+            patch.object(boat_build, "vm_minutes", return_value=(0.0, {})),
+            patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec),
+        ):
+            rc = boat_build.main(
+                [
+                    "--vm",
+                    "bx_mine",
+                    "--task",
+                    "unit-setup",
+                    "--out",
+                    out_dir,
+                    "--",
+                    "true",
+                ]
+            )
+        self.assertEqual(rc, 75)
+        run_dirs = list((Path(tmp.name) / ".dev" / "unit-setup").glob("*"))
+        resume = next(d for d in run_dirs if (d / "resume.json").exists())
+        saved = json.loads((resume / "resume.json").read_text())
+        self.assertEqual(saved["phase"], "setup")
+        self.assertEqual(saved["timeout"], 120)
+        self.assertEqual(saved["record"]["commandId"], "cmd_setup")
+        self.assertEqual(saved["record"]["dispatchedAt"], start)
+
+        def fake_save(vm_id, record, out_dir, patterns):
+            (out_dir / "manifest.json").write_text(json.dumps(record))
+
+        saved["keep"] = True  # completion is under test, not the stop
+        with (
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[
+                    {"commandId": "cmd_setup", "exitCode": 0, "finishedAt": "now"}
+                ],
+            ),
+            patch.object(boat_build, "history_output", return_value="ok"),
+            patch.object(boat_build, "save_evidence", side_effect=fake_save),
+        ):
+            self.assertEqual(boat_build.finish_run(saved, resume), 3)
 
     def test_legacy_resume_without_timeout_stays_pending(self):
         # workspace#22 round 4: a pre-change resume file (no timeout, no

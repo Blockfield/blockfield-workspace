@@ -312,6 +312,35 @@ def _entry_verdict(vm_id, command_id, entry, record):
     )
 
 
+def _reaped_path(vm_id):
+    """Persisted per-VM set of reaped command ids (survives across runs)."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(vm_id or "unknown"))
+    return ROOT / ".dev" / "boat-build" / f"reaped-{safe}.json"
+
+
+def _load_reaped_ids(vm_id):
+    """Ids this VM's commands reaped to 124 (Boat history keeps them running)."""
+    try:
+        payload = json.loads(_reaped_path(vm_id).read_text())
+        ids = payload.get("commandIds", [])
+    except (OSError, ValueError, AttributeError):
+        return set()
+    return {i for i in ids if isinstance(i, str)}
+
+
+def _mark_reaped(vm_id, command_id):
+    """Remember a reaped command so the VM stop guard skips its leftover."""
+    if not vm_id or not command_id:
+        return
+    try:
+        path = _reaped_path(vm_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ids = _load_reaped_ids(vm_id) | {command_id}
+        path.write_text(json.dumps({"commandIds": sorted(ids)}) + "\n")
+    except OSError:
+        pass
+
+
 def _dead_exec_verdict(vm_id, command_id, record, reason):
     """Terminal failure for a dead exec: late verdict wins, else fail.
 
@@ -322,9 +351,8 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
     while the probe runs, so history is re-read once more after the probe
     and a finished entry reports its real exit code, never 124. The record
     flag lets the caller consider one retry, and the reaped id — kept in
-    the record — lets the VM stop guard skip this entry (Boat history keeps
-    listing it as running). A record-less setup reap needs no tracking: the
-    stop guard only looks at its own run's record, so it is ignored.
+    the per-VM persisted set (plus the record for old runs) — lets the VM
+    stop guard skip this entry (Boat history keeps listing it as running).
     """
     if command_id:
         entry = next(
@@ -358,6 +386,8 @@ def _dead_exec_verdict(vm_id, command_id, record, reason):
         detail = f"probe dispatched={alive}"
     else:
         partial, detail = "", "no probe without a command"
+    if command_id:
+        _mark_reaped(vm_id, command_id)
     if command_id and record is not None:
         record.update(exitCode=DEAD_EXEC_CODE, finishedAt=_now_iso(), deadExec=True)
         reaped = record.get("deadExecIds") or []
@@ -421,9 +451,6 @@ def vm_exec(vm_id, script, timeout=120, record=None):
         )
     if record is not None:
         record.update(commandId=command_id, dispatchedAt=start)
-        ids = record.get("dispatchedIds") or []
-        if command_id not in ids:
-            record["dispatchedIds"] = [*ids, command_id]
     finished, code, stored = remote_status(vm_id, command_id, start, timeout, record)
     if not finished:
         raise Running(vm_id, command_id, script, start, timeout)
@@ -602,24 +629,21 @@ def _dead_dispatch_confirmed(vm_id, record, timeout):
     )
 
 
-def _unresolved_entries(vm_id, record):
-    """History entries without a verdict, among this run's own dispatches.
+def _unresolved_entries(vm_id, record=None):
+    """History entries without a verdict, except reaped leftovers.
 
-    Only commands dispatched by THIS run (ids in its record) can block the
-    VM stop, minus the ones this run reaped: a reaped id stays "running" in
-    Boat history after the local record went terminal. An old reaped command
-    from an earlier run on a reused VM is ignored, never a reason to bill.
+    ANY unfinished command on the VM blocks the stop — including live work
+    from another run sharing this VM — minus ids this VM reaped to 124: a
+    reaped id stays "running" in Boat history after the local record went
+    terminal, so the persisted per-VM set (plus the record's own ids for
+    runs written before the set existed) is skipped, never a reason to bill.
     """
     record = record or {}
-    reaped = set(record.get("deadExecIds") or [])
-    dispatched = set(record.get("dispatchedIds") or [])
-    if record.get("commandId"):
-        dispatched.add(record["commandId"])
+    reaped = _load_reaped_ids(vm_id) | set(record.get("deadExecIds") or [])
     return [
         e
         for e in history_entries(vm_id, limit=100, strict=True)
-        if e.get("commandId") in dispatched
-        and e.get("commandId") not in reaped
+        if e.get("commandId") not in reaped
         and (not e.get("finishedAt") or e.get("exitCode") is None)
     ]
 
@@ -1285,6 +1309,30 @@ def save_evidence(vm_id, record, out_dir, patterns):
     (out_dir / "manifest.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
+def _legacy_verdict(vm_id, record):
+    """Finished history entry for a resume file without dispatchedAt.
+
+    No dispatch timestamp means no budget, so this never reaps: a finished
+    verdict completes the run, anything else stays pending for a later resume.
+    """
+    command_id = record.get("commandId")
+    if not command_id:
+        return False, None, ""
+    entry = next(
+        (
+            e
+            for e in history_entries(vm_id, limit=100)
+            if e.get("commandId") == command_id
+        ),
+        None,
+    )
+    if entry and entry.get("finishedAt") and entry.get("exitCode") is not None:
+        verdict = _entry_verdict(vm_id, command_id, entry, record)
+        if verdict is not None:
+            return verdict
+    return False, None, ""
+
+
 def finish_run(saved, out_dir):
     """Complete a resumed run: never dispatches, never retries a dead exec.
 
@@ -1297,16 +1345,14 @@ def finish_run(saved, out_dir):
     # default, never the stream window.
     timeout = saved.get("timeout", DEFAULT_TIMEOUT)
     if record.get("dispatchedAt") is None:
-        # Legacy resume file: no dispatch timestamp, so the budget is
-        # unknown — never reap, stay pending for a later resume.
-        print(
-            f"RUNNING vm={vm_id}; resume: just boat-build --resume-run {out_dir / 'resume.json'}"
+        # Legacy resume file: no dispatch timestamp, so no budget and never
+        # a reap — but a finished verdict still completes the run normally.
+        done, code, out = _legacy_verdict(vm_id, record)
+    else:
+        exec_start = record["dispatchedAt"]
+        done, code, out = remote_status(
+            vm_id, record.get("commandId"), exec_start, timeout, record
         )
-        return 75
-    exec_start = record["dispatchedAt"]
-    done, code, out = remote_status(
-        vm_id, record.get("commandId"), exec_start, timeout, record
-    )
     if not done:
         print(
             f"RUNNING vm={vm_id}; resume: just boat-build --resume-run {out_dir / 'resume.json'}"

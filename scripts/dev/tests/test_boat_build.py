@@ -1069,7 +1069,10 @@ class RemoteStatus(unittest.TestCase):
     def test_running_past_deadline_is_failed(self):
         # workspace#22: a verdict-less entry past the deadline is a dead
         # exec — failed with an exit status, never RUNNING forever.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
             patch.object(
                 boat_build, "history_entries", return_value=[{"commandId": "cmd_y"}]
             ),
@@ -1085,7 +1088,10 @@ class RemoteStatus(unittest.TestCase):
     def test_missing_history_is_failed(self):
         # workspace#22: no history entry at all past the deadline is also a
         # dead exec — failed, never pending.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
             patch.object(boat_build, "history_entries", return_value=[]),
             patch.object(boat_build, "history_output", return_value=""),
             patch.object(boat_build, "_probe_vm", return_value=False),
@@ -1591,7 +1597,10 @@ class DeadExecVerdict(unittest.TestCase):
     def test_dead_exec_returns_failed_not_pending(self):
         # Fail-before: old code returns (False, None, "") and vm_exec raises Running.
         record = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
             patch.object(
                 boat_build,
                 "history_entries",
@@ -1614,12 +1623,15 @@ class DeadExecVerdict(unittest.TestCase):
         # Fail-before: old code raises Running here (empty record hangs forever).
         record = {}
         ticks = {"n": 0}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
 
         def clock():
             ticks["n"] += 1
             return 0 if ticks["n"] == 1 else 10**9
 
         with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
             patch.object(
                 boat_build,
                 "run_boat",
@@ -1751,7 +1763,10 @@ class DeadExecVerdict(unittest.TestCase):
         # workspace#22 round 2: past --timeout + grace with no verdict the
         # run fails with 124 and records the reaped command id.
         record = {}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
             patch.object(
                 boat_build, "history_entries", return_value=[self.fresh_entry()]
             ),
@@ -1763,6 +1778,7 @@ class DeadExecVerdict(unittest.TestCase):
             done, code, out = boat_build.remote_status(
                 "bx_x", "cmd_long", 0, 1800, record
             )
+            self.assertIn("cmd_long", boat_build._load_reaped_ids("bx_x"))
         self.assertTrue(done)
         self.assertEqual(code, 124)
         self.assertIn("cmd_long", out)
@@ -1821,6 +1837,7 @@ class StaleReaper(unittest.TestCase):
                 (out_dir / "manifest.json").write_text(json.dumps(record))
 
             with (
+                patch.object(boat_build, "ROOT", Path(tmp)),
                 patch.object(
                     boat_build,
                     "history_entries",
@@ -1858,6 +1875,7 @@ class StaleReaper(unittest.TestCase):
 
             err = io.StringIO()
             with (
+                patch.object(boat_build, "ROOT", Path(tmp)),
                 patch.object(
                     boat_build,
                     "history_entries",
@@ -2051,35 +2069,63 @@ class StaleReaper(unittest.TestCase):
         self.assertEqual(rc, 124)
         self.assertEqual(stops, ["bx_mine"])
 
-    def test_reaped_command_from_previous_run_does_not_block_stop(self):
-        # round 5: run A reaped cmd_old (exit 124); the VM is reused by name
-        # and run B completes. B's guard only looks at B's own dispatches,
-        # so the stale running entry never refuses the VM stop.
-        record = {
-            "commandId": "cmd_new",
-            "dispatchedIds": ["cmd_new"],
-            "exitCode": 0,
-            "finishedAt": "now",
-        }
-        with patch.object(
-            boat_build,
-            "history_entries",
-            return_value=[
-                self.stale_entry("cmd_old"),
-                {
-                    "commandId": "cmd_new",
-                    "exitCode": 0,
-                    "finishedAt": "now",
-                },
-            ],
+    def test_other_runs_live_command_blocks_stop(self):
+        # round 6 fail-before: run A returns 75 with its command still
+        # running; run B completes on the reused VM. The guard sees A's
+        # unfinished entry and refuses the stop.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        record = {"commandId": "cmd_new", "exitCode": 0, "finishedAt": "now"}
+        with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[
+                    self.stale_entry("cmd_other", minutes=5),
+                    {
+                        "commandId": "cmd_new",
+                        "exitCode": 0,
+                        "finishedAt": "now",
+                    },
+                ],
+            ),
         ):
+            unresolved = boat_build._unresolved_entries("bx_x", record)
+        self.assertEqual([e["commandId"] for e in unresolved], ["cmd_other"])
+
+    def test_reaped_command_from_previous_run_does_not_block_stop(self):
+        # round 6: run A reaped cmd_old (exit 124, persisted per-VM); the VM
+        # is reused and run B completes. B's guard skips the persisted
+        # reaped id, so the stale running entry never refuses the VM stop.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        record = {"commandId": "cmd_new", "exitCode": 0, "finishedAt": "now"}
+        with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[
+                    self.stale_entry("cmd_old"),
+                    {
+                        "commandId": "cmd_new",
+                        "exitCode": 0,
+                        "finishedAt": "now",
+                    },
+                ],
+            ),
+        ):
+            boat_build._mark_reaped("bx_x", "cmd_old")
             self.assertEqual(boat_build._unresolved_entries("bx_x", record), [])
 
-    def test_setup_reap_without_record_does_not_block_stop(self):
-        # round 5: a setup vm_exec with no record is still reaped to 124,
-        # but the id is forgotten — no process-global set — so neither this
-        # run's guard nor a later run's guard trips on its running entry.
+    def test_setup_reap_without_record_is_persisted_and_skipped(self):
+        # round 6: a setup vm_exec with no record is still reaped to 124
+        # and persisted per-VM, so the guard skips its running leftover.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
             patch.object(
                 boat_build,
                 "history_entries",
@@ -2091,18 +2137,19 @@ class StaleReaper(unittest.TestCase):
             patch("time.sleep"),
         ):
             done, code, _ = boat_build.remote_status("bx_x", "cmd_setup", 0, 1800, None)
+            self.assertIn("cmd_setup", boat_build._load_reaped_ids("bx_x"))
         self.assertTrue(done)
         self.assertEqual(code, 124)
-        self.assertFalse(hasattr(boat_build, "_REAPED_EXEC_IDS"))
-        with patch.object(
-            boat_build,
-            "history_entries",
-            return_value=[self.stale_entry("cmd_setup")],
+        with (
+            patch.object(boat_build, "ROOT", Path(tmp.name)),
+            patch.object(
+                boat_build,
+                "history_entries",
+                return_value=[self.stale_entry("cmd_setup")],
+            ),
         ):
             self.assertEqual(
-                boat_build._unresolved_entries(
-                    "bx_x", {"commandId": "cmd_new", "dispatchedIds": ["cmd_new"]}
-                ),
+                boat_build._unresolved_entries("bx_x", {"commandId": "cmd_new"}),
                 [],
             )
 
@@ -2204,6 +2251,44 @@ class StaleReaper(unittest.TestCase):
                 return_value=[self.stale_entry("cmd_old", minutes=12)],
             ):
                 self.assertEqual(boat_build.finish_run(saved, out), 75)
+
+    def test_legacy_resume_finished_completes(self):
+        # round 6 fail-before: a pre-change resume file (no dispatchedAt)
+        # whose command then exits completes via history instead of 75
+        # forever — and never reaps.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {"commandId": "cmd_old", "command": "true"},
+                "patterns": [],
+                "keep": True,
+            }
+
+            def fake_save(vm_id, record, out_dir, patterns):
+                (out_dir / "manifest.json").write_text(json.dumps(record))
+
+            with (
+                patch.object(boat_build, "ROOT", Path(tmp)),
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[
+                        {
+                            "commandId": "cmd_old",
+                            "exitCode": 0,
+                            "finishedAt": "now",
+                        }
+                    ],
+                ),
+                patch.object(boat_build, "history_output", return_value="ok"),
+                patch.object(boat_build, "save_evidence", side_effect=fake_save),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 0)
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["exitCode"], 0)
+            self.assertNotIn("deadExec", manifest)
 
     def test_resume_without_timeout_uses_default_budget(self):
         # workspace#22 round 4: a resume file without "timeout" uses the

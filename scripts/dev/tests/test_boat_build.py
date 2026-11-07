@@ -247,6 +247,26 @@ class StopAlways(unittest.TestCase):
             self.assertEqual(boat_build.main(self.base()), 75)
         self.assertFalse(self.stops())
 
+    def test_dead_exec_retries_the_run_once(self):
+        # ws#22 closing criterion: a dead run-phase dispatch fails with an
+        # exit status and the run is dispatched once more, not left running.
+        runs = []
+
+        def fake_vm_exec(vm_id, script, timeout=120, record=None):
+            if script == "echo $HOME":
+                return 0, "/home/boat\n"
+            if script.startswith("[ -d "):
+                return 0, "blockfield-workspace\n"
+            runs.append(script)
+            if len(runs) == 1:
+                record.update(exitCode=124, finishedAt="now", deadExec=True)
+                return 124, "dead exec: command cmd_1 no verdict past the deadline"
+            return 0, "ok"
+
+        with patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec):
+            self.assertEqual(boat_build.main(self.base()), 0)
+        self.assertEqual(len(runs), 2)
+
     def test_copy_failure_never_stops(self):
         with (
             patch.object(boat_build, "vm_exec", return_value=(0, "ok")),
@@ -1152,6 +1172,41 @@ class RemoteStatus(unittest.TestCase):
                 dispatch.assert_not_called()
                 saved["phase"] = "setup"
                 self.assertEqual(boat_build.finish_run(saved, out), 3)
+
+    def test_setup_dead_exec_fails_with_exit_status(self):
+        # ws#22: a setup exec dead past its own timeout + grace fails 124
+        # (the caller reruns the build) instead of hanging RUNNING forever.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            out.mkdir()
+            saved = {
+                "vm": "bx_x",
+                "record": {
+                    "commandId": "cmd_s",
+                    "command": "setup",
+                    "dispatchedAt": 0,
+                    "exitCode": None,
+                    "finishedAt": None,
+                },
+                "patterns": [],
+                "keep": True,
+                "timeout": 60,
+                "phase": "setup",
+                "out": None,
+            }
+            with (
+                patch.object(
+                    boat_build,
+                    "history_entries",
+                    return_value=[{"commandId": "cmd_s", "status": "running"}],
+                ),
+                patch.object(boat_build, "history_output", return_value=""),
+                patch("time.time", return_value=10000),
+            ):
+                self.assertEqual(boat_build.finish_run(saved, out), 124)
+            manifest = json.loads((out / "manifest.json").read_text())
+            self.assertEqual(manifest["exitCode"], 124)
+            self.assertTrue(manifest["deadExec"])
 
     def test_log_retrieval_failure_is_not_empty_success(self):
         with patch.object(

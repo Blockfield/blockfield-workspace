@@ -1257,15 +1257,19 @@ def push_tag(
     expected_sha=None,
     rc_record=None,
     gate_waiver=None,
+    release_tags=None,
 ):
-    """Tag the merged origin/main and push it. Returns the tagged commit sha."""
+    """Tag the merged origin/main and push it. Returns the tagged commit sha.
+
+    release_tags: every side of this release; a pair RC record must match it, not one side.
+    """
     if dry:
         say(
             f"+ git -C {side} fetch origin main && git -C {side} tag -a {tag} "
             f"-m {tag} origin/main && git -C {side} push origin {tag}"
         )
         return "(dry run)"
-    require_rc_gate({side: tag}, rc_record, gate_waiver)
+    require_rc_gate(release_tags or {side: tag}, rc_record, gate_waiver)
     repo = repo_dir(side)
     git(repo, "fetch", "-q", "origin", "main")
     sha = git(repo, "rev-parse", "origin/main")
@@ -1818,6 +1822,7 @@ def ship_tag_side(
     interval_s,
     publish_only=False,
     expected_head=None,
+    release_tags=None,
 ):
     """Merge, preflight, tag and wait; pair publication returns the client manifest."""
     rc_record, gate_waiver = (
@@ -1848,6 +1853,7 @@ def ship_tag_side(
         merged,
         rc_record,
         gate_waiver,
+        release_tags,
     )
     say(f"  {side} {tag} -> {sha[:7]}")
     found = wait_release_run(side, sha, timeout_s, interval_s, tag)
@@ -1950,7 +1956,13 @@ def cmd_ship(args):
             check_client_release(tags["client"], True)
         else:
             client = ship_tag_side(
-                args, "client", tags["client"], timeout_s, interval_s, publish_only=True
+                args,
+                "client",
+                tags["client"],
+                timeout_s,
+                interval_s,
+                publish_only=True,
+                release_tags=tags,
             )
         candidate_sha = cmd_candidate(
             argparse.Namespace(
@@ -1968,6 +1980,7 @@ def cmd_ship(args):
             interval_s,
             publish_only=True,
             expected_head=candidate_sha,
+            release_tags=tags,
         )
         check_client_release(tags["client"], True)
         dispatch_deploy(
@@ -2017,6 +2030,7 @@ def cmd_ship(args):
             server_merged,
             getattr(args, "rc_record", None),
             getattr(args, "gate_waiver", None),
+            tags,
         )
         number, head = wait_pr_green(
             REPO["client"], client_branch, timeout_s, interval_s
@@ -2038,6 +2052,7 @@ def cmd_ship(args):
             client_merged,
             getattr(args, "rc_record", None),
             getattr(args, "gate_waiver", None),
+            tags,
         )
         wait_run_success("server", server_run["databaseId"], timeout_s, interval_s)
         wait_run_success(

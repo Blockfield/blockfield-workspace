@@ -1018,6 +1018,7 @@ class PairGates(unittest.TestCase):
 
     def test_green_merge_tag(self):
         head, merged = "a" * 40, "b" * 40
+        pair = {"client": "v2.77.0", "server": "v2.77.1"}
 
         def gh(*args):
             if "headRefOid" in args:
@@ -1058,9 +1059,12 @@ class PairGates(unittest.TestCase):
                 1,
                 0,
                 publish_only=True,
+                release_tags=pair,
             )
         self.assertEqual(merge.call_args.args[-2:], ("--match-head-commit", head))
-        tag.assert_called_once_with("client", "v2.77.0", False, merged, None, None)
+        tag.assert_called_once_with(
+            "client", "v2.77.0", False, merged, None, None, pair
+        )
 
     def test_tag_rejects_unrelated_main(self):
         with (
@@ -2531,6 +2535,30 @@ class ServerBuildWithoutGradle(unittest.TestCase):
         finals = [args for args in calls if args[0] == "build"]
         self.assertEqual(len(finals), 1)
         self.assertNotIn("--no-server-jar", finals[0])
+
+
+class PushTagGateTest(unittest.TestCase):
+    def gated(self, *extra):
+        seen = []
+
+        def gate(tags, *a):
+            seen.append(dict(tags))
+            raise SystemExit("stop before git")
+
+        with mock.patch.object(release, "require_rc_gate", side_effect=gate):
+            with self.assertRaises(SystemExit):
+                release.push_tag(
+                    "server", "v2.79.6", False, "s" * 40, "rc.json", None, *extra
+                )
+        return seen
+
+    def test_pair_record_is_checked_against_the_whole_release(self):
+        # A pair RC record never equals one side; gating {side: tag} refused every pair tag.
+        pair = {"server": "v2.79.6", "client": "v2.79.3"}
+        self.assertEqual(self.gated(pair), [pair])
+
+    def test_single_side_defaults_to_its_own_tag(self):
+        self.assertEqual(self.gated(), [{"server": "v2.79.6"}])
 
 
 if __name__ == "__main__":

@@ -2474,5 +2474,64 @@ class ForkPinOnly(unittest.TestCase):
             self.assertIn("merge pins/fork-b " + "b" * 7, pr.call_args.args[5])
 
 
+class ServerBuildWithoutGradle(unittest.TestCase):
+    """Server contract preflight runs on the owner PC without Gradle: the
+    Game image jar is built from mod-server in CI, so the local build reads
+    the contract with an explicit skip instead of the built jar."""
+
+    def fake_just(self, calls):
+        def run(tree, *args):
+            calls.append(args)
+            if args[0] == "build" and "--out" in args:
+                out = Path(args[list(args).index("--out") + 1])
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "build.json").write_text(
+                    json.dumps(
+                        {
+                            "compatibility": PROD,
+                            "client": "c" * 64,
+                            "client_version": "v9.9.9",
+                        }
+                    )
+                )
+
+        return run
+
+    def test_server_build_passes_the_explicit_jar_skip(self):
+        cache = Path(tempfile.mkdtemp(prefix="bf-release-build-"))
+        self.addCleanup(shutil.rmtree, cache, True)
+        calls = []
+        with (
+            mock.patch.object(release, "CACHE", cache),
+            mock.patch.object(release, "just", side_effect=self.fake_just(calls)),
+        ):
+            meta = release.build("server", Path("/tmp/tree"), "v9.9.9")
+        self.assertEqual(meta["compatibility"], PROD)
+        finals = [args for args in calls if args[0] == "build"]
+        self.assertEqual(len(finals), 1)
+        self.assertIn("--no-server-jar", finals[0])
+
+    def test_client_build_does_not_pass_the_server_skip(self):
+        cache = Path(tempfile.mkdtemp(prefix="bf-release-build-"))
+        self.addCleanup(shutil.rmtree, cache, True)
+        calls = []
+
+        def run(tree, *args):
+            calls.append(args)
+            if args[0] == "build" and "--out" in args:
+                out = Path(args[list(args).index("--out") + 1])
+                (out / "web").mkdir(parents=True, exist_ok=True)
+                (out / "web/build.json").write_text(json.dumps({"compatibility": PROD}))
+
+        with (
+            mock.patch.object(release, "CACHE", cache),
+            mock.patch.object(release, "just", side_effect=run),
+        ):
+            release.build("client", Path("/tmp/tree"), "v9.9.9")
+        finals = [args for args in calls if args[0] == "build"]
+        self.assertEqual(len(finals), 1)
+        self.assertNotIn("--no-server-jar", finals[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -749,6 +749,74 @@ class PinEvidence(unittest.TestCase):
         self.assertTrue(any("HTTP 403 forbidden" in g for g in gaps))
 
 
+class PreviousPins(unittest.TestCase):
+    """Пропавший тег прошлого релиза (первый публичный тег клиента)."""
+
+    OLD = pin("v1.41.0", "a", "Blockfield/m")
+    NEW = pin("v1.42.0", "b", "Blockfield/m")
+    MISSING = subprocess.CalledProcessError(
+        128, ["git"], stderr=b"fatal: not a valid object name"
+    )
+
+    def test_local_tag_needs_no_fetch(self):
+        with (
+            mock.patch.object(rn, "read_pins", return_value={"x": self.OLD}) as pins,
+            mock.patch("subprocess.check_output") as fetch,
+        ):
+            got = rt.previous_pins(".", "Blockfield/blockfield-client", "v1.41.0", [])
+        pins.assert_called_once_with(".", "v1.41.0")
+        fetch.assert_not_called()
+        self.assertEqual(got, {"x": self.OLD})
+
+    def test_missing_tag_is_fetched_from_the_private_source_then_diffed(self):
+        gaps = []
+        with (
+            mock.patch.object(
+                rn, "read_pins", side_effect=[self.MISSING, {"x": self.OLD}]
+            ),
+            mock.patch("subprocess.check_output") as fetch,
+            mock.patch.dict("os.environ", {"GH_TOKEN": "secret-token"}),
+        ):
+            got = rt.previous_pins(
+                "/root", "Blockfield/blockfield-client", "v1.41.0", gaps
+            )
+        argv = fetch.call_args.args[0]
+        self.assertIn("blockfield-client-private", " ".join(argv))
+        self.assertNotIn("secret-token", " ".join(argv))
+        self.assertIn(
+            "secret-token", fetch.call_args.kwargs["env"]["GIT_CONFIG_VALUE_0"]
+        )
+        rows = rn.pin_diff(got, {"x": self.NEW})
+        self.assertEqual([row[1] for row in rows], ["update"])
+        self.assertTrue(any("v1.41.0" in gap for gap in gaps), gaps)
+
+    def test_unreachable_tag_fails_loud_in_collect_facts(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "mods").mkdir()
+        args = mock.Mock(
+            repository="Blockfield/blockfield-releases",
+            source_repository="Blockfield/blockfield-client",
+            version="v2.61.0",
+            kind="mod",
+            repo_root=str(root),
+            build_json=None,
+        )
+        denied = subprocess.CalledProcessError(1, ["git"], stderr=b"HTTP 403")
+        with (
+            mock.patch.object(rn, "read_pins", side_effect=self.MISSING),
+            mock.patch("subprocess.check_output", side_effect=denied),
+            mock.patch.object(rt, "merged_prs", return_value=[]),
+            mock.patch.dict("os.environ", {"GH_TOKEN": "secret-token"}),
+        ):
+            facts = rt.collect_facts(args, [release("v2.60.0")])
+        self.assertFalse(facts["pins_checked"])
+        self.assertEqual(facts["pins"], [])
+        self.assertTrue(
+            any("v2.60.0" in gap and "пин" in gap for gap in facts["gaps"]),
+            facts["gaps"],
+        )
+
+
 class MergedPrs(unittest.TestCase):
     def test_bots_and_footers_are_skipped_and_failures_say_why(self):
         commits = [

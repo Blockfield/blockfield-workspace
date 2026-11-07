@@ -60,6 +60,12 @@ COLOR_RELEASE, COLOR_PATCH = "5865F2", "2ECC71"
 ANNOUNCED_KINDS = ("client",)
 SERVER_REPOSITORY = "Blockfield/blockfield-server"
 SERVER_NAME = "blockfield-server"
+# Теги старше первой публичной ревизии живут только в приватном источнике
+# (клиент: blockfield-client-private). Без их пинов diff пропускал главное
+# изменение выпуска (v2.79.3: мод 1.59.2 → 1.60.1).
+PRIVATE_SOURCE = {
+    "Blockfield/blockfield-client": "Blockfield/blockfield-client-private",
+}
 MAX_PRS = 80
 PR_BODY_CHARS = 2500
 PIN_MAX_PRS = 30
@@ -366,6 +372,59 @@ def server_pin(previous_release, gaps):
     }
 
 
+def fetch_tag(repo_root, repository, tag):
+    """Один тег shallow-подтянуть тем же токеном, что у gh (GH_TOKEN).
+    Токен идёт через env, а не в URL, чтобы describe() не унёс его в журнал."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise RuntimeError("нет GH_TOKEN для чтения резервного источника")
+    subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "fetch",
+            "--depth",
+            "1",
+            "--no-tags",
+            f"https://github.com/{repository}.git",
+            f"refs/tags/{tag}:refs/tags/{tag}",
+        ],
+        env={
+            **os.environ,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        },
+        stderr=subprocess.PIPE,
+    )
+
+
+def previous_pins(repo_root, source_repository, previous, gaps):
+    """Пины прошлого релиза. Тег может отсутствовать в этом клоне (публичная
+    история начинается позже) - тогда он подтягивается из резервного
+    источника; иначе честный пробел вместо выдуманного diff."""
+    try:
+        return rn.read_pins(repo_root, previous)
+    except subprocess.CalledProcessError:
+        private = PRIVATE_SOURCE.get(source_repository)
+        if private is None:
+            raise
+    try:
+        fetch_tag(repo_root, private, previous)
+        pins = rn.read_pins(repo_root, previous)
+    except Exception as exc:
+        raise RuntimeError(
+            f"пины {previous} не получены ни локально, ни из резервного "
+            f"источника ({describe(exc)})"
+        ) from exc
+    gaps.append(
+        f"тег {previous} отсутствует в {source_repository}, "
+        "пины прошлого релиза взяты из резервного источника"
+    )
+    return pins
+
+
 def collect_facts(a, releases):
     gaps = []
     previous = previous_version(releases, a.version)
@@ -387,7 +446,8 @@ def collect_facts(a, releases):
     if Path(a.repo_root, "mods").is_dir():
         try:
             rows = rn.pin_diff(
-                rn.read_pins(a.repo_root, previous), rn.read_pins(a.repo_root, "HEAD")
+                previous_pins(a.repo_root, a.source_repository, previous, gaps),
+                rn.read_pins(a.repo_root, "HEAD"),
             )
             facts["pins_checked"] = True
         except Exception as exc:

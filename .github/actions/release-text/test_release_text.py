@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import io
 import json
@@ -783,8 +784,10 @@ class PreviousPins(unittest.TestCase):
         argv = fetch.call_args.args[0]
         self.assertIn("blockfield-client-private", " ".join(argv))
         self.assertNotIn("secret-token", " ".join(argv))
-        self.assertIn(
-            "secret-token", fetch.call_args.kwargs["env"]["GIT_CONFIG_VALUE_0"]
+        header = fetch.call_args.kwargs["env"]["GIT_CONFIG_VALUE_0"]
+        self.assertEqual(
+            base64.b64decode(header.removeprefix("Authorization: Basic ")),
+            b"x-access-token:secret-token",
         )
         rows = rn.pin_diff(got, {"x": self.NEW})
         self.assertEqual([row[1] for row in rows], ["update"])

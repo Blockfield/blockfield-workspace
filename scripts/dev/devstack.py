@@ -839,7 +839,7 @@ def wire_hooks(root):
         return False
     try:
         subprocess.run(
-            ["git", "config", "--local", "core.hooksPath", ".githooks"],
+            _git(root, "config", "--local", "core.hooksPath", ".githooks"),
             cwd=root,
             check=True,
         )
@@ -872,17 +872,26 @@ def patch_dev_skinrestorer():
     step("SkinRestorer join auto-fetch off (dev stand)")
 
 
+def _git(root, *args):
+    """git bound to this checkout's git dir.
+
+    An invalid `.git` entry makes git fail instead of silently resolving to
+    an outer repository (whose config we must never touch).
+    """
+    return ["git", f"--git-dir={root / '.git'}", *args]
+
+
 def _local_hooks_path(root):
     """Repo-local core.hooksPath, or "" when unset/unreadable."""
     try:
         return subprocess.run(
-            ["git", "config", "--local", "--get", "core.hooksPath"],
+            _git(root, "config", "--local", "--get", "core.hooksPath"),
             cwd=root,
             capture_output=True,
             text=True,
             check=False,
         ).stdout.strip()
-    except OSError:
+    except (OSError, subprocess.CalledProcessError):
         return ""
 
 

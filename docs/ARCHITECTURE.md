@@ -65,5 +65,6 @@ flowchart LR
 | Site ↔ workshop: кандидаты карт       | Site `docs/admin.md`; controller `docs/OPERATIONS.md`                                                                                                                                |
 | Комнаты и deep links                  | Launcher [ROOMS-AND-DISCORD](https://github.com/Blockfield/Blockfield-Launcher/blob/main/docs/ROOMS-AND-DISCORD.md)                                                                  |
 | Текст релизов                         | Workspace `.github/actions/release-text`; формат — client [release notes](https://github.com/Blockfield/blockfield-client/blob/main/docs/RELEASE-NOTES.md)                           |
+| TestBot — single source               | Workspace `scripts/dev/testbot`; the mod rig consumes it at a pinned commit (`dev/rig/testbot/testbot-pin.txt` in `blockfield-mod`)                                                  |
 
 Решения с историей и проверенными фактами: [docs/adr/](adr/).

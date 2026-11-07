@@ -1,5 +1,12 @@
 # Dev testbot input
 
+Single source of the TestBot (blockfield-server#319 U5): the `blockfield-mod`
+rig consumes this tree at a pinned workspace commit — the mod keeps only
+`dev/rig/testbot/testbot-pin.txt` (commit SHA + tarball sha256) and
+`fetch-testbot.sh`, which verifies and unpacks this directory. Keep the TCP
+protocol (`127.0.0.1:47777`, one line in, one JSON line out) and the command
+vocabulary below backward compatible so pinned mod builds keep working.
+
 Commands run on the Minecraft client thread. CLI: `just bot <command>`.
 The dev MCP `bot_send` forwards the same tokens, for example
 `{"command":["scroll","0.25","-1"]}`. No desktop input or mod-specific

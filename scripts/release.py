@@ -1005,8 +1005,14 @@ def cmd_pin(args):
                 say(f"skip {path}: submodule is not checked out")
             skipped.add(path)
             return
-        sha = tag_commit(repo, tag)
         current = changes.get(path, (pinned(path),))[0]
+        if current is None:
+            # The public workspace no longer tracks the private server as a submodule.
+            if path not in skipped:
+                say(f"skip {path}: not a submodule of the workspace")
+            skipped.add(path)
+            return
+        sha = tag_commit(repo, tag)
         if sha == current:
             return
         git(repo, "fetch", "-q", "origin", sha)
@@ -2063,10 +2069,14 @@ def cmd_ship(args):
             timeout_s,
             interval_s,
         )
+        # The client tag run only publishes; serving runs from the server repo.
+        dispatch_deploy("client", tags["client"], timeout_s, interval_s, dry=dry)
         post_deploy_probes(tags, None, timeout_s, interval_s)
     else:
         side = next(iter(tags))
         ship_tag_side(args, side, tags[side], timeout_s, interval_s)
+        if side == "client":
+            dispatch_deploy("client", tags["client"], timeout_s, interval_s, dry=dry)
         post_deploy_probes(tags, None, timeout_s, interval_s)
     pin = cmd_pin(
         argparse.Namespace(

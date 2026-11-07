@@ -161,7 +161,7 @@ class Ancestor(unittest.TestCase):
 
 
 class PinOverrides(unittest.TestCase):
-    def test_newer_server_mod_pin_warns_when_it_overrides_the_client_one(self):
+    def run_pin(self, pinned):
         root = Path(tempfile.mkdtemp(prefix="bf-release-pin-"))
         self.addCleanup(shutil.rmtree, root, True)
         for path in ("client", "server", "localmods/blockfield-mod"):
@@ -172,13 +172,12 @@ class PinOverrides(unittest.TestCase):
             "v1.47.1": "e" * 40,
             "v1.47.2": "f" * 40,
         }
-        pinned = {"client": "a" * 40, "server": "b" * 40}
 
         def fake_git(repo, *args, **kw):
             if "ls-tree" in args:
                 path = args[-1]
                 sha = pinned.get(path, "0" * 40)
-                return f"160000 commit {sha}\t{path}"
+                return f"160000 commit {sha}\t{path}" if sha else ""
             return ""
 
         import contextlib
@@ -217,6 +216,10 @@ class PinOverrides(unittest.TestCase):
             mock.patch.object(release, "mutate", return_value=""),
         ):
             self.assertTrue(release.cmd_pin(args))
+        return said
+
+    def test_newer_server_mod_pin_warns_when_it_overrides_the_client_one(self):
+        said = self.run_pin({"client": "a" * 40, "server": "b" * 40})
         self.assertTrue(
             any(
                 "localmods/blockfield-mod" in line
@@ -225,6 +228,12 @@ class PinOverrides(unittest.TestCase):
             ),
             said,
         )
+
+    def test_server_that_is_not_a_submodule_is_skipped(self):
+        # The public workspace dropped the private server submodule; pinning
+        # crashed on its missing gitlink after 2.79.6 shipped.
+        said = self.run_pin({"client": "a" * 40, "server": None})
+        self.assertIn("skip server: not a submodule of the workspace", said)
 
 
 class Ship(unittest.TestCase):
@@ -259,7 +268,11 @@ class Ship(unittest.TestCase):
         )
         self.assertIn(("watched", "client"), calls)
         self.assertFalse(any(c[0] == "published" for c in calls))
-        self.assertFalse(any(c[0] == "deploy" for c in calls))
+        # Probes wait for /api/rooms to serve the tag, which only Deploy client does.
+        self.assertEqual([c[1] for c in calls if c[0] == "deploy"], ["client"])
+        kinds = [c[0] for c in calls]
+        self.assertLess(kinds.index("watched"), kinds.index("deploy"))
+        self.assertLess(kinds.index("deploy"), kinds.index("probes"))
 
     def test_server_only_ships_game_without_workshop(self):
         calls = []
@@ -656,12 +669,15 @@ class Ship(unittest.TestCase):
                 "watched",
                 "run",
                 "watched",
+                "deploy",
                 "probes",
                 "pin",
                 "green",
                 "merge",
             ],
         )
+        # The client tag run is a publish-only stub: serving needs the dispatch.
+        self.assertEqual([c[1] for c in calls if c[0] == "deploy"], ["client"])
         tagged = [c[1] for c in calls if c[0] == "tag"]
         self.assertEqual(tagged, ["server", "client"])
         gate = kinds.index("gate")

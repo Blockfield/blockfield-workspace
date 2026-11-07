@@ -822,12 +822,14 @@ def _restore_missing(src, dst):
         materialize(src, dst)
 
 
-def wire_hooks(root):
+def wire_hooks(root, strict=False):
     """Point this checkout at the versioned hooks in `.githooks`.
 
     Wires only when git would run no other hooks here: core.hooksPath unset at
     every scope and no active hook in the hooks dir. Otherwise warns and leaves
     git alone. Returns True when `.githooks` is the hooks path afterwards.
+    With strict, a failed write exits: `just setup` must not pass without
+    the hooks (pre-push runs the secret scan).
     Notices go to stderr: callers capture the stdout of `quality.py run`.
     """
     if not (root / ".git").exists() or not (root / ".githooks").is_dir():
@@ -868,8 +870,18 @@ def wire_hooks(root):
                 file=sys.stderr,
             )
             return False
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(
+            f"warning: cannot wire versioned hooks in {root}: {error}", file=sys.stderr
+        )
+        return False
+    try:
         git("config", "--local", "core.hooksPath", ".githooks", check=True)
     except (OSError, subprocess.CalledProcessError) as error:
+        if strict:
+            raise SystemExit(
+                f"just setup: cannot wire versioned hooks in {root}: {error}"
+            )
         print(
             f"warning: cannot wire versioned hooks in {root}: {error}", file=sys.stderr
         )
@@ -922,7 +934,7 @@ def setup(args):
             ROOT / "client",
             *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
         ]
-        if sub.is_dir() and wire_hooks(sub)
+        if sub.is_dir() and wire_hooks(sub, strict=True)
     ]
     if wired:
         ok(f"versioned hooks wired in: {', '.join(wired)} (bypass: --no-verify)")

@@ -67,12 +67,10 @@ SERVER_NAME = "blockfield-server"
 PRIVATE_SOURCE = {
     "Blockfield/blockfield-client": "Blockfield/blockfield-client-private",
 }
-MAX_PRS = 80
 PR_BODY_CHARS = 2500
-PIN_MAX_PRS = 30
 PIN_PR_BODY_CHARS = 1200
 PR_COMMITS = 15
-FACTS_BUDGET = 60000
+FACTS_BUDGET = 120000
 PATCH_FILE_CHARS = 4000
 PATCH_EXCERPT_CHARS = 8000
 PATCH_TOTAL_CHARS = 80000
@@ -244,17 +242,14 @@ def pr_commits(source, number, gaps):
     return heads[:PR_COMMITS]
 
 
-def merged_prs(
-    source, previous, version, gaps, limit=MAX_PRS, body_chars=PR_BODY_CHARS
-):
-    commits = flatten(
-        gh_pages(f"repos/{source}/compare/{previous}...{version}?per_page=100"),
-        "commits",
-    )
+def merged_prs(source, previous, version, gaps, body_chars=PR_BODY_CHARS):
+    # Берутся все слитые PR: объём ограничивает только fit_facts, урезая сначала тела.
+    pages = gh_pages(f"repos/{source}/compare/{previous}...{version}?per_page=100")
+    commits = flatten(pages, "commits")
+    total = pages[0].get("total_commits", 0) if pages else 0
+    if len(commits) < total:
+        gaps.append(f"сравнение вернуло {len(commits)} из {total} коммитов")
     numbers = merged_pr_numbers(commits)
-    if len(numbers) > limit:
-        gaps.append(f"слитых PR {len(numbers)}, разобраны первые {limit}")
-        numbers = numbers[:limit]
     prs = []
     for number in numbers:
         try:
@@ -327,7 +322,6 @@ def pin_evidence(change, old, new, gaps):
                 lo["tag"],
                 hi["tag"],
                 found,
-                PIN_MAX_PRS,
                 PIN_PR_BODY_CHARS,
             )
         except Exception as exc:
@@ -358,9 +352,7 @@ def server_pin(previous_release, gaps):
                 f"repos/{SERVER_REPOSITORY}/commits?sha=main&until={since}&per_page=1",
             )
         )[0]["sha"]
-        prs = merged_prs(
-            SERVER_REPOSITORY, base, "main", gaps, PIN_MAX_PRS, PIN_PR_BODY_CHARS
-        )
+        prs = merged_prs(SERVER_REPOSITORY, base, "main", gaps, PIN_PR_BODY_CHARS)
     except Exception as exc:
         gaps.append(f"изменения сервера не собраны ({describe(exc)})")
         return None
@@ -967,7 +959,7 @@ def fit_facts(facts):
         )
         if len(text) <= FACTS_BUDGET:
             return text
-    for body, commits in ((600, 5), (0, 0)):
+    for body, commits in ((1200, 10), (600, 5), (300, 3), (0, 0)):
         _trimmed, text = render(
             body, commits, count, note_chars=600, extra_gaps=note_gaps(600)
         )

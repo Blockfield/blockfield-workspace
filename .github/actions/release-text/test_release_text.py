@@ -886,8 +886,36 @@ class MergedPrs(unittest.TestCase):
         self.assertEqual(len(gaps), 1)
         self.assertIn("HTTP 403", gaps[0])
 
+    def test_every_merged_pr_is_read_and_short_compare_is_a_gap(self):
+        commits = [commit(f"Merge pull request #{n} from a/b") for n in range(1, 101)]
+
+        def api(*args, **_):
+            n = int(args[1].rsplit("/", 1)[1])
+            return json.dumps({"title": f"PR {n}", "body": "", "additions": 1})
+
+        for total, gap_count in ((100, 0), (300, 1)):
+            gaps = []
+            pages = [{"commits": commits, "total_commits": total}]
+            with (
+                mock.patch.object(
+                    rt,
+                    "gh_pages",
+                    side_effect=lambda path: [[]] if "/pulls/" in path else pages,
+                ),
+                mock.patch.object(rt, "gh", side_effect=api),
+            ):
+                prs = rt.merged_prs("o/r", "v1", "v2", gaps)
+            self.assertEqual(len(prs), 100)
+            self.assertEqual(len(gaps), gap_count, gaps)
+
 
 class FitFacts(unittest.TestCase):
+    def setUp(self):
+        # Сценарии рассчитаны на этот бюджет; политика урезания от его размера не зависит.
+        patcher = mock.patch.object(rt, "FACTS_BUDGET", 60000)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def pr(self, number, title="Правка", body="", commits=()):
         return {
             "number": number,
@@ -908,7 +936,8 @@ class FitFacts(unittest.TestCase):
         )
         got = json.loads(rt.fit_facts(f))
         self.assertTrue(got["pull_requests"])
-        self.assertTrue(all(len(pr["commits"]) <= 5 for pr in got["pull_requests"]))
+        self.assertTrue(all(pr["body"] for pr in got["pull_requests"]))
+        self.assertTrue(all(len(pr["commits"]) < 15 for pr in got["pull_requests"]))
 
     def test_overflow_drops_trailing_prs_with_a_note_not_mid_json(self):
         f = facts(

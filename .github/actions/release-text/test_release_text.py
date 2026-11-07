@@ -1256,5 +1256,191 @@ class PullRequest(unittest.TestCase):
         gh.assert_not_called()
 
 
+SIGNATURE = "🤖 Generated with [Claude Code](https://example.com/agents)"
+
+
+class LauncherKind(unittest.TestCase):
+    def server_releases(self):
+        return [
+            release("v3.0.0", published="2026-09-20T00:00:00Z"),
+            release("v2.0.0", published="2026-08-20T00:00:00Z"),
+            release("v1.0.0", published="2026-08-01T00:00:00Z"),
+        ]
+
+    def test_server_range_windows_by_publish_date(self):
+        old, new = rt.server_range(self.server_releases(), "2026-09-01T00:00:00Z")
+        self.assertEqual((old, new), ("v2.0.0", "v3.0.0"))
+
+    def test_server_range_with_no_prior_release_starts_empty(self):
+        old, new = rt.server_range(self.server_releases(), "2026-01-01T00:00:00Z")
+        self.assertEqual((old, new), (None, "v3.0.0"))
+
+    def test_server_range_ignores_non_version_tags(self):
+        releases = self.server_releases() + [release("build-9")]
+        self.assertEqual(
+            rt.server_range(releases, "2026-09-01T00:00:00Z"), ("v2.0.0", "v3.0.0")
+        )
+
+    def test_launcher_pin_joins_collect_facts_behind_kind(self):
+        args = mock.Mock(
+            repository="Blockfield/Blockfield-Launcher",
+            source_repository="Blockfield/Blockfield-Launcher",
+            version="launcher-v2.0.0",
+            kind="launcher",
+            repo_root=tempfile.mkdtemp(),
+            build_json=None,
+            date="2026-10-02",
+        )
+        prs = [{"number": 9, "title": "Новый экран", "body": ""}]
+        gaps = []
+        with (
+            mock.patch.object(
+                rt, "published_releases", return_value=self.server_releases()
+            ),
+            mock.patch.object(rt, "merged_prs", return_value=prs) as fetch,
+            mock.patch.object(rt, "server_pin") as client_pin,
+        ):
+            pin = rt.launcher_server_pin({"published_at": "2026-09-01T00:00:00Z"}, gaps)
+            facts = rt.collect_facts(
+                args,
+                [
+                    release("launcher-v2.0.0"),
+                    release("launcher-v1.0.0", published="2026-09-01T00:00:00Z"),
+                ],
+            )
+        self.assertEqual(pin["text"], "blockfield-server: v2.0.0 → v3.0.0")
+        calls = [c.args[:3] for c in fetch.call_args_list]
+        self.assertIn((rt.SERVER_REPOSITORY, "v2.0.0", "v3.0.0"), calls)
+        client_pin.assert_not_called()
+        self.assertEqual(facts["kind"], "launcher")
+        self.assertEqual(facts["pins"][-1]["name"], "blockfield-server")
+        self.assertEqual(
+            rn.check(
+                Path(self.write(facts)),
+                facts["repository"],
+                "launcher-v2.0.0",
+            ),
+            [],
+        )
+
+    def write(self, facts):
+        path = Path(tempfile.mkdtemp(), "release-notes.md")
+        path.write_text(rt.facts_only_notes(facts), encoding="utf-8")
+        return path
+
+
+class Attribution(unittest.TestCase):
+    def test_line_is_verbatim_or_empty(self):
+        self.assertEqual(rt.attribution_line(None), "")
+        self.assertEqual(rt.attribution_line("Сам текст"), "")
+        self.assertEqual(
+            rt.attribution_line(f"Сам текст\n{SIGNATURE}"), f"\n\n{SIGNATURE}"
+        )
+
+    def written_body(self, keep):
+        args = mock.Mock(
+            repository="Blockfield/x",
+            pr_number=7,
+            model="m",
+            keep_attribution=keep,
+        )
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        generated = "Что изменилось: прицел.\n\nДля игроков: прицел точнее."
+        calls = []
+
+        def gh(*a, **_):
+            calls.append(a)
+            return json.dumps({"title": "Fix aim", "body": f"\n\n{SIGNATURE}"})
+
+        with (
+            mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "k"}),
+            mock.patch.object(rt.time, "sleep"),
+            mock.patch.object(rt, "gh_pages", return_value=[]),
+            mock.patch.object(rt, "gh", side_effect=gh),
+            mock.patch.object(rt, "chat", return_value=generated),
+            mock.patch.object(rt.tempfile, "TemporaryDirectory") as tmpdir,
+        ):
+            tmpdir.return_value.__enter__.return_value = tmp
+            rt.run_pr(args)
+        return Path(tmp, "body.md").read_text(encoding="utf-8")
+
+    def test_signature_kept_only_with_the_flag(self):
+        self.assertEqual(
+            self.written_body(True),
+            f"Что изменилось: прицел.\n\nДля игроков: прицел точнее.\n\n{SIGNATURE}",
+        )
+        self.assertEqual(
+            self.written_body(False),
+            "Что изменилось: прицел.\n\nДля игроков: прицел точнее.",
+        )
+
+
+class DefaultsUnchanged(unittest.TestCase):
+    def test_existing_kinds_map_as_before(self):
+        self.assertEqual(
+            {
+                k: rt.FRONT_KIND[k]
+                for k in ("client", "server", "mod", "decor", "proxy")
+            },
+            {
+                "client": "client",
+                "server": "server",
+                "mod": "mod",
+                "decor": "mod",
+                "proxy": "server",
+            },
+        )
+
+    def test_facts_only_notes_are_byte_identical(self):
+        text = rt.facts_only_notes(facts())
+        self.assertEqual(
+            text,
+            """---
+schema_version: 1
+repository: Blockfield/blockfield-releases
+version: v2.61.0
+previous_version: v2.60.0
+date: 2026-10-02
+kind: client
+backfilled: false
+---
+
+# Blockfield/blockfield-releases v2.61.0
+
+## Кратко
+
+Выпуск v2.61.0: Новый HUD.
+
+## Для игроков
+
+- Новый HUD
+
+## Технические изменения
+
+- Новый HUD (#5)
+
+## Обновлённые компоненты
+
+Пины не изменились относительно предыдущего релиза.
+
+## Совместимость и необходимые действия
+
+Сведения о совместимости автоматически не подготовлены.
+
+## Известные проблемы
+
+Сведения об известных проблемах автоматически не подготовлены.
+
+## Источники и ограничения полноты
+
+- Предыдущий опубликованный релиз линии: v2.60.0.
+- Сверка пинов v2.60.0 → v2.61.0.
+- Слитые pull request: #5.
+- Текст собран без модели: названия pull request приведены как есть.
+""",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

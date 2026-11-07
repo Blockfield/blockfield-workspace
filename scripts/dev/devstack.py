@@ -822,14 +822,68 @@ def _restore_missing(src, dst):
         materialize(src, dst)
 
 
-def wire_hooks(root):
-    """Point one checkout at its versioned hooks so pushes run the fast checks."""
-    if not (root / ".githooks").is_dir():
+def wire_hooks(root, strict=False):
+    """Point this checkout at the versioned hooks in `.githooks`.
+
+    Wires only when git would run no other hooks here: core.hooksPath unset at
+    every scope and no active hook in the hooks dir. Otherwise warns and leaves
+    git alone. Returns True when `.githooks` is the hooks path afterwards.
+    With strict, failing to read or write git config exits: `just setup`
+    must not pass without the hooks (pre-push runs the secret scan).
+    Notices go to stderr: callers capture the stdout of `quality.py run`.
+    """
+    if not (root / ".git").exists() or not (root / ".githooks").is_dir():
         return False
-    subprocess.run(
-        ["git", "config", "core.hooksPath", ".githooks"],
-        cwd=root,
-        check=True,
+
+    def git(*args, check=False):
+        return subprocess.run(
+            _git(root, *args),
+            cwd=root,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors="replace",  # a non-UTF-8 hooksPath must not crash every just call
+            check=check,
+        )
+
+    try:
+        current = git("config", "--get", "core.hooksPath").stdout.strip()
+        if current == ".githooks":
+            return True
+        if current:
+            print(
+                f"warning: keeping core.hooksPath {current!r}; "
+                "versioned .githooks not wired",
+                file=sys.stderr,
+            )
+            return False
+        hooks = (
+            root / git("rev-parse", "--git-path", "hooks", check=True).stdout.strip()
+        )
+        active = (
+            sorted(p.name for p in hooks.iterdir() if not p.name.endswith(".sample"))
+            if hooks.is_dir()
+            else []
+        )
+        if active:
+            print(
+                f"warning: keeping active hooks {', '.join(active)} in {hooks}; "
+                "versioned .githooks not wired",
+                file=sys.stderr,
+            )
+            return False
+        git("config", "--local", "core.hooksPath", ".githooks", check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        if strict:
+            raise SystemExit(
+                f"just setup: cannot wire versioned hooks in {root}: {error}"
+            )
+        print(
+            f"warning: cannot wire versioned hooks in {root}: {error}", file=sys.stderr
+        )
+        return False
+    print(
+        "commits and pushes now run the versioned .githooks (bypass: --no-verify)",
+        file=sys.stderr,
     )
     return True
 
@@ -857,19 +911,28 @@ def patch_dev_skinrestorer():
     step("SkinRestorer join auto-fetch off (dev stand)")
 
 
+def _git(root, *args):
+    """git bound to this checkout's git dir.
+
+    An invalid `.git` entry makes git fail instead of silently resolving to
+    an outer repository (whose config we must never touch).
+    """
+    return ["git", f"--git-dir={root / '.git'}", *args]
+
+
 def setup(args):
-    wired = [str(ROOT)] if wire_hooks(ROOT) else []
-    for sub in [
-        ROOT / "server",
-        ROOT / "client",
-        *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
-    ]:
-        if sub.is_dir() and wire_hooks(sub):
-            wired.append(str(sub.relative_to(ROOT)))
+    wired = [
+        str(sub.relative_to(ROOT)) if sub != ROOT else str(ROOT)
+        for sub in [
+            ROOT,
+            ROOT / "server",
+            ROOT / "client",
+            *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
+        ]
+        if sub.is_dir() and wire_hooks(sub, strict=True)
+    ]
     if wired:
-        ok(
-            f"pushes run .githooks/pre-push in: {', '.join(wired)} (bypass: --no-verify)"
-        )
+        ok(f"versioned hooks wired in: {', '.join(wired)} (bypass: --no-verify)")
     if server_pid() or client_pid(1) or client_pid(2):
         die("server or client is running; inspect it before preparing this stack")
     for path in (PID_FILE, CLIENT_PID_FILE, client_pid_file(2)):

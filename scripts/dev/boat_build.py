@@ -739,7 +739,13 @@ def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
             # shortcut: one retry for an intermittent GitHub "multiple updates for ref" clone failure
             # seen on Boat; find the cause if it fails twice in a row.
             f'{{ git clone -q -c {shlex.quote(GH_CREDENTIAL)} "$url" {shlex.quote(remote)} || '
-            f'git clone -q -c {shlex.quote(GH_CREDENTIAL)} "$url" {shlex.quote(remote)}; }}; }}',
+            f'git clone -q -c {shlex.quote(GH_CREDENTIAL)} "$url" {shlex.quote(remote)}; }}; }} && '
+            # A fresh clone starts with hooks unwired: point it at the versioned
+            # hooks when they exist and no explicit choice was made (best-effort).
+            f"{{ test -d {shlex.quote(remote + '/.githooks')} && "
+            f"git -C {shlex.quote(remote)} config --get core.hooksPath >/dev/null 2>&1 || "
+            f"test ! -d {shlex.quote(remote + '/.githooks')} || "
+            f"git -C {shlex.quote(remote)} config core.hooksPath .githooks || true; }}",
         )
         if rc != 0:
             raise RuntimeError(f"cannot initialize submodule {rel}:\n{out}")

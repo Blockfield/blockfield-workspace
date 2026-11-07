@@ -6,6 +6,7 @@ recorded SHA: `just server-checkout`. Idempotent; fails loudly without access.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -60,6 +61,13 @@ def checkout_server(root=ROOT, url=SERVER_URL):
     run_git("checkout", "--detach", sha, cwd=target)
     if git_output("rev-parse", "HEAD", cwd=target) != sha:
         die(f"{target} is not at {sha} after checkout")
+    # A fresh clone starts with hooks unwired: point it at the versioned
+    # hooks when they exist and no explicit choice was made. Never fatal.
+    # Same rules as every `just` call: never override hooks git already runs.
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from quality import wire_hooks
+
+    wire_hooks(target)
     return target
 
 

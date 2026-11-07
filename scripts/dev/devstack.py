@@ -841,6 +841,7 @@ def wire_hooks(root, strict=False):
             cwd=root,
             stdout=subprocess.PIPE,
             text=True,
+            errors="replace",  # a non-UTF-8 hooksPath must not crash every just call
             check=check,
         )
 

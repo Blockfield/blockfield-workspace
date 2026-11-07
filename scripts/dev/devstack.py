@@ -823,14 +823,33 @@ def _restore_missing(src, dst):
 
 
 def wire_hooks(root):
-    """Point one checkout at its versioned hooks so pushes run the fast checks."""
+    """Point one checkout at its versioned hooks so pushes run the fast checks.
+
+    Only sets core.hooksPath when it is unset; an explicit choice is left
+    alone. Best-effort: a checkout without git must not break setup.
+    """
     if not (root / ".githooks").is_dir():
         return False
-    subprocess.run(
-        ["git", "config", "core.hooksPath", ".githooks"],
-        cwd=root,
-        check=True,
-    )
+    try:
+        current = subprocess.run(
+            ["git", "config", "--get", "core.hooksPath"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        return False
+    if current:
+        return False
+    try:
+        subprocess.run(
+            ["git", "config", "core.hooksPath", ".githooks"],
+            cwd=root,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
     return True
 
 

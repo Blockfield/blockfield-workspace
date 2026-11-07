@@ -60,6 +60,24 @@ def checkout_server(root=ROOT, url=SERVER_URL):
     run_git("checkout", "--detach", sha, cwd=target)
     if git_output("rev-parse", "HEAD", cwd=target) != sha:
         die(f"{target} is not at {sha} after checkout")
+    # A fresh clone starts with hooks unwired: point it at the versioned
+    # hooks when they exist and no explicit choice was made. Never fatal.
+    if (target / ".githooks").is_dir():
+        try:
+            current = subprocess.run(
+                ["git", "config", "--get", "core.hooksPath"],
+                cwd=target,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if not current:
+                subprocess.run(
+                    ["git", "config", "core.hooksPath", ".githooks"],
+                    cwd=target,
+                    check=True,
+                )
+        except (OSError, subprocess.CalledProcessError):
+            pass
     return target
 
 

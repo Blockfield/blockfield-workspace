@@ -1,6 +1,6 @@
 #!/bin/sh
 # Versioned pre-push gate: the fast checks CI runs, without Gradle.
-# Installed via `just setup` (git core.hooksPath). Bypass: git push --no-verify.
+# Wired automatically by any `just` command (git core.hooksPath). Bypass: git push --no-verify.
 set -eu
 cd "$(dirname "$0")/.."
 command -v just >/dev/null 2>&1 || {

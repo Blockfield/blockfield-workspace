@@ -78,4 +78,4 @@ jobs:
             ~/.gradle
           key: testbot-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/toolchain.py', 'scripts/quality.py', 'scripts/dev_cache.py', 'scripts/ci_scope.py', 'scripts/dev/testbot/gradle/wrapper/**', 'scripts/dev/testbot/build.gradle', 'scripts/dev/testbot/settings.gradle') }}
       - run: python -I -X utf8 scripts/toolchain.py --ci
-      - run: just compile
+      - run: just build-testbot

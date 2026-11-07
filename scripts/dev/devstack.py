@@ -823,43 +823,61 @@ def _restore_missing(src, dst):
 
 
 def wire_hooks(root):
-    """Point one checkout at its versioned hooks so pushes run the fast checks.
+    """Point this checkout at the versioned hooks in `.githooks`.
 
-    Returns True when the repo-local core.hooksPath ends up as `.githooks`
-    (set just now or already). Returns False on an explicit foreign choice
-    (left alone), when there is no git checkout or no `.githooks`, and on
-    write failure (reported to stderr). Never touches an outer repo.
+    Wires only when git would run no other hooks here: core.hooksPath unset at
+    every scope and no active hook in the hooks dir. Otherwise warns and leaves
+    git alone. Returns True when `.githooks` is the hooks path afterwards.
+    Notices go to stderr: callers capture the stdout of `quality.py run`.
     """
     if not (root / ".git").exists() or not (root / ".githooks").is_dir():
         return False
-    local = _local_hooks_path(root)
-    if local == ".githooks":
-        outer = _outer_hooks_path(root)
-        if outer:
-            print(
-                f"warning: superseding outer core.hooksPath {outer!r} with "
-                "versioned .githooks for this checkout"
-            )
-        return True
-    if local:
-        return False
-    outer = _outer_hooks_path(root)
-    if outer:
-        print(
-            f"warning: superseding outer core.hooksPath {outer!r} with "
-            "versioned .githooks for this checkout"
-        )
-    try:
-        subprocess.run(
-            _git(root, "config", "--local", "core.hooksPath", ".githooks"),
+
+    def git(*args, check=False):
+        return subprocess.run(
+            _git(root, *args),
             cwd=root,
-            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=check,
         )
+
+    try:
+        current = git("config", "--get", "core.hooksPath").stdout.strip()
+        if current == ".githooks":
+            return True
+        if current:
+            print(
+                f"warning: keeping core.hooksPath {current!r}; "
+                "versioned .githooks not wired",
+                file=sys.stderr,
+            )
+            return False
+        hooks = (
+            root / git("rev-parse", "--git-path", "hooks", check=True).stdout.strip()
+        )
+        active = (
+            sorted(p.name for p in hooks.iterdir() if not p.name.endswith(".sample"))
+            if hooks.is_dir()
+            else []
+        )
+        if active:
+            print(
+                f"warning: keeping active hooks {', '.join(active)} in {hooks}; "
+                "versioned .githooks not wired",
+                file=sys.stderr,
+            )
+            return False
+        git("config", "--local", "core.hooksPath", ".githooks", check=True)
     except (OSError, subprocess.CalledProcessError) as error:
         print(
             f"warning: cannot wire versioned hooks in {root}: {error}", file=sys.stderr
         )
         return False
+    print(
+        "commits and pushes now run the versioned .githooks (bypass: --no-verify)",
+        file=sys.stderr,
+    )
     return True
 
 
@@ -895,72 +913,19 @@ def _git(root, *args):
     return ["git", f"--git-dir={root / '.git'}", *args]
 
 
-def _outer_hooks_path(root):
-    """Non-local core.hooksPath (global, else system), or "" when unset."""
-    for scope in ("--global", "--system"):
-        try:
-            value = subprocess.run(
-                _git(root, "config", scope, "--get", "core.hooksPath"),
-                cwd=root,
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            continue
-        if value:
-            return value
-    return ""
-
-
-def _local_hooks_path(root):
-    """Repo-local core.hooksPath, or "" when unset/unreadable."""
-    try:
-        return subprocess.run(
-            _git(root, "config", "--local", "--get", "core.hooksPath"),
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return ""
-
-
 def setup(args):
-    wired = [str(ROOT)] if wire_hooks(ROOT) else []
-    if (ROOT / ".git").exists() and (ROOT / ".githooks").is_dir():
-        try:
-            current = subprocess.run(
-                ["git", "config", "--local", "--get", "core.hooksPath"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
-        except OSError:
-            current = ""
-        if not current:
-            die(f"cannot wire versioned hooks in {ROOT}: fix git config access")
-    for sub in [
-        ROOT / "server",
-        ROOT / "client",
-        *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
-    ]:
-        if not sub.is_dir():
-            continue
-        if wire_hooks(sub):
-            wired.append(str(sub.relative_to(ROOT)))
-        elif (
-            (sub / ".git").exists()
-            and (sub / ".githooks").is_dir()
-            and not _local_hooks_path(sub)
-        ):
-            die(f"cannot wire versioned hooks in {sub}: fix git config access")
+    wired = [
+        str(sub.relative_to(ROOT)) if sub != ROOT else str(ROOT)
+        for sub in [
+            ROOT,
+            ROOT / "server",
+            ROOT / "client",
+            *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
+        ]
+        if sub.is_dir() and wire_hooks(sub)
+    ]
     if wired:
-        ok(
-            f"pushes run .githooks/pre-push in: {', '.join(wired)} (bypass: --no-verify)"
-        )
+        ok(f"versioned hooks wired in: {', '.join(wired)} (bypass: --no-verify)")
     if server_pid() or client_pid(1) or client_pid(2):
         die("server or client is running; inspect it before preparing this stack")
     for path in (PID_FILE, CLIENT_PID_FILE, client_pid_file(2)):

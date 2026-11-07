@@ -1,6 +1,7 @@
 """Versioned pre-push hook must stay wired and fast."""
 
 import importlib.util
+import os
 import subprocess
 import tempfile
 import unittest
@@ -22,6 +23,15 @@ quality = importlib.util.module_from_spec(qspec)
 qspec.loader.exec_module(quality)
 
 
+def local_hooks_path(root):
+    return subprocess.run(
+        ["git", "config", "--local", "--get", "core.hooksPath"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 class PrePushHook(unittest.TestCase):
     def test_hook_runs_lint_and_format_check_without_gradle(self):
         hook = ROOT / ".githooks" / "pre-push"
@@ -36,41 +46,44 @@ class PrePushHook(unittest.TestCase):
         ]
         self.assertFalse(any("gradle" in line.lower() for line in commands))
 
-    def test_wire_hooks_points_checkout_at_versioned_hooks(self):
+    def test_wire_hooks_sets_versioned_hooks_when_unset(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "--quiet", tmp], check=True)
             (root / ".githooks").mkdir()
-            calls = []
-
-            def fake_run(args, **kwargs):
-                calls.append(args)
-                if "--get" in args:
-                    return subprocess.CompletedProcess(args, 1, stdout="")
-                return subprocess.CompletedProcess(args, 0, stdout="")
-
-            with patch.object(devstack.subprocess, "run", side_effect=fake_run):
-                self.assertTrue(devstack.wire_hooks(root))
-            self.assertEqual(calls[-1][0], "git")
-            self.assertIn(f"--git-dir={root / '.git'}", calls[-1])
-            self.assertEqual(calls[-1][-3:], ["--local", "core.hooksPath", ".githooks"])
+            self.assertTrue(devstack.wire_hooks(root))
+            self.assertEqual(local_hooks_path(root), ".githooks")
 
     def test_wire_hooks_leaves_explicit_choice_alone(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "--quiet", tmp], check=True)
             (root / ".githooks").mkdir()
-            calls = []
+            subprocess.run(
+                ["git", "config", "core.hooksPath", ".custom"], cwd=root, check=True
+            )
+            self.assertFalse(devstack.wire_hooks(root))
+            self.assertEqual(local_hooks_path(root), ".custom")
 
-            def fake_run(args, **kwargs):
-                calls.append(args)
-                if "--get" in args:
-                    return subprocess.CompletedProcess(args, 0, stdout=".custom\n")
-                return subprocess.CompletedProcess(args, 0, stdout="")
-
-            with patch.object(devstack.subprocess, "run", side_effect=fake_run):
+    def test_wire_hooks_keeps_global_hooks_path(self):
+        with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
+            root = Path(tmp) / "repo"
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".githooks").mkdir()
+            gitconfig = Path(tmp) / "gitconfig"
+            gitconfig.write_text("[core]\n\thooksPath = /global/hooks\n")
+            with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(gitconfig)}):
                 self.assertFalse(devstack.wire_hooks(root))
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(local_hooks_path(root), "")
+
+    def test_wire_hooks_keeps_active_hooks(self):
+        with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "--quiet", tmp], check=True)
+            (root / ".githooks").mkdir()
+            (root / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+            self.assertFalse(devstack.wire_hooks(root))
+            self.assertEqual(local_hooks_path(root), "")
 
     def test_wire_hooks_leaves_subtree_without_own_git_alone(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
@@ -89,62 +102,44 @@ class PrePushHook(unittest.TestCase):
 
 
 class QualityWireHooks(unittest.TestCase):
-    def test_wire_hooks_only_sets_when_unset(self):
+    def test_wire_hooks_sets_versioned_hooks_when_unset(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "--quiet", tmp], check=True)
             (root / ".githooks").mkdir()
-            calls = []
-
-            def fake_run(args, **kwargs):
-                calls.append(args)
-                if "--get" in args:
-                    return subprocess.CompletedProcess(args, 1, stdout="")
-                return subprocess.CompletedProcess(args, 0, stdout="")
-
-            with patch.object(quality.subprocess, "run", side_effect=fake_run):
-                self.assertTrue(quality.wire_hooks(root))
-            self.assertEqual(calls[-1][0], "git")
-            self.assertIn(f"--git-dir={root / '.git'}", calls[-1])
-            self.assertEqual(calls[-1][-3:], ["--local", "core.hooksPath", ".githooks"])
+            self.assertTrue(quality.wire_hooks(root))
+            self.assertEqual(local_hooks_path(root), ".githooks")
 
     def test_wire_hooks_leaves_explicit_choice_alone(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "--quiet", tmp], check=True)
             (root / ".githooks").mkdir()
-            calls = []
+            subprocess.run(
+                ["git", "config", "core.hooksPath", ".custom"], cwd=root, check=True
+            )
+            self.assertFalse(quality.wire_hooks(root))
+            self.assertEqual(local_hooks_path(root), ".custom")
 
-            def fake_run(args, **kwargs):
-                calls.append(args)
-                if "--local" in args and "--get" in args:
-                    return subprocess.CompletedProcess(args, 0, stdout=".custom\n")
-                return subprocess.CompletedProcess(args, 0, stdout="")
-
-            with patch.object(quality.subprocess, "run", side_effect=fake_run):
+    def test_wire_hooks_keeps_global_hooks_path(self):
+        with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
+            root = Path(tmp) / "repo"
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".githooks").mkdir()
+            gitconfig = Path(tmp) / "gitconfig"
+            gitconfig.write_text("[core]\n\thooksPath = /global/hooks\n")
+            with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(gitconfig)}):
                 self.assertFalse(quality.wire_hooks(root))
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(local_hooks_path(root), "")
 
-    def test_wire_hooks_prefers_local_over_outer_scope(self):
+    def test_wire_hooks_keeps_active_hooks(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "--quiet", tmp], check=True)
             (root / ".githooks").mkdir()
-            calls = []
-
-            def fake_run(args, **kwargs):
-                calls.append(args)
-                if "--local" in args and "--get" in args:
-                    return subprocess.CompletedProcess(args, 1, stdout="")
-                if "--get" in args:
-                    return subprocess.CompletedProcess(args, 0, stdout=".other\n")
-                return subprocess.CompletedProcess(args, 0, stdout="")
-
-            with patch.object(quality.subprocess, "run", side_effect=fake_run):
-                self.assertTrue(quality.wire_hooks(root))
-            self.assertEqual(calls[-1][0], "git")
-            self.assertIn(f"--git-dir={root / '.git'}", calls[-1])
-            self.assertEqual(calls[-1][-3:], ["--local", "core.hooksPath", ".githooks"])
+            (root / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+            self.assertFalse(quality.wire_hooks(root))
+            self.assertEqual(local_hooks_path(root), "")
 
     def test_wire_hooks_reports_already_wired_as_success(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
@@ -157,33 +152,6 @@ class QualityWireHooks(unittest.TestCase):
                 check=True,
             )
             self.assertTrue(quality.wire_hooks(root))
-
-    def test_wire_hooks_warns_every_time_it_supersedes_outer_hooks(self):
-        with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
-            root = Path(tmp)
-            subprocess.run(["git", "init", "--quiet", tmp], check=True)
-            (root / ".githooks").mkdir()
-            subprocess.run(
-                ["git", "config", "core.hooksPath", ".githooks"],
-                cwd=root,
-                check=True,
-            )
-            calls = []
-
-            def fake_run(args, **kwargs):
-                calls.append(args)
-                if "--local" in args:
-                    return subprocess.CompletedProcess(args, 0, stdout=".githooks\n")
-                if "--global" in args:
-                    return subprocess.CompletedProcess(args, 0, stdout=".outer\n")
-                return subprocess.CompletedProcess(args, 1, stdout="")
-
-            with patch.object(quality.subprocess, "run", side_effect=fake_run):
-                self.assertTrue(quality.wire_hooks(root))
-            self.assertEqual(len(calls), 2)
-            self.assertFalse(
-                any("--local" in c and c[-1] == ".githooks" for c in calls)
-            )
 
     def test_wire_hooks_leaves_outer_repo_alone_on_invalid_gitdir(self):
         with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:

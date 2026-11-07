@@ -117,28 +117,29 @@ def entry_rows(probe, label, tcp, udp, rooms_url, gate_file, want_game, want_wor
 
 
 def version_rows(args, root, rcon_factory):
-    """G0 identity per target: stand mod vs pins (fails), prod build vs tag."""
+    """G0 identity per target: stand mod vs mod-server source (fails), prod build vs tag."""
     from . import rc
 
     rows = []
     try:
-        pin = rc.pin_version(
-            (root / "server" / "mods" / "blockfield-server.pw.toml").read_text()
-        )
-    except (OSError, ValueError, KeyError) as error:
+        pin, upstream = rc.server_mod_source(root / "server")
+    except (OSError, ValueError) as error:
         rows.append(("stand version == pin", None, f"pin unreadable ({error})"))
-        pin = None
+        pin, upstream = None, None
     try:
         rcon = rcon_factory(args.rcon_host, args.rcon_port, args.rcon_password)
         loaded = rc.loaded_version(rcon.cmd("bf version"))
     except Exception as error:
         rows.append(("stand version == pin", None, f"stand RCON failed ({error})"))
     else:
+        detail = f"stand={loaded} pin={pin}"
+        if upstream:
+            detail += f" upstream={upstream[:12]}"
         rows.append(
             (
                 "stand version == pin",
                 None if pin is None else loaded == pin,
-                f"stand={loaded} pin={pin}",
+                detail,
             )
         )
     try:

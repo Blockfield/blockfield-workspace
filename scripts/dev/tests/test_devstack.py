@@ -600,8 +600,8 @@ class BuiltOverlay(unittest.TestCase):
             pack = Path(tmp)
             mods = pack / "files/mods"
             mods.mkdir(parents=True)
-            for side in ("server", "music"):
-                (mods / f"blockfield-{side}-1.jar").touch()
+            # Only the client mod still downloads; the server jar is built, never fetched.
+            (mods / "blockfield-music-1.jar").touch()
             attempts = []
 
             def gh(command, **kwargs):
@@ -636,23 +636,22 @@ class BuiltOverlay(unittest.TestCase):
                 self.assertEqual(call.kwargs["cwd"], pack)
 
     def test_stale_jar_under_the_pin_name_is_downloaded_again(self):
-        # 2026-10-30: a 1.55.3 build sat in files/mods named blockfield-server-1.57.0.
         with tempfile.TemporaryDirectory() as tmp:
             pack = Path(tmp)
             mods = pack / "files/mods"
             mods.mkdir(parents=True)
             (pack / "mods").mkdir()
             good = b"published"
-            for side in ("client", "server", "music"):
+            for side in ("client", "music"):
                 (pack / "mods" / f"blockfield-{side}.pw.toml").write_text(
                     f'filename = "blockfield-{side}-1.jar"\n[download]\n'
                     f'hash-format = "sha1"\nhash = "{hashlib.sha1(good).hexdigest()}"\n'
                 )
                 (mods / f"blockfield-{side}-1.jar").write_bytes(good)
-            (mods / "blockfield-server-1.jar").write_bytes(b"stale build")
+            (mods / "blockfield-client-1.jar").write_bytes(b"stale build")
 
             def gh(command, **kwargs):
-                (mods / "blockfield-server-1.jar").write_bytes(good)
+                (mods / "blockfield-client-1.jar").write_bytes(good)
                 return SimpleNamespace(returncode=0)
 
             with (
@@ -661,8 +660,37 @@ class BuiltOverlay(unittest.TestCase):
             ):
                 devstack.fetch_mod_jars(pack, client_pack=pack)
             self.assertEqual(download.call_count, 1)
-            self.assertIn("blockfield-server-1.jar", download.call_args.args[0])
-            self.assertEqual((mods / "blockfield-server-1.jar").read_bytes(), good)
+            self.assertIn("blockfield-client-1.jar", download.call_args.args[0])
+            self.assertEqual((mods / "blockfield-client-1.jar").read_bytes(), good)
+
+    def test_server_jar_is_never_downloaded(self):
+        # The download pin is gone: even a stale server jar under files/mods
+        # must not trigger `gh`; the stand jar is built from mod-server.
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            mods = pack / "files/mods"
+            mods.mkdir(parents=True)
+            (pack / "mods").mkdir()
+            good = b"published"
+            for side in ("client", "music"):
+                (pack / "mods" / f"blockfield-{side}.pw.toml").write_text(
+                    f'filename = "blockfield-{side}-1.jar"\n'
+                )
+                (mods / f"blockfield-{side}-1.jar").write_bytes(good)
+            (pack / "mods" / "blockfield-server.pw.toml").write_text(
+                'filename = "blockfield-server-1.jar"\n[download]\n'
+                f'hash-format = "sha256"\nhash = "{hashlib.sha256(good).hexdigest()}"\n'
+            )
+            (mods / "blockfield-server-1.jar").write_bytes(b"stale build")
+            with (
+                patch.object(devstack, "local_jars", return_value={}),
+                patch.object(devstack.subprocess, "run") as download,
+            ):
+                devstack.fetch_mod_jars(pack, client_pack=pack)
+            download.assert_not_called()
+            self.assertEqual(
+                (mods / "blockfield-server-1.jar").read_bytes(), b"stale build"
+            )
 
     def test_fetch_skips_mod_covered_by_local_build(self):
         real = devstack.local_jars
@@ -685,7 +713,8 @@ class BuiltOverlay(unittest.TestCase):
                 (client / "mods" / "blockfield-music.pw.toml").write_text(
                     'filename = "blockfield-music-1.jar"\n'
                 )
-                # Everything else already cached: only the server pin could trigger `gh`.
+                # Everything else already cached: nothing may trigger `gh`
+                # (the server pin never downloads anymore).
                 (pack / "files" / "mods" / "blockfield-client-1.jar").write_bytes(b"x")
                 (pack / "files" / "mods" / "blockfield-music-1.jar").write_bytes(b"x")
                 real_subprocess = devstack.subprocess.run
@@ -695,7 +724,7 @@ class BuiltOverlay(unittest.TestCase):
                 try:
                     devstack.fetch_mod_jars(
                         pack, client_pack=client
-                    )  # server pin skipped, no gh
+                    )  # server pin never fetched, no gh
                 finally:
                     devstack.subprocess.run = real_subprocess
         finally:
@@ -733,6 +762,132 @@ class BuiltOverlay(unittest.TestCase):
             )
             self.assertEqual(
                 run.call_args.kwargs, {"cwd": pack, "message": "Building server pack"}
+            )
+
+
+class ServerJar(unittest.TestCase):
+    def test_explicit_jar_wins_over_local_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit = Path(tmp) / "blockfield-server-9.9.9+mc1.21.1.jar"
+            explicit.write_bytes(b"PK")
+            local = Path(tmp) / "blockfield-server-1.0+mc.jar"
+            local.write_bytes(b"PK")
+            args = SimpleNamespace(server_jar=str(explicit))
+            with patch.object(
+                devstack,
+                "local_jars",
+                return_value={"blockfield-server.pw.toml": local},
+            ):
+                self.assertEqual(devstack.resolve_server_jar(args.server_jar), explicit)
+
+    def test_env_jar_used_when_no_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = Path(tmp) / "blockfield-server-9.9.9+mc1.21.1.jar"
+            jar.write_bytes(b"PK")
+            args = SimpleNamespace(server_jar=None)
+            with (
+                patch.object(devstack, "local_jars", return_value={}),
+                patch.dict(
+                    devstack.os.environ, {"BF_SERVER_JAR": str(jar)}, clear=True
+                ),
+            ):
+                self.assertEqual(devstack.resolve_server_jar(args.server_jar), jar)
+
+    def test_local_build_used_as_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = Path(tmp) / "blockfield-server-1.0+mc.jar"
+            jar.write_bytes(b"PK")
+            args = SimpleNamespace(server_jar=None)
+            with (
+                patch.object(
+                    devstack,
+                    "local_jars",
+                    return_value={"blockfield-server.pw.toml": jar},
+                ),
+                patch.dict(devstack.os.environ, {}, clear=True),
+            ):
+                self.assertEqual(devstack.resolve_server_jar(args.server_jar), jar)
+
+    def test_missing_jar_dies_loudly(self):
+        args = SimpleNamespace(server_jar=None)
+        with (
+            patch.object(devstack, "local_jars", return_value={}),
+            patch.dict(devstack.os.environ, {}, clear=True),
+        ):
+            with self.assertRaises(SystemExit):
+                devstack.resolve_server_jar(args.server_jar)
+
+    def test_non_runtime_jar_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = Path(tmp) / "blockfield-server-1.0-sources.jar"
+            jar.write_bytes(b"PK")
+            with self.assertRaises(SystemExit):
+                devstack.resolve_server_jar(str(jar))
+
+    def test_build_distribution_passes_server_jar_to_pack_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            modpack = home / "pack"
+            (modpack / "server").mkdir(parents=True)
+            jar = home / "blockfield-server-1.57.0+mc1.21.1.jar"
+            jar.write_bytes(b"PK")
+            seed = home / "seed.zip"
+            seed.write_bytes(b"seed")
+            with (
+                patch.object(devstack, "HOME", home),
+                patch.object(devstack, "ensure_localmods"),
+                patch.object(devstack, "fetch_mod_jars"),
+                patch.object(devstack, "fetch_world_seed", return_value=seed),
+                patch.object(devstack, "run_pack_build") as pack,
+            ):
+                devstack.build_distribution(modpack, modpack, jar)
+            args = pack.call_args.args[0]
+            self.assertIn("--server-jar", args)
+            self.assertEqual(args[args.index("--server-jar") + 1], jar)
+
+    def test_pack_build_forwards_server_jar_to_the_server_build(self):
+        pack_build = importlib.util.module_from_spec(
+            importlib.util.spec_from_file_location(
+                "pack_build_case", devstack.ROOT / "scripts/dev/pack_build.py"
+            )
+        )
+        pack_build.__spec__.loader.exec_module(pack_build)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "build-distribution.py").write_text(
+                "def resolve_mod(root, item, built):\n"
+                "    raise AssertionError('no pins in this tree')\n"
+                "def build(args):\n"
+                f"    __import__('pathlib').Path({str(root / 'seen.txt')!r}).write_text(\n"
+                "        repr((str(args.server_jar), args.no_server_jar)))\n"
+            )
+            seed = root / "seed.zip"
+            seed.write_bytes(b"seed")
+            jar = root / "blockfield-server-1.57.0+mc1.21.1.jar"
+            jar.write_bytes(b"PK")
+            out = root / "out"
+            out.mkdir()
+            pack_build.main(
+                [
+                    "server",
+                    "--root",
+                    str(root),
+                    "--out",
+                    str(out),
+                    "--server-source",
+                    str(root / "server"),
+                    "--world-seed",
+                    str(seed),
+                    "--build-id",
+                    "dev",
+                    "--server-jar",
+                    str(jar),
+                ]
+            )
+            self.assertEqual(
+                (root / "seen.txt").read_text(),
+                repr((str(jar), False)),
             )
 
 

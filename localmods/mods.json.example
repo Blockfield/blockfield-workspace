@@ -1,5 +1,5 @@
 {
-  "_comment": "Git submodules of blockfield-mod + forks, pinned by the workspace. Keys are localmods/ dirs; values map to the owning org repo and the pack metafiles that pin them.",
+  "_comment": "Git submodules of blockfield-mod + forks, pinned by the workspace. Keys are localmods/ dirs; values map to the owning org repo and the pack metafiles that pin them. blockfield-server.pw.toml is the localmods-internal id of the built server jar: the download pin is gone, the jar is built from mod-server and never downloaded.",
   "blockfield-mod": {
     "repo": "Blockfield/blockfield-mod",
     "client": "blockfield-client.pw.toml",

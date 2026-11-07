@@ -1064,6 +1064,33 @@ class RcBattery(unittest.TestCase):
         text = 'filename = "blockfield-server-1.57.0+mc1.21.1.jar"'
         self.assertEqual(rc.pin_version(text), "1.57.0")
 
+    def test_server_mod_source_reads_mod_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            props = Path(tmp) / "mod-server"
+            props.mkdir()
+            (props / "gradle.properties").write_text(
+                "minecraft_version=1.21.1\nmod_version=1.57.0\n",
+                encoding="utf-8",
+            )
+            (props / "upstream.properties").write_text(
+                "upstreamCommit=abc123\n", encoding="utf-8"
+            )
+            self.assertEqual(rc.server_mod_source(Path(tmp)), ("1.57.0", "abc123"))
+
+    def test_server_mod_source_missing_upstream_stays_optional(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            props = Path(tmp) / "mod-server"
+            props.mkdir()
+            (props / "gradle.properties").write_text(
+                "mod_version=1.57.0\n", encoding="utf-8"
+            )
+            self.assertEqual(rc.server_mod_source(Path(tmp)), ("1.57.0", None))
+
+    def test_server_mod_source_without_version_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                rc.server_mod_source(Path(tmp))
+
     def test_loaded_version_prefers_commit_pair(self):
         self.assertEqual(
             rc.loaded_version("§7[BlockField] 1.55.3 commit abc123"), "1.55.3"
@@ -1461,22 +1488,44 @@ class RcBattery(unittest.TestCase):
             def cmd(self, command):
                 return "§7[BlockField] 1.55.3 commit abc"
 
-        pin = 'filename = "blockfield-client-1.55.3+mc1.21.1.jar"'
-        with tempfile.TemporaryDirectory() as tmp:
-            client, server = Path(tmp) / "c.toml", Path(tmp) / "s.toml"
-            client.write_text(pin)
-            server.write_text(pin.replace("client", "server"))
-            rows, stop = rc.version_gate(
-                Rcon(), "1.55.3 commit abc", "- blockfield 1.55.3", client, server
+        def tree(version):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            client = Path(tmp.name) / "c.toml"
+            client.write_text('filename = "blockfield-client-1.55.3+mc1.21.1.jar"')
+            props = Path(tmp.name) / "server" / "mod-server"
+            props.mkdir(parents=True)
+            (props / "gradle.properties").write_text(
+                f"mod_version={version}\n", encoding="utf-8"
             )
+            return client, Path(tmp.name) / "server"
+
+        client, server = tree("1.55.3")
+        rows, stop = rc.version_gate(
+            Rcon(), "1.55.3 commit abc", "- blockfield 1.55.3", client, server
+        )
         self.assertFalse(stop)
         self.assertTrue(all(ok for _, ok, _ in rows))
+        client, server = tree("1.57.0")
+        rows, stop = rc.version_gate(Rcon(), "", "- blockfield 1.55.3", client, server)
+        self.assertTrue(stop)
+        self.assertTrue(any(not ok for _, ok, _ in rows))
+
+    def test_version_gate_rejects_unreadable_server_source(self):
+        class Rcon:
+            def cmd(self, command):
+                return "§7[BlockField] 1.55.3 commit abc"
+
+        pin = 'filename = "blockfield-client-1.55.3+mc1.21.1.jar"'
         with tempfile.TemporaryDirectory() as tmp:
-            client, server = Path(tmp) / "c.toml", Path(tmp) / "s.toml"
+            client = Path(tmp) / "c.toml"
             client.write_text(pin)
-            server.write_text(pin.replace("client-1.55.3", "server-1.57.0"))
             rows, stop = rc.version_gate(
-                Rcon(), "", "- blockfield 1.55.3", client, server
+                Rcon(),
+                "1.55.3 commit abc",
+                "- blockfield 1.55.3",
+                client,
+                Path(tmp) / "no-such-server",
             )
         self.assertTrue(stop)
         self.assertTrue(any(not ok for _, ok, _ in rows))
@@ -4169,14 +4218,14 @@ if __name__ == "__main__":
 
 class SeamCheckList(unittest.TestCase):
     def test_malformed_pin_skips_no_crash_no_false_fail(self):
-        # A malformed server pin (KeyError from pin_version) must SKIP the
+        # A malformed server mod source (no mod_version) must SKIP the
         # version rows, not crash with a traceback nor FAIL on pin=None.
         with tempfile.TemporaryDirectory() as home:
             root = Path(home)
-            mods = root / "server" / "mods"
-            mods.mkdir(parents=True)
-            (mods / "blockfield-server.pw.toml").write_text(
-                'name = "weird.jar"\n', encoding="utf-8"
+            props = root / "server" / "mod-server"
+            props.mkdir(parents=True)
+            (props / "gradle.properties").write_text(
+                "minecraft_version=1.21.1\n", encoding="utf-8"
             )
             args = SimpleNamespace(
                 rcon_host="127.0.0.1",
@@ -4192,6 +4241,33 @@ class SeamCheckList(unittest.TestCase):
             with patch.object(seam, "public_json", side_effect=OSError("offline")):
                 rows = seam.version_rows(args, root, lambda *a: Rcon())
         self.assertEqual([ok for _, ok, _ in rows[:2]], [None, None], rows)
+
+    def test_version_matches_mod_server_source(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            props = root / "server" / "mod-server"
+            props.mkdir(parents=True)
+            (props / "gradle.properties").write_text(
+                "mod_version=1.57.0\n", encoding="utf-8"
+            )
+            (props / "upstream.properties").write_text(
+                "upstreamCommit=abc123def456\n", encoding="utf-8"
+            )
+            args = SimpleNamespace(
+                rcon_host="127.0.0.1",
+                rcon_port=1,
+                rcon_password="pw",
+                tag_prod=None,
+            )
+
+            class Rcon:
+                def cmd(self, command):
+                    return "1.57.0 commit abc"
+
+            with patch.object(seam, "public_json", return_value={"build": "v9.9.9"}):
+                rows = seam.version_rows(args, root, lambda *a: Rcon())
+        self.assertTrue(rows[0][1], rows)
+        self.assertIn("1.57.0", rows[0][2])
 
     def fake_probe(self, motd="BLOCKFIELD"):
         return SimpleNamespace(

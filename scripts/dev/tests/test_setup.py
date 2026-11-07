@@ -134,7 +134,7 @@ class Setup(unittest.TestCase):
             (second / "mc/libraries/library.jar").read_bytes(), b"private change"
         )
 
-    def build_server(self, _pack, _client_pack):
+    def build_server(self, _pack, _client_pack, _server_jar=None):
         out = self.home / "dist"
         built = out / "server"
         for name in ("mods", "config", "world", "blockfield", "maps"):

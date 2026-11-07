@@ -825,14 +825,16 @@ def _restore_missing(src, dst):
 def wire_hooks(root):
     """Point one checkout at its versioned hooks so pushes run the fast checks.
 
-    Only sets core.hooksPath when it is unset; an explicit choice is left
-    alone. Best-effort: a checkout without git must not break setup.
+    Only sets the repo-local core.hooksPath when it is unset; an explicit
+    repo choice is left alone. Best-effort: a checkout without git or hooks
+    must not break setup. Never touches an outer repo: subtrees without their
+    own .git are left alone.
     """
-    if not (root / ".githooks").is_dir():
+    if not (root / ".git").exists() or not (root / ".githooks").is_dir():
         return False
     try:
         current = subprocess.run(
-            ["git", "config", "--get", "core.hooksPath"],
+            ["git", "config", "--local", "--get", "core.hooksPath"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -844,7 +846,7 @@ def wire_hooks(root):
         return False
     try:
         subprocess.run(
-            ["git", "config", "core.hooksPath", ".githooks"],
+            ["git", "config", "--local", "core.hooksPath", ".githooks"],
             cwd=root,
             check=True,
         )
@@ -878,13 +880,19 @@ def patch_dev_skinrestorer():
 
 def setup(args):
     wired = [str(ROOT)] if wire_hooks(ROOT) else []
+    if (ROOT / ".githooks").is_dir() and not wired:
+        die(f"cannot wire versioned hooks in {ROOT}: fix git config access")
     for sub in [
         ROOT / "server",
         ROOT / "client",
         *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
     ]:
-        if sub.is_dir() and wire_hooks(sub):
+        if not sub.is_dir():
+            continue
+        if wire_hooks(sub):
             wired.append(str(sub.relative_to(ROOT)))
+        elif (sub / ".githooks").is_dir():
+            die(f"cannot wire versioned hooks in {sub}: fix git config access")
     if wired:
         ok(
             f"pushes run .githooks/pre-push in: {', '.join(wired)} (bypass: --no-verify)"

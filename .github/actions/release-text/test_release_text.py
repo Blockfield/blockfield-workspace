@@ -833,6 +833,7 @@ class MergedPrs(unittest.TestCase):
             commit("Merge pull request #1 from a/b"),
             commit("Merge pull request #2 from a/c"),
             commit("Merge pull request #3 from a/d"),
+            commit("Speed up saves (#4)"),
         ]
         footer = (
             "<!-- codesmith:footer -->\n---\nBlacksmith\n<!-- /codesmith:footer -->"
@@ -851,6 +852,8 @@ class MergedPrs(unittest.TestCase):
             number = int(args[1].rsplit("/", 1)[1])
             if number == 3:
                 raise subprocess.CalledProcessError(1, ["gh"], stderr=b"HTTP 403")
+            if number == 4:
+                raise subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 404")
             return json.dumps(bodies[number])
 
         pr_commits = [

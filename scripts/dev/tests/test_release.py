@@ -246,6 +246,7 @@ class PinOverrides(unittest.TestCase):
         said = self.run_pin({"client": "a" * 40, "server": None})
         self.assertIn("skip server: the workspace does not pin it", said)
 
+
 class Ship(unittest.TestCase):
     def ship_args(self, **kw):
         base = dict(

@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from toolchain import canonical_python, child_env, tool  # noqa: E402
 
 ORG = "Blockfield"
+SERVER_PIN = "pins/server.sha"
 MOD_REPO = f"{ORG}/blockfield-mod"
 WORKSPACE_REPO = f"{ORG}/blockfield-workspace"
 SIDES = ("client", "server")
@@ -996,7 +997,12 @@ def cmd_pin(args):
 
     def pinned(path):
         out = git(ROOT, "ls-tree", base, path)
-        return out.split()[2] if out.startswith("160000") else None
+        if out.startswith("160000"):
+            return out.split()[2]
+        if path == "server":
+            # The public workspace pins the private server by file, not gitlink.
+            return git(ROOT, "show", f"{base}:{SERVER_PIN}").strip() or None
+        return None
 
     def advance(path, tag, label):
         repo = ROOT / path
@@ -1007,9 +1013,8 @@ def cmd_pin(args):
             return
         current = changes.get(path, (pinned(path),))[0]
         if current is None:
-            # The public workspace no longer tracks the private server as a submodule.
             if path not in skipped:
-                say(f"skip {path}: not a submodule of the workspace")
+                say(f"skip {path}: the workspace does not pin it")
             skipped.add(path)
             return
         sha = tag_commit(repo, tag)
@@ -1046,6 +1051,10 @@ def cmd_pin(args):
     )
     with worktree(ROOT, base, branch) as tree:
         for path, (sha, _) in changes.items():
+            if path == "server" and not git(tree, "ls-tree", base, path):
+                (tree / SERVER_PIN).write_text(sha + "\n", encoding="utf-8")
+                git(tree, "add", SERVER_PIN)
+                continue
             git(tree, "update-index", "--add", "--cacheinfo", f"160000,{sha},{path}")
         say(git(tree, "diff", "--cached", "--stat"))
         say(f"+ git commit -m {shlex.quote(title)}   [in {tree}]")

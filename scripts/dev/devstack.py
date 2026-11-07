@@ -856,7 +856,9 @@ def wire_hooks(root):
             check=True,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        print(f"warning: cannot wire versioned hooks in {root}: {error}")
+        print(
+            f"warning: cannot wire versioned hooks in {root}: {error}", file=sys.stderr
+        )
         return False
     return True
 

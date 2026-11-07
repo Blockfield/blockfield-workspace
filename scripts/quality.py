@@ -81,20 +81,23 @@ def wire_hooks(root=ROOT):
         if outer:
             print(
                 f"warning: superseding outer core.hooksPath {outer!r} with "
-                "versioned .githooks for this checkout"
+                "versioned .githooks for this checkout",
+                file=sys.stderr,
             )
         return True
     if local:
         print(
             f"warning: keeping explicit core.hooksPath {local!r}; "
-            "versioned .githooks not wired"
+            "versioned .githooks not wired",
+            file=sys.stderr,
         )
         return False
     outer = _outer_hooks_path(root)
     if outer:
         print(
             f"warning: superseding outer core.hooksPath {outer!r} with "
-            "versioned .githooks for this checkout"
+            "versioned .githooks for this checkout",
+            file=sys.stderr,
         )
     try:
         subprocess.run(
@@ -104,9 +107,13 @@ def wire_hooks(root=ROOT):
             env=child_env(),
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        print(f"warning: cannot wire versioned hooks in {root}: {error}")
+        print(
+            f"warning: cannot wire versioned hooks in {root}: {error}", file=sys.stderr
+        )
         return False
-    print("git pushes now run .githooks/pre-push (bypass: --no-verify)")
+    print(
+        "git pushes now run .githooks/pre-push (bypass: --no-verify)", file=sys.stderr
+    )
     return True
 
 

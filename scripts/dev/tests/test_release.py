@@ -259,7 +259,11 @@ class Ship(unittest.TestCase):
         )
         self.assertIn(("watched", "client"), calls)
         self.assertFalse(any(c[0] == "published" for c in calls))
-        self.assertFalse(any(c[0] == "deploy" for c in calls))
+        # Probes wait for /api/rooms to serve the tag, which only Deploy client does.
+        self.assertEqual([c[1] for c in calls if c[0] == "deploy"], ["client"])
+        kinds = [c[0] for c in calls]
+        self.assertLess(kinds.index("watched"), kinds.index("deploy"))
+        self.assertLess(kinds.index("deploy"), kinds.index("probes"))
 
     def test_server_only_ships_game_without_workshop(self):
         calls = []
@@ -656,12 +660,15 @@ class Ship(unittest.TestCase):
                 "watched",
                 "run",
                 "watched",
+                "deploy",
                 "probes",
                 "pin",
                 "green",
                 "merge",
             ],
         )
+        # The client tag run is a publish-only stub: serving needs the dispatch.
+        self.assertEqual([c[1] for c in calls if c[0] == "deploy"], ["client"])
         tagged = [c[1] for c in calls if c[0] == "tag"]
         self.assertEqual(tagged, ["server", "client"])
         gate = kinds.index("gate")

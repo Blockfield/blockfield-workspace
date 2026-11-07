@@ -12,6 +12,7 @@
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -394,7 +395,9 @@ def fetch_tag(repo_root, repository, tag):
             **os.environ,
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+            # git over HTTPS rejects Bearer for user tokens; Basic is what checkout uses.
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic "
+            + base64.b64encode(f"x-access-token:{token}".encode()).decode(),
         },
         stderr=subprocess.PIPE,
     )

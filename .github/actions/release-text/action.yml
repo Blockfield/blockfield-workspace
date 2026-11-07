@@ -20,6 +20,9 @@ inputs:
   build-json:
     description: Path to this build's build.json for the client-fingerprint check (client)
     default: ""
+  fresh:
+    description: "true regenerates the text even when the release already has it (release mode)"
+    default: "false"
   pr-number:
     description: Pull request number (pr mode)
     default: ${{ github.event.pull_request.number }}
@@ -47,11 +50,13 @@ runs:
         OUT_DIR: ${{ inputs.out-dir }}
         SOURCE_REPOSITORY: ${{ inputs.source-repository }}
         BUILD_JSON: ${{ inputs.build-json }}
+        FRESH: ${{ inputs.fresh }}
         PR_NUMBER: ${{ inputs.pr-number }}
       run: |
         if [ "$MODE" = release ]; then
           args=(release --repository "$REPOSITORY" --version "$VERSION" --kind "$KIND" --out-dir "$OUT_DIR" --source-repository "$SOURCE_REPOSITORY")
           [ -n "$BUILD_JSON" ] && args+=(--build-json "$BUILD_JSON")
+          [ "$FRESH" = true ] && args+=(--fresh)
         else
           args=(pr --repository "$REPOSITORY" --pr-number "$PR_NUMBER")
         fi

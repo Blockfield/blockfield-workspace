@@ -260,7 +260,9 @@ def merged_prs(
         try:
             pr = json.loads(gh("api", f"repos/{source}/pulls/{number}"))
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-            gaps.append(f"PR #{number} не получен ({describe(exc)})")
+            # A direct push titled "... (#N)" may name an issue, not a PR: nothing is missing.
+            if "HTTP 404" not in describe(exc):
+                gaps.append(f"PR #{number} не получен ({describe(exc)})")
             continue
         if (pr.get("user") or {}).get("type") == "Bot":
             continue

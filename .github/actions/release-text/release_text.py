@@ -33,6 +33,7 @@ ATTEMPTS = 2
 FRONT_KIND = {
     "client": "client",
     "server": "server",
+    "launcher": "launcher",
     "mod": "mod",
     "decor": "mod",
     "proxy": "server",
@@ -225,6 +226,12 @@ def split_footer(body):
     return author.strip(), found.group(0) if found else ""
 
 
+def attribution_line(body):
+    """The agent's signature line, preserved verbatim when the action rewrites a body."""
+    found = ATTRIBUTION.search(body or "")
+    return f"\n\n{found.group(0).strip()}" if found else ""
+
+
 def pr_commits(source, number, gaps):
     """Заголовки коммитов PR: в них часть сути, которую описание PR не называет."""
     try:
@@ -367,6 +374,53 @@ def server_pin(previous_release, gaps):
     }
 
 
+def server_range(server_releases, since):
+    """(серверный тег на момент since, последний серверный тег); since — published_at прошлого анонса."""
+    line = [
+        (rn.version_key(r["tag_name"]), r)
+        for r in server_releases
+        if rn.comparable(rn.version_key(r["tag_name"]), ("v", ()))
+    ]
+    if not line:
+        return None, None
+    before = [(k, r["tag_name"]) for k, r in line if r["published_at"] <= since]
+    newest = max(line, key=lambda kr: kr[0])[1]["tag_name"]
+    return (max(before)[1] if before else None), newest
+
+
+def launcher_server_pin(previous_release, gaps):
+    """Изменения сервера после прошлого релиза лаунчера, как пин `blockfield-server`.
+
+    Окно — по серверным тегам (server_range), а не по коммитам main: у лаунчера нет
+    парного выпуска, и релизы сервера идут своей линией.
+    """
+    try:
+        old, new = server_range(
+            published_releases(SERVER_REPOSITORY), previous_release["published_at"]
+        )
+    except Exception as exc:
+        gaps.append(f"изменения сервера не собраны ({describe(exc)})")
+        return None
+    if not old or not new:
+        gaps.append("изменения сервера не собраны: нет серверного релиза до прошлого")
+        return None
+    if old == new:
+        return None
+    # Только PR самого сервера: его release-notes пересказывают мод, который клиент уже описал своим пином.
+    try:
+        prs = merged_prs(SERVER_REPOSITORY, old, new, gaps, PIN_PR_BODY_CHARS)
+    except Exception as exc:
+        gaps.append(f"{SERVER_NAME}: слитые PR не получены ({describe(exc)})")
+        prs = []
+    return {
+        "name": SERVER_NAME,
+        "change": "update",
+        "text": f"{SERVER_NAME}: {old} → {new}",
+        "component_notes": [],
+        "pull_requests": prs,
+    }
+
+
 def fetch_tag(repo_root, repository, tag):
     """Один тег shallow-подтянуть тем же токеном, что у gh (GH_TOKEN).
     Токен идёт через env, а не в URL, чтобы describe() не унёс его в журнал."""
@@ -467,6 +521,12 @@ def collect_facts(a, releases):
             )
     if a.kind == "client":
         server = server_pin(
+            next(r for r in releases if r["tag_name"] == previous), gaps
+        )
+        if server:
+            facts["pins"].append(server)
+    elif a.kind == "launcher":
+        server = launcher_server_pin(
             next(r for r in releases if r["tag_name"] == previous), gaps
         )
         if server:
@@ -1252,11 +1312,12 @@ def run_pr(a):
     if not body:
         return
     # Автор мог изменить описание, пока шла генерация: тогда его текст важнее.
-    current, footer = split_footer(
-        json.loads(gh("api", f"repos/{repo}/pulls/{number}")).get("body")
-    )
+    latest = json.loads(gh("api", f"repos/{repo}/pulls/{number}")).get("body")
+    current, footer = split_footer(latest)
     if current != author:
         return
+    if getattr(a, "keep_attribution", False):
+        body += attribution_line(latest)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp, "body.md")
         path.write_text(
@@ -1304,6 +1365,11 @@ def main(argv=None):
     )
     r.add_argument("--date", default=datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     sub.choices["pr"].add_argument("--pr-number", required=True, type=int)
+    sub.choices["pr"].add_argument(
+        "--keep-attribution",
+        action="store_true",
+        help="сохранить строку-подпись агента в конце описания PR",
+    )
     a = parser.parse_args(argv)
     try:
         if a.mode == "release":

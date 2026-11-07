@@ -10,7 +10,7 @@ inputs:
   version:
     description: Release tag (release mode)
   kind:
-    description: client, server, mod, decor or proxy (release mode)
+    description: client, server, launcher, mod, decor or proxy (release mode)
   out-dir:
     description: Directory for release-notes.md and announcement.json (release mode)
     default: release-text
@@ -26,6 +26,9 @@ inputs:
   pr-number:
     description: Pull request number (pr mode)
     default: ${{ github.event.pull_request.number }}
+  keep-attribution:
+    description: "true keeps the agent signature line when rewriting a PR body (pr mode)"
+    default: "false"
   github-token:
     description: Token that reads the release repository, component releases and pull requests
     default: ${{ github.token }}
@@ -52,6 +55,7 @@ runs:
         BUILD_JSON: ${{ inputs.build-json }}
         FRESH: ${{ inputs.fresh }}
         PR_NUMBER: ${{ inputs.pr-number }}
+        KEEP_ATTRIBUTION: ${{ inputs.keep-attribution }}
       run: |
         if [ "$MODE" = release ]; then
           args=(release --repository "$REPOSITORY" --version "$VERSION" --kind "$KIND" --out-dir "$OUT_DIR" --source-repository "$SOURCE_REPOSITORY")
@@ -59,5 +63,6 @@ runs:
           [ "$FRESH" = true ] && args+=(--fresh)
         else
           args=(pr --repository "$REPOSITORY" --pr-number "$PR_NUMBER")
+          [ "$KEEP_ATTRIBUTION" = true ] && args+=(--keep-attribution)
         fi
         python3 "$GITHUB_ACTION_PATH/release_text.py" "${args[@]}"

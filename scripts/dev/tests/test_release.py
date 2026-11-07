@@ -161,10 +161,10 @@ class Ancestor(unittest.TestCase):
 
 
 class PinOverrides(unittest.TestCase):
-    def run_pin(self, pinned):
-        root = Path(tempfile.mkdtemp(prefix="bf-release-pin-"))
+    def run_pin(self, pinned, server_file=""):
+        root = self.root = Path(tempfile.mkdtemp(prefix="bf-release-pin-"))
         self.addCleanup(shutil.rmtree, root, True)
-        for path in ("client", "server", "localmods/blockfield-mod"):
+        for path in ("client", "server", "localmods/blockfield-mod", "pins"):
             (root / path / ".git").mkdir(parents=True)
         shas = {
             "v2.69.1": "c" * 40,
@@ -178,6 +178,11 @@ class PinOverrides(unittest.TestCase):
                 path = args[-1]
                 sha = pinned.get(path, "0" * 40)
                 return f"160000 commit {sha}\t{path}" if sha else ""
+            if "show" in args:
+                # git show fails outright when base has no pins/server.sha.
+                return mock.Mock(
+                    returncode=0 if server_file else 128, stdout=server_file
+                )
             return ""
 
         import contextlib
@@ -229,11 +234,20 @@ class PinOverrides(unittest.TestCase):
             said,
         )
 
-    def test_server_that_is_not_a_submodule_is_skipped(self):
-        # The public workspace dropped the private server submodule; pinning
-        # crashed on its missing gitlink after 2.79.6 shipped.
+    def test_server_pin_file_advances(self):
+        # The public workspace pins the private server in pins/server.sha;
+        # pinning used to crash, then skip it, leaving the file stale.
+        said = self.run_pin(
+            {"client": "a" * 40, "server": None}, server_file="b" * 40 + "\n"
+        )
+        self.assertEqual(
+            (self.root / "pins/server.sha").read_text(encoding="utf-8"), "d" * 40 + "\n"
+        )
+        self.assertTrue(any("server 2.69.2" in line for line in said), said)
+
+    def test_unpinned_server_is_skipped(self):
         said = self.run_pin({"client": "a" * 40, "server": None})
-        self.assertIn("skip server: not a submodule of the workspace", said)
+        self.assertIn("skip server: the workspace does not pin it", said)
 
 
 class Ship(unittest.TestCase):

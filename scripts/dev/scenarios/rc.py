@@ -106,6 +106,35 @@ def pin_version(text):
     return match.group(1)
 
 
+def server_mod_source(server_root):
+    """(mod_version, upstreamCommit) from the server checkout's mod-server sources.
+
+    The download pin (server/mods/blockfield-server.pw.toml) is gone: the Game
+    image jar is built from mod-server (:server:remapJar), so gradle.properties
+    mod_version and upstream.properties upstreamCommit are the source of truth.
+    """
+    server_root = Path(server_root)
+    try:
+        props = (server_root / "mod-server" / "gradle.properties").read_text(
+            encoding="utf-8"
+        )
+    except OSError as error:
+        raise ValueError(f"server mod source unreadable: {error}") from error
+    match = re.search(r"^mod_version=(.+)$", props, re.MULTILINE)
+    if not match:
+        raise ValueError("no mod_version in server mod-server/gradle.properties")
+    try:
+        upstream = (server_root / "mod-server" / "upstream.properties").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        upstream_commit = None
+    else:
+        found = re.search(r"^upstreamCommit=(.+)$", upstream, re.MULTILINE)
+        upstream_commit = found.group(1).strip() if found else None
+    return match.group(1).strip(), upstream_commit
+
+
 def loaded_version(reply):
     """Version from a `bf version` reply (`<ver> commit <sha>`, pack prefix optional)."""
     match = VERSION_RE.search(reply or "")
@@ -177,8 +206,13 @@ def scan_errors(text, allow=()):
     return out
 
 
-def version_gate(rcon, server_log, client_log, client_pin, server_pin):
-    """First RC step: loaded server/client mod must equal the workspace pins."""
+def version_gate(rcon, server_log, client_log, client_pin, server_root):
+    """First RC step: loaded server/client mod must equal the workspace pins.
+
+    client_pin is the client metafile path; server_root is the server checkout
+    dir, whose mod-server sources carry the expected mod_version (the download
+    pin is gone, never a download).
+    """
     out = []
     try:
         server_loaded = loaded_version(rcon.cmd("bf version"))
@@ -191,7 +225,7 @@ def version_gate(rcon, server_log, client_log, client_pin, server_pin):
         return out, True
     try:
         want_client = pin_version(Path(client_pin).read_text(encoding="utf-8"))
-        want_server = pin_version(Path(server_pin).read_text(encoding="utf-8"))
+        want_server, _upstream = server_mod_source(server_root)
     except (OSError, KeyError, ValueError) as error:
         out.append(("versions pins readable", False, str(error)[:160]))
         return out, True
@@ -552,7 +586,7 @@ def run(
             if client_log_path.is_file()
             else "",
             ROOT / "client" / "mods" / "blockfield-client.pw.toml",
-            ROOT / "server" / "mods" / "blockfield-server.pw.toml",
+            ROOT / "server",
         )
         rows += gate
         if stop:

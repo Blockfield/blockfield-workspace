@@ -36,6 +36,16 @@ class Ownership(unittest.TestCase):
             modmap.owner("blockfield-server.pw.toml", mapping), "blockfield-mod"
         )
 
+    def test_gone_server_pin_has_no_pin_tag(self):
+        # The download pin is gone: without server/mods/blockfield-server.pw.toml
+        # there is no pin tag, so the local build is always the newest source.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "server" / "mods").mkdir(parents=True)
+            self.assertIsNone(
+                modmap.pin_tag_for(root, "server", "blockfield-server.pw.toml")
+            )
+
     def test_dropped_fork_has_no_owner(self):
         mapping = modmap.load_mapping(EXAMPLE)
         self.assertNotIn("sbw-drone-warfare-fabric", mapping)

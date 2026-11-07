@@ -715,6 +715,11 @@ class PortablemcEnvironment(unittest.TestCase):
             patch.object(
                 devstack, "fetch_world_seed", return_value=Path(tmp) / "seed.zip"
             ),
+            patch.object(
+                devstack,
+                "resolve_server_jar",
+                return_value=Path(tmp) / "blockfield-server-1.0+mc.jar",
+            ) as jar,
             patch.object(devstack, "run_pack_build") as build,
         ):
             checkout = Path(tmp) / "server checkout"
@@ -726,6 +731,9 @@ class PortablemcEnvironment(unittest.TestCase):
                 checkout.resolve() / "server",
             )
             self.assertEqual(build.call_args.kwargs["cwd"], checkout)
+            self.assertEqual(
+                command[command.index("--server-jar") + 1], jar.return_value
+            )
 
     def test_wrong_cached_version_is_rebuilt_using_this_python(self):
         sys.path.insert(0, str(bf.ROOT / "scripts/dev"))

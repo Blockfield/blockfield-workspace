@@ -471,51 +471,97 @@ def pinned_jar_ok(jar, metadata):
     return hashlib.new(algorithm, jar.read_bytes()).hexdigest() == expected
 
 
+def resolve_server_jar(explicit=None):
+    """Blockfield server jar for the stand: explicit Boat/CI build or the localmods build.
+
+    The download pin is gone: the jar is built from mod-server (:server:remapJar),
+    never downloaded. Precedence: explicit path, BF_SERVER_JAR, localmods/ build.
+    """
+    explicit = explicit or os.environ.get("BF_SERVER_JAR")
+    if explicit:
+        jar = Path(explicit)
+        if not jar.is_file():
+            die(f"no server jar at {jar}: pass a :server:remapJar output")
+        if not (
+            jar.name.startswith("blockfield-server-")
+            and jar.name.endswith(".jar")
+            and runtime_jar_name(jar.name)
+        ):
+            die(f"not a server runtime jar: {jar.name}")
+        return jar
+    jar = local_jars(ROOT).get("blockfield-server.pw.toml")
+    if jar and jar.is_file():
+        return jar
+    die(
+        "no server jar: run `just build-mods blockfield-mod` (Gradle runs on a Boat VM,"
+        " never here), or pass --server-jar with a :server:remapJar output (BF_SERVER_JAR)"
+    )
+
+
+def server_jar_current(resolved):
+    """True when the installed stand server jar is byte-identical to the resolved jar.
+
+    An explicit --server-jar/BF_SERVER_JAR must replace the installed runtime
+    when it differs: presence alone is not enough (a same-version rebuild is a
+    different artifact). Anything but exactly one identical jar rebuilds.
+    """
+    candidates = sorted((SERVER / "mods").glob("blockfield-server-*.jar"))
+    if len(candidates) != 1:
+        return False
+    try:
+        return (
+            hashlib.sha256(candidates[0].read_bytes()).hexdigest()
+            == hashlib.sha256(resolved.read_bytes()).hexdigest()
+        )
+    except OSError:
+        return False
+
+
 def fetch_mod_jars(modpack, client_pack=None):
     """Same pins as CI's fetch-mod-release.sh, without needing a POSIX shell.
 
     Server pack owns files/mods/; per-side metafiles live in their submodules.
-    Metafiles covered by a localmods/ build are skipped: the jar comes from sources."""
+    Metafiles covered by a localmods/ build are skipped: the jar comes from sources.
+    The server mod jar is never downloaded: it is built from mod-server
+    (see resolve_server_jar()) and enters the distribution through --server-jar.
+    """
     client_pack = client_pack or CLIENT_PACK
     local = local_jars(ROOT)
     (modpack / "files" / "mods").mkdir(parents=True, exist_ok=True)
-    for side, pack in (("client", client_pack), ("server", modpack)):
-        if f"blockfield-{side}.pw.toml" in local:
-            continue
-        name = pinned_jar_name(pack, side)
-        metadata = pack / "mods" / f"blockfield-{side}.pw.toml"
-        if pinned_jar_ok(modpack / "files" / "mods" / name, metadata):
-            continue
-        tag = "v" + name.removeprefix(f"blockfield-{side}-").split("+")[0].removesuffix(
-            ".jar"
-        )
-        # Релизы до 2026-09-27 остались в архивном форке netherg-io/blockfield-mod.
-        for repo in ("Blockfield/blockfield-mod", "netherg-io/blockfield-mod"):
-            try:
-                run(
-                    [
-                        "gh",
-                        "release",
-                        "download",
-                        tag,
-                        "--repo",
-                        repo,
-                        "-p",
-                        name,
-                        "-D",
-                        "files/mods",
-                        "--clobber",
-                    ],
-                    cwd=modpack,
-                    message=f"Downloading {name} from {repo}",
-                )
-            except SystemExit:
-                continue
-            break
-        else:
-            raise SystemExit(f"{name}: release {tag} not found")
+    if "blockfield-client.pw.toml" not in local:
+        name = pinned_jar_name(client_pack, "client")
+        metadata = client_pack / "mods" / "blockfield-client.pw.toml"
         if not pinned_jar_ok(modpack / "files" / "mods" / name, metadata):
-            raise SystemExit(f"{name}: downloaded jar does not match the pin hash")
+            tag = "v" + name.removeprefix("blockfield-client-").split("+")[
+                0
+            ].removesuffix(".jar")
+            # Релизы до 2026-09-27 остались в архивном форке netherg-io/blockfield-mod.
+            for repo in ("Blockfield/blockfield-mod", "netherg-io/blockfield-mod"):
+                try:
+                    run(
+                        [
+                            "gh",
+                            "release",
+                            "download",
+                            tag,
+                            "--repo",
+                            repo,
+                            "-p",
+                            name,
+                            "-D",
+                            "files/mods",
+                            "--clobber",
+                        ],
+                        cwd=modpack,
+                        message=f"Downloading {name} from {repo}",
+                    )
+                except SystemExit:
+                    continue
+                break
+            else:
+                raise SystemExit(f"{name}: release {tag} not found")
+            if not pinned_jar_ok(modpack / "files" / "mods" / name, metadata):
+                raise SystemExit(f"{name}: downloaded jar does not match the pin hash")
     name = pinned_jar_name(client_pack, "music")
     if not pinned_jar_ok(
         modpack / "files" / "mods" / name,
@@ -607,7 +653,7 @@ def enable_proxy_mods():
             jar.replace(SERVER / "mods" / jar.name)
 
 
-def build_distribution(modpack, client_pack=None):
+def build_distribution(modpack, client_pack=None, server_jar=None):
     """Same build CI runs: mods, configs and a complete server tree."""
     ensure_localmods()
     if client_pack is None:
@@ -615,22 +661,27 @@ def build_distribution(modpack, client_pack=None):
     else:
         fetch_mod_jars(modpack, client_pack)
     seed = fetch_world_seed(modpack)
+    jar = resolve_server_jar(server_jar)
     out = HOME / "dist"
     shutil.rmtree(out, ignore_errors=True)
     HOME.mkdir(parents=True, exist_ok=True)
+    pack_args = [
+        "--root",
+        modpack,
+        "--out",
+        out,
+        "--server-source",
+        modpack.resolve() / "server",
+        "--world-seed",
+        seed,
+        "--build-id",
+        "dev",
+    ]
+    # The game image jar is built from mod-server, never downloaded; older
+    # build-distribution.py ignores the extra namespace entries.
+    pack_args += ["--server-jar", jar]
     run_pack_build(
-        [
-            "--root",
-            modpack,
-            "--out",
-            out,
-            "--server-source",
-            modpack.resolve() / "server",
-            "--world-seed",
-            seed,
-            "--build-id",
-            "dev",
-        ],
+        pack_args,
         cwd=modpack,
         side="server",
     )
@@ -836,8 +887,16 @@ def setup(args):
     step("2/4  Server pack")
     with progress("Checking installed server files"):
         ready = not args.force and server_runtime_ready()
+    explicit = getattr(args, "server_jar", None) or os.environ.get("BF_SERVER_JAR")
+    if ready and explicit and not server_jar_current(resolve_server_jar(explicit)):
+        # The explicit jar decides too: a prepared stand keeps serving its old
+        # binary unless the installed bytes equal the requested ones. A bad
+        # explicit path dies here, never as a silent ready.
+        ready = False
     if not ready:
-        out = build_distribution(modpack, client_pack)
+        out = build_distribution(
+            modpack, client_pack, getattr(args, "server_jar", None)
+        )
         built = out / "server"
         if not built.is_dir():
             die(f"build-distribution.py produced no server tree in {out}")
@@ -2771,6 +2830,14 @@ def main():
         "--force",
         action="store_true",
         help="refresh runtime files, preserving worlds and client user data",
+    )
+    p.add_argument(
+        "--server-jar",
+        default=None,
+        metavar="JAR",
+        help="Boat/CI-built blockfield-server jar (:server:remapJar output) for the stand"
+        " (default: the localmods/ build; never downloaded; an explicit jar that"
+        " differs from the installed one rebuilds the stand)",
     )
     p.set_defaults(func=setup)
 

@@ -134,7 +134,7 @@ class Setup(unittest.TestCase):
             (second / "mc/libraries/library.jar").read_bytes(), b"private change"
         )
 
-    def build_server(self, _pack, _client_pack):
+    def build_server(self, _pack, _client_pack, _server_jar=None):
         out = self.home / "dist"
         built = out / "server"
         for name in ("mods", "config", "world", "blockfield", "maps"):
@@ -516,6 +516,67 @@ class Setup(unittest.TestCase):
         self.assertEqual(args.testbot, "bot.jar")
         self.assertTrue(args.force)
         self.assertFalse(self.home.exists())
+
+    def prepare_ready_server_jar(self, installed):
+        """A prepared stand whose manifest covers the installed server jar."""
+        devstack.setup(self.args)
+        jar = self.server / "mods/blockfield-server-1.jar"
+        jar.write_bytes(installed)
+        receipt = self.server / "build.json"
+        manifest = json.loads(receipt.read_text())
+        manifest["mods"].append(
+            {
+                "path": "mods/blockfield-server-1.jar",
+                "sha256": hashlib.sha256(installed).hexdigest(),
+            }
+        )
+        receipt.write_text(json.dumps(manifest))
+        self.assertTrue(devstack.server_runtime_ready())
+        return jar
+
+    def test_explicit_server_jar_with_same_bytes_keeps_ready_runtime(self):
+        installed = b"installed server jar"
+        with patch.dict(devstack.os.environ):
+            devstack.os.environ.pop("BF_SERVER_JAR", None)
+            self.prepare_ready_server_jar(installed)
+            explicit = self.root / "blockfield-server-1.57.0+mc1.21.1.jar"
+            explicit.write_bytes(installed)
+            self.args.server_jar = str(explicit)
+            self.server_build.reset_mock()
+            devstack.setup(self.args)
+            self.server_build.assert_not_called()
+
+    def test_explicit_server_jar_with_new_bytes_rebuilds_ready_runtime(self):
+        with patch.dict(devstack.os.environ):
+            devstack.os.environ.pop("BF_SERVER_JAR", None)
+            self.prepare_ready_server_jar(b"installed server jar")
+            explicit = self.root / "blockfield-server-1.57.0+mc1.21.1.jar"
+            explicit.write_bytes(b"boat-built server jar")
+            self.args.server_jar = str(explicit)
+            self.server_build.reset_mock()
+            devstack.setup(self.args)
+            self.server_build.assert_called_once()
+
+    def test_missing_explicit_server_jar_fails_loudly_on_ready_runtime(self):
+        with patch.dict(devstack.os.environ):
+            devstack.os.environ.pop("BF_SERVER_JAR", None)
+            self.prepare_ready_server_jar(b"installed server jar")
+            self.args.server_jar = str(self.root / "no-such.jar")
+            self.server_build.reset_mock()
+            with self.assertRaises(SystemExit):
+                devstack.setup(self.args)
+            self.server_build.assert_not_called()
+
+    def test_server_jar_current_needs_exactly_one_matching_jar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mods = Path(tmp) / "mods"
+            mods.mkdir()
+            jar = mods / "blockfield-server-1.jar"
+            jar.write_bytes(b"a")
+            with patch.object(devstack, "SERVER", Path(tmp)):
+                self.assertFalse(devstack.server_jar_current(Path(tmp) / "nope.jar"))
+                (mods / "blockfield-server-2.jar").write_bytes(b"a")
+                self.assertFalse(devstack.server_jar_current(jar))
 
 
 if __name__ == "__main__":

@@ -320,7 +320,9 @@ Carpet не входит. Чтобы добавить его в существу
 сборки `blockfield-mod` (`just build-mods blockfield-mod`; Gradle — только на Boat VM)
 или из `--server-jar`/`BF_SERVER_JAR` (Boat/CI-сборка `:server:remapJar`, входит
 в дистрибутив через `--server-jar` серверного `build-distribution.py`), а версию
-сверяет с `mod_version` из `server/mod-server/gradle.properties`.
+сверяет с `mod_version` из `server/mod-server/gradle.properties`. Явно указанный
+JAR (`--server-jar`/`BF_SERVER_JAR`) тоже решает, пересобирать ли стенд: байты
+установленного JAR сравниваются с запрошенными, расхождение пересобирает runtime.
 Для каждого мода стенд сравнивает checkout с пином из metafile (`.../releases/download/<tag>/...`):
 совпадающий, более старый или отличающийся только JAR-irrelevant путями (`.github/`, тесты, `docs/`,
 `*.md`, lint-скрипты и конфиги) исходник не собирается — используется опубликованный пин. Иначе мод

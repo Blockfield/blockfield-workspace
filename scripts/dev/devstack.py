@@ -498,6 +498,25 @@ def resolve_server_jar(explicit=None):
     )
 
 
+def server_jar_current(resolved):
+    """True when the installed stand server jar is byte-identical to the resolved jar.
+
+    An explicit --server-jar/BF_SERVER_JAR must replace the installed runtime
+    when it differs: presence alone is not enough (a same-version rebuild is a
+    different artifact). Anything but exactly one identical jar rebuilds.
+    """
+    candidates = sorted((SERVER / "mods").glob("blockfield-server-*.jar"))
+    if len(candidates) != 1:
+        return False
+    try:
+        return (
+            hashlib.sha256(candidates[0].read_bytes()).hexdigest()
+            == hashlib.sha256(resolved.read_bytes()).hexdigest()
+        )
+    except OSError:
+        return False
+
+
 def fetch_mod_jars(modpack, client_pack=None):
     """Same pins as CI's fetch-mod-release.sh, without needing a POSIX shell.
 
@@ -868,6 +887,12 @@ def setup(args):
     step("2/4  Server pack")
     with progress("Checking installed server files"):
         ready = not args.force and server_runtime_ready()
+    explicit = getattr(args, "server_jar", None) or os.environ.get("BF_SERVER_JAR")
+    if ready and explicit and not server_jar_current(resolve_server_jar(explicit)):
+        # The explicit jar decides too: a prepared stand keeps serving its old
+        # binary unless the installed bytes equal the requested ones. A bad
+        # explicit path dies here, never as a silent ready.
+        ready = False
     if not ready:
         out = build_distribution(
             modpack, client_pack, getattr(args, "server_jar", None)
@@ -2811,7 +2836,8 @@ def main():
         default=None,
         metavar="JAR",
         help="Boat/CI-built blockfield-server jar (:server:remapJar output) for the stand"
-        " (default: the localmods/ build; never downloaded)",
+        " (default: the localmods/ build; never downloaded; an explicit jar that"
+        " differs from the installed one rebuilds the stand)",
     )
     p.set_defaults(func=setup)
 

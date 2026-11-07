@@ -1005,8 +1005,14 @@ def cmd_pin(args):
                 say(f"skip {path}: submodule is not checked out")
             skipped.add(path)
             return
-        sha = tag_commit(repo, tag)
         current = changes.get(path, (pinned(path),))[0]
+        if current is None:
+            # The public workspace no longer tracks the private server as a submodule.
+            if path not in skipped:
+                say(f"skip {path}: not a submodule of the workspace")
+            skipped.add(path)
+            return
+        sha = tag_commit(repo, tag)
         if sha == current:
             return
         git(repo, "fetch", "-q", "origin", sha)

@@ -149,6 +149,18 @@ class QualityWireHooks(unittest.TestCase):
                 ["git", "config", "--local", "core.hooksPath", ".githooks"],
             )
 
+    def test_wire_hooks_reports_already_wired_as_success(self):
+        with tempfile.TemporaryDirectory(prefix="bf hooks ") as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "--quiet", tmp], check=True)
+            (root / ".githooks").mkdir()
+            subprocess.run(
+                ["git", "config", "core.hooksPath", ".githooks"],
+                cwd=root,
+                check=True,
+            )
+            self.assertTrue(quality.wire_hooks(root))
+
 
 class PreCommitHook(unittest.TestCase):
     def test_hook_formats_staged_files_without_gradle(self):

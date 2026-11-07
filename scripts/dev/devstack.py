@@ -825,24 +825,17 @@ def _restore_missing(src, dst):
 def wire_hooks(root):
     """Point one checkout at its versioned hooks so pushes run the fast checks.
 
-    Only sets the repo-local core.hooksPath when it is unset; an explicit
-    repo choice is left alone. Best-effort: a checkout without git or hooks
-    must not break setup. Never touches an outer repo: subtrees without their
-    own .git are left alone.
+    Returns True when the repo-local core.hooksPath ends up as `.githooks`
+    (set just now or already). Returns False on an explicit foreign choice
+    (left alone), when there is no git checkout or no `.githooks`, and on
+    write failure (reported to stderr). Never touches an outer repo.
     """
     if not (root / ".git").exists() or not (root / ".githooks").is_dir():
         return False
-    try:
-        current = subprocess.run(
-            ["git", "config", "--local", "--get", "core.hooksPath"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-    except OSError:
-        return False
-    if current:
+    local = _local_hooks_path(root)
+    if local == ".githooks":
+        return True
+    if local:
         return False
     try:
         subprocess.run(
@@ -850,7 +843,8 @@ def wire_hooks(root):
             cwd=root,
             check=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"warning: cannot wire versioned hooks in {root}: {error}")
         return False
     return True
 
@@ -878,10 +872,35 @@ def patch_dev_skinrestorer():
     step("SkinRestorer join auto-fetch off (dev stand)")
 
 
+def _local_hooks_path(root):
+    """Repo-local core.hooksPath, or "" when unset/unreadable."""
+    try:
+        return subprocess.run(
+            ["git", "config", "--local", "--get", "core.hooksPath"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        return ""
+
+
 def setup(args):
     wired = [str(ROOT)] if wire_hooks(ROOT) else []
-    if (ROOT / ".githooks").is_dir() and not wired:
-        die(f"cannot wire versioned hooks in {ROOT}: fix git config access")
+    if (ROOT / ".git").exists() and (ROOT / ".githooks").is_dir():
+        try:
+            current = subprocess.run(
+                ["git", "config", "--local", "--get", "core.hooksPath"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+        except OSError:
+            current = ""
+        if not current:
+            die(f"cannot wire versioned hooks in {ROOT}: fix git config access")
     for sub in [
         ROOT / "server",
         ROOT / "client",
@@ -891,7 +910,11 @@ def setup(args):
             continue
         if wire_hooks(sub):
             wired.append(str(sub.relative_to(ROOT)))
-        elif (sub / ".githooks").is_dir():
+        elif (
+            (sub / ".git").exists()
+            and (sub / ".githooks").is_dir()
+            and not _local_hooks_path(sub)
+        ):
             die(f"cannot wire versioned hooks in {sub}: fix git config access")
     if wired:
         ok(

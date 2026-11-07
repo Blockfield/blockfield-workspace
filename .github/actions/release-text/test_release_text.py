@@ -801,7 +801,15 @@ class PreviousPins(unittest.TestCase):
             repo_root=str(root),
             build_json=None,
         )
-        denied = subprocess.CalledProcessError(1, ["git"], stderr=b"HTTP 403")
+        denied = subprocess.CalledProcessError(
+            128,
+            [
+                "git",
+                "fetch",
+                "https://github.com/Blockfield/blockfield-client-private.git",
+            ],
+            stderr=b"fatal: repository not found",
+        )
         with (
             mock.patch.object(rn, "read_pins", side_effect=self.MISSING),
             mock.patch("subprocess.check_output", side_effect=denied),
@@ -811,10 +819,9 @@ class PreviousPins(unittest.TestCase):
             facts = rt.collect_facts(args, [release("v2.60.0")])
         self.assertFalse(facts["pins_checked"])
         self.assertEqual(facts["pins"], [])
-        self.assertTrue(
-            any("v2.60.0" in gap and "пин" in gap for gap in facts["gaps"]),
-            facts["gaps"],
-        )
+        # The gap must survive the published-text filter, not only the CI log.
+        gaps = rt.clean(facts)["gaps"]
+        self.assertTrue(any("v2.60.0" in gap and "пин" in gap for gap in gaps), gaps)
 
 
 class MergedPrs(unittest.TestCase):

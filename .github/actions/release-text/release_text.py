@@ -414,9 +414,11 @@ def previous_pins(repo_root, source_repository, previous, gaps):
         fetch_tag(repo_root, private, previous)
         pins = rn.read_pins(repo_root, previous)
     except Exception as exc:
+        # Подробности (argv и stderr git) называют приватный URL, а clean()
+        # выбрасывает такие пробелы из текста целиком: их место — журнал CI.
+        warn(f"резервный источник пинов {previous}: {describe(exc)}")
         raise RuntimeError(
-            f"пины {previous} не получены ни локально, ни из резервного "
-            f"источника ({describe(exc)})"
+            f"пины {previous} не получены ни локально, ни из резервного источника"
         ) from exc
     gaps.append(
         f"тег {previous} отсутствует в {source_repository}, "

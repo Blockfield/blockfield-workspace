@@ -6,6 +6,7 @@ recorded SHA: `just server-checkout`. Idempotent; fails loudly without access.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -62,22 +63,11 @@ def checkout_server(root=ROOT, url=SERVER_URL):
         die(f"{target} is not at {sha} after checkout")
     # A fresh clone starts with hooks unwired: point it at the versioned
     # hooks when they exist and no explicit choice was made. Never fatal.
-    if (target / ".githooks").is_dir():
-        try:
-            current = subprocess.run(
-                ["git", "config", "--get", "core.hooksPath"],
-                cwd=target,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            if not current:
-                subprocess.run(
-                    ["git", "config", "core.hooksPath", ".githooks"],
-                    cwd=target,
-                    check=True,
-                )
-        except (OSError, subprocess.CalledProcessError):
-            pass
+    # Same rules as every `just` call: never override hooks git already runs.
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from quality import wire_hooks
+
+    wire_hooks(target)
     return target
 
 

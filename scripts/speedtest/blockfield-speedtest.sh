@@ -1,5 +1,5 @@
 #!/bin/sh
-# Blockfield download speed test for Linux and macOS: same passes and output as blockfield-speedtest.cmd.
+# Blockfield download speed test for Linux: same passes and output as blockfield-speedtest.cmd.
 set -u
 slice=0-33554431
 gcore=https://cdn-test.blockfield.pro # Gcore test resource; empty skips it

@@ -179,7 +179,10 @@ class PinOverrides(unittest.TestCase):
                 sha = pinned.get(path, "0" * 40)
                 return f"160000 commit {sha}\t{path}" if sha else ""
             if "show" in args:
-                return server_file
+                # git show fails outright when base has no pins/server.sha.
+                return mock.Mock(
+                    returncode=0 if server_file else 128, stdout=server_file
+                )
             return ""
 
         import contextlib

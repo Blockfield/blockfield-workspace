@@ -1001,7 +1001,8 @@ def cmd_pin(args):
             return out.split()[2]
         if path == "server":
             # The public workspace pins the private server by file, not gitlink.
-            return git(ROOT, "show", f"{base}:{SERVER_PIN}").strip() or None
+            shown = git(ROOT, "show", f"{base}:{SERVER_PIN}", check=False)
+            return (shown.returncode == 0 and shown.stdout.strip()) or None
         return None
 
     def advance(path, tag, label):

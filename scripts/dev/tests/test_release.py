@@ -320,6 +320,7 @@ class Ship(unittest.TestCase):
         self.assertFalse(any(c[0] == "published" for c in calls))
         self.assertFalse(any(c[0] == "approve" for c in calls))
         self.assertFalse(any(c[0] == "deploy" for c in calls))
+        self.assertIn(("ff", "server"), calls)
 
     def test_wait_until_returns_first_truthy_and_times_out(self):
         self.assertEqual(release.wait_until("x", 60, 0, lambda: "done"), "done")
@@ -650,6 +651,11 @@ class Ship(unittest.TestCase):
                     calls.append(("probes", next(iter(tags)))) or True
                 ),
             ),
+            mock.patch.object(
+                release,
+                "ff_next_to_main",
+                side_effect=lambda side, dry: calls.append(("ff", side)) or True,
+            ),
         )
 
     def run_patches(self, patches, func):
@@ -688,6 +694,8 @@ class Ship(unittest.TestCase):
                 "pin",
                 "green",
                 "merge",
+                "ff",
+                "ff",
             ],
         )
         # The client tag run is a publish-only stub: serving needs the dispatch.
@@ -746,6 +754,8 @@ class Ship(unittest.TestCase):
                 ("pin",),
                 ("green", release.WORKSPACE_REPO),
                 ("merge", release.WORKSPACE_REPO, "a" * 40),
+                ("ff", "client"),
+                ("ff", "server"),
             ],
         )
 
@@ -2589,6 +2599,103 @@ class PushTagGateTest(unittest.TestCase):
 
     def test_single_side_defaults_to_its_own_tag(self):
         self.assertEqual(self.gated(), [{"server": "v2.79.6"}])
+
+
+class FfNextToMain(unittest.TestCase):
+    """`release ship` fast-forwards origin/next to origin/main (bare fixture)."""
+
+    def fixture(self, with_next=True, next_extra=False):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        origin = base / "origin.git"
+
+        def git(repo, *args):
+            return subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=t@invalid",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                    *args,
+                ],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            ).stdout.strip()
+
+        git(base, "init", "--bare", "-q", "origin.git")
+        git(base, "clone", "-q", str(origin), "seed")
+        seed = base / "seed"
+        (seed / "file.txt").write_text("one\n")
+        git(seed, "add", "file.txt")
+        git(seed, "commit", "-qm", "one")
+        git(seed, "push", "-q", "origin", "HEAD:main")
+        if with_next:
+            git(seed, "push", "-q", "origin", "HEAD:next")
+        (seed / "file.txt").write_text("two\n")
+        git(seed, "commit", "-qam", "two")
+        git(seed, "push", "-q", "origin", "HEAD:main")
+        if next_extra:
+            git(seed, "fetch", "-q", "origin")
+            git(seed, "checkout", "-q", "next")
+            (seed / "other.txt").write_text("fork\n")
+            git(seed, "add", "other.txt")
+            git(seed, "commit", "-qm", "fork")
+            git(seed, "push", "-q", "origin", "HEAD:next")
+        git(base, "clone", "-q", "--branch", "main", str(origin), "side")
+        return base / "side"
+
+    def remote(self, side, ref):
+        out = subprocess.run(
+            ["git", "-C", str(side), "ls-remote", "origin", ref],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        return out.split()[0]
+
+    def test_stale_next_moves_to_main(self):
+        side = self.fixture()
+        self.assertNotEqual(
+            self.remote(side, "refs/heads/next"), self.remote(side, "refs/heads/main")
+        )
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", False))
+        self.assertEqual(
+            self.remote(side, "refs/heads/next"), self.remote(side, "refs/heads/main")
+        )
+
+    def test_dry_run_moves_nothing(self):
+        side = self.fixture()
+        before = self.remote(side, "refs/heads/next")
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", True))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+
+    def test_synced_next_is_a_noop(self):
+        side = self.fixture()
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", False))
+            self.assertTrue(release.ff_next_to_main("server", False))
+
+    def test_diverged_next_raises_and_moves_nothing(self):
+        side = self.fixture(next_extra=True)
+        before = self.remote(side, "refs/heads/next")
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            with self.assertRaisesRegex(RuntimeError, "refusing to move next"):
+                release.ff_next_to_main("server", False)
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+
+    def test_missing_next_is_a_noop(self):
+        side = self.fixture(with_next=False)
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertFalse(release.ff_next_to_main("server", False))
 
 
 if __name__ == "__main__":

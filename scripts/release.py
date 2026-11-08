@@ -1864,6 +1864,34 @@ def post_deploy_probes(tags, client=None, timeout_s=1800, interval_s=5):
     return True
 
 
+def ff_next_to_main(side, dry):
+    """Fast-forward origin/next to origin/main after the release merge. Never forces.
+
+    The release PR is cut from origin/next and merged into main with a merge
+    commit; without this step the next prepare would cut from a stale base and
+    collide on the bumped version line. Raises (moving nothing) when next
+    holds commits main does not contain: fast-forward it by hand instead.
+    """
+    repo = repo_dir(side)
+    if not has_next(repo):
+        return False
+    fetch_main(repo)
+    main = git(repo, "rev-parse", "origin/main")
+    nxt = git(repo, "rev-parse", "origin/next")
+    if main == nxt:
+        say(f"  {side}: origin/next already at {main[:12]}")
+        return True
+    if not is_ancestor(repo, nxt, main):
+        raise RuntimeError(
+            f"{side}: origin/next ({nxt[:7]}) is not an ancestor of origin/main"
+            f" ({main[:7]}); refusing to move next (never force) — fast-forward"
+            " it by hand, then continue"
+        )
+    ship_mutate(dry, "git", "push", "origin", f"{main}:refs/heads/next", cwd=repo)
+    say(f"  {side}: fast-forwarded origin/next to {main[:12]}")
+    return True
+
+
 def ship_tag_side(
     args,
     side,
@@ -2135,6 +2163,10 @@ def cmd_ship(args):
         return True
     number, head = wait_pr_green(WORKSPACE_REPO, pin, timeout_s, interval_s)
     merge_pr(WORKSPACE_REPO, number, dry, head)
+    # The release PRs were cut from origin/next and merged into main: move
+    # next onto the release merge so the next prepare cuts from a fresh base.
+    for side in tags:
+        ff_next_to_main(side, dry)
     say(f"\nshipped {kind}: {', '.join(f'{s} {t}' for s, t in tags.items())}")
     return True
 

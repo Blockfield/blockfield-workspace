@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -236,6 +237,30 @@ class Toolchain(unittest.TestCase):
             )
             toolchain.main(["--tools=ruff"])
             prefetch.assert_called_once_with(["ruff"])
+
+
+class TruncatedDownload(unittest.TestCase):
+    def test_incomplete_read_is_retried_as_os_error(self):
+        import http.client
+
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                return toolchain.read_url("x")
+            return b"ok"
+
+        broken = unittest.mock.MagicMock()
+        broken.__enter__.return_value.read.side_effect = http.client.IncompleteRead(
+            b"", 5
+        )
+        with (
+            patch.object(toolchain.urllib.request, "urlopen", return_value=broken),
+            patch.object(toolchain.time, "sleep"),
+        ):
+            self.assertEqual(toolchain.retried(flaky), b"ok")
+        self.assertEqual(len(calls), 2)
 
 
 class WrapperJava(unittest.TestCase):

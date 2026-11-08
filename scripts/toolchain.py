@@ -15,6 +15,7 @@ module next to it.
 import base64
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -271,8 +272,13 @@ def retried(fetch, attempts=3):
 
 
 def read_url(url):
-    with urllib.request.urlopen(url, timeout=60) as response:
-        return response.read()
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            return response.read()
+    except http.client.HTTPException as error:
+        # IncompleteRead and friends are not OSError: map them so retried()
+        # backs off and fetch() falls through to the next source.
+        raise OSError(f"{url}: {error!r}") from error
 
 
 def replace(target, data, mode=None):

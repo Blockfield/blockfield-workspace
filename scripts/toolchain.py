@@ -1,13 +1,25 @@
-"""Pinned project-local quality tools and reproducible build Python."""
+"""Pinned project-local quality tools and reproducible build Python.
 
-import errno
+Core downloader: the single pin set lives in scripts/tools.lock.json and this
+module only reads it. Every download is retried with backoff, written
+atomically, verified against the locked hash, and resolved through the ordered
+source list (registry or GitHub first, then the R2 mirror while it is set).
+`BF_TOOL_CACHE` points all tools at one shared cache directory (hook-test
+fixtures and fresh worktrees use it); `toolchain.py --tools a,b` prefetches
+named tools for CI.
+
+Workspace-only code (Temurin JDK, boat CLI, Debian Xvfb/VirtualGL) lives in
+scripts/toolchain_local.py and is re-exported here, so existing imports keep
+working. Other repos vendor this file plus the lock, with their own local
+module next to it.
+"""
+
+import base64
 import hashlib
-import io
+import json
 import os
 import platform
-import re
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
@@ -17,145 +29,107 @@ import urllib.error
 import urllib.request
 import zipfile
 import zlib
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
+
+__all__ = [
+    "CACHE",
+    "DEV_CACHE",
+    "LOCK_PATH",
+    "cache_dir",
+    "call",
+    "canonical_python",
+    "check_hash",
+    "child_env",
+    "download",
+    "fetch",
+    "host",
+    "jdk_env",
+    "load_lock",
+    "lock_platform",
+    "lock_tool",
+    "native",
+    "read_url",
+    "retried",
+    "tool",
+    # Re-exported from scripts/toolchain_local.py (workspace-only pins).
+    "JAVA_ASSETS",
+    "JAVA_VERSION",
+    "check_java",
+    "deb_libraries",
+    "deb_payload",
+    "java_home",
+]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from terminal import progress  # noqa: E402
-from dev_cache import CACHE as DEV_CACHE, clone_tree  # noqa: E402
+from dev_cache import CACHE as DEV_CACHE, clone_tree  # noqa: E402,F401
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".cache" / "quality"
-JAVA_VERSION = "21.0.12+8"
-JAVA_ASSETS = {
-    "linux-amd64": [
-        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12_8.tar.gz",
-        "e4446ff06a276155697597cc0f1b15da004ff083f4964a35271ecee567177370",
-    ],
-    "linux-arm64": [
-        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.12_8.tar.gz",
-        "eba38e871b02d407897bfe017ea35352dfc1420ef6d2112425b0c67325ca509d",
-    ],
-    "windows-amd64": [
-        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12_8.zip",
-        "9ba963ee2371874a74185d18bc7bb2ab9407df7683300855ed7606e0662321d0",
-    ],
-    "windows-arm64": [
-        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_aarch64_windows_hotspot_21.0.12_8.zip",
-        "e7ddf1cf45885cae2cfb8a018db60b0041ef69e96843b93a92b447d9a4cba676",
-    ],
-}
-PYTHON_ASSETS = {
-    "linux-arm64": [
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.12.14%2B20260924-aarch64-unknown-linux-gnu-install_only.tar.gz",
-        "c0574c9c9fec561eb192ad510e4e79aaad039929b3531b3bb873e2f630fb14a9",
-    ],
-    "linux-amd64": [
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.12.14%2B20260924-x86_64-unknown-linux-gnu-install_only.tar.gz",
-        "5eae8cf79dd47fc2496a4fccc892936be831ce7a84d984b2299dfb1cdb592682",
-    ],
-    "windows-arm64": [
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.12.14%2B20260924-aarch64-pc-windows-msvc-install_only.tar.gz",
-        "394b3bf95c45e5b02e02fe9b201e51df11dbff612db5b26406c6db484581317d",
-    ],
-    "windows-amd64": [
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.12.14%2B20260924-x86_64-pc-windows-msvc-install_only.tar.gz",
-        "c5303174bc29f5205decf6721ac549d4eb41c448f9b8c46cbc562d00348865bb",
-    ],
-}
-BINARY_ASSETS = {
-    "boat-linux-amd64": [
-        "https://github.com/ariana-dot-dev/agent-server/releases/download/boat-cli-v1.0.85/boat-linux-x64",
-        "5d7933a238dcea0446bbbee0e2506692961d16537b9960003e4ece9ecb1ec498",
-    ],
-    "boat-linux-arm64": [
-        "https://github.com/ariana-dot-dev/agent-server/releases/download/boat-cli-v1.0.85/boat-linux-arm64",
-        "a7d8a3a577deeea5c77f314aaf2b07657c4cfefb9f48e560119354566c72bea8",
-    ],
-    "boat-windows-amd64": [
-        "https://github.com/ariana-dot-dev/agent-server/releases/download/boat-cli-v1.0.85/boat-windows-x64.exe",
-        "02ebb405804f1bf353f5e3b651d3b3c51d3411858d33641e5b3847435d357fdc",
-    ],
-    "Xvfb-linux-amd64": [
-        "https://deb.debian.org/debian/pool/main/x/xorg-server/xvfb_21.1.16-1.3+deb13u3_amd64.deb",
-        "365da2b6c93339f34337c434a9489bb6411a240fa47b9f49693d3091745f28c2",
-    ],
-    "virtualgl-linux-amd64": [
-        "https://github.com/VirtualGL/virtualgl/releases/download/3.1.5/virtualgl_3.1.5_amd64.deb",
-        "df3f7788ce41b182a47c0d298e5cd6d2d63579522cb41825970b7726e825485e",
-    ],
-    "rclone-linux-amd64": [
-        "https://github.com/rclone/rclone/releases/download/v1.74.3/rclone-v1.74.3-linux-amd64.zip",
-        "dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2",
-    ],
-    "rclone-linux-arm64": [
-        "https://github.com/rclone/rclone/releases/download/v1.74.3/rclone-v1.74.3-linux-arm64.zip",
-        "8f8d47446e061f80c3256659fe8e21f56d72d96aaefe1275d088ea5eb6b42aa7",
-    ],
-    "rclone-windows-amd64": [
-        "https://github.com/rclone/rclone/releases/download/v1.74.3/rclone-v1.74.3-windows-amd64.zip",
-        "ecb0ed9006e0d1a693757007716a11dab6c2cde6dac3f2fd87da962eaa73d11d",
-    ],
-    "rclone-windows-arm64": [
-        "https://github.com/rclone/rclone/releases/download/v1.74.3/rclone-v1.74.3-windows-arm64.zip",
-        "5b6dcef9272f81caa44da9f9c216c385309b78cf53ebe1bd83a45bced50fc991",
-    ],
-    "actionlint-linux-amd64": [
-        "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
-        "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
-    ],
-    "actionlint-linux-arm64": [
-        "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_arm64.tar.gz",
-        "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6",
-    ],
-    "actionlint-windows-amd64": [
-        "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_amd64.zip",
-        "6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9",
-    ],
-    "actionlint-windows-arm64": [
-        "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_arm64.zip",
-        "cadcf7ea4efe3a68728893813643cebe1185e5b1d4be5b96245f65c9a4d5ea41",
-    ],
-    "shfmt-linux-amd64": [
-        "https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64",
-        "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf",
-    ],
-    "shfmt-linux-arm64": [
-        "https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_arm64",
-        "5f2db09dae91fca848f7adbdd014632e921a383863a2ad7e0450ad3aba0c6489",
-    ],
-    "shfmt-windows-amd64": [
-        "https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_windows_amd64.exe",
-        "13629ce28442ca80b6b5a819f7574ab39e1c28c6e26734ca816c9714e04851df",
-    ],
-    "shellcheck-linux-arm64": [
-        "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.aarch64.tar.gz",
-        "68a8133197a50beb8803f8d42f9908d1af1c5540d4bb05fdfca8c1fa47decefc",
-    ],
-    "shellcheck-linux-amd64": [
-        "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz",
-        "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6",
-    ],
-    "shellcheck-windows-amd64": [
-        "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.zip",
-        "8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e",
-    ],
-    "just-windows-arm64": [
-        "https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-aarch64-pc-windows-msvc.zip",
-        "14ff33bbac8d2f07deda30cd3bafe7be083213cdb1c4dae7a55567d375cc17f1",
-    ],
-    "just-linux-arm64": [
-        "https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-aarch64-unknown-linux-musl.tar.gz",
-        "f225044a81adea6e0b3a8b9370aaf374e6af76c8735ae263ac993df55fd137ec",
-    ],
-    "just-windows-amd64": [
-        "https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-pc-windows-msvc.zip",
-        "4c7391d17cb1d17b758b52004ee6411372b8a13ff37c3c9b9031625cb6026e09",
-    ],
-    "just-linux-amd64": [
-        "https://github.com/casey/just/releases/download/1.57.0/just-1.57.0-x86_64-unknown-linux-musl.tar.gz",
-        "45b548094283cb9739af8f13273b8cddeee869f5b4ef2bb631b1f311cb566155",
-    ],
-}
+LOCK_PATH = ROOT / "scripts" / "tools.lock.json"
+
+
+def load_lock():
+    """The single pin set every repo vendors: tool, version, per-platform
+    sources in try order, and the hash each source must verify against."""
+    try:
+        lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise RuntimeError(f"Cannot read tool pins at {LOCK_PATH}: {error}")
+    if lock.get("version") != 1 or "tools" not in lock:
+        raise RuntimeError(f"Unsupported tool pins at {LOCK_PATH}: expected version 1")
+    return lock
+
+
+def cache_dir():
+    """Shared tool cache: BF_TOOL_CACHE when set (hook-test fixtures and
+    fresh worktrees point it at the parent checkout's cache), else this
+    checkout's .cache/quality."""
+    override = os.environ.get("BF_TOOL_CACHE")
+    return Path(override) if override else CACHE
+
+
+def lock_tool(name, lock=None):
+    try:
+        return (lock or load_lock())["tools"][name]
+    except KeyError:
+        raise RuntimeError(
+            f"Unknown tool {name!r}: not pinned in scripts/tools.lock.json"
+        )
+
+
+def lock_platform(name, platform=None, lock=None):
+    """Locked entry, resolved platform key (aliases, then platform-independent
+    "any"), and its source spec for this host."""
+    lock = lock or load_lock()
+    entry = lock_tool(name, lock)
+    key = platform or "-".join(host())
+    platforms = entry["platforms"]
+    if key not in platforms:
+        key = entry.get("aliases", {}).get(key, "any")
+    try:
+        return entry, key, platforms[key]
+    except KeyError:
+        raise RuntimeError(f"No {key} asset pinned for tool {name!r}")
+
+
+def check_hash(data, spec, name):
+    """Verify downloaded bytes against the locked hash (sha256, or the
+    registry integrity value for npm tarballs)."""
+    if "sha256" in spec:
+        if hashlib.sha256(data).hexdigest() != spec["sha256"]:
+            raise RuntimeError(f"Tool checksum mismatch: {name}")
+    elif "integrity" in spec:
+        algorithm, _, encoded = spec["integrity"].partition("-")
+        try:
+            expected = base64.b64decode(encoded)
+            digest = hashlib.new(algorithm, data).digest()
+        except (ValueError, TypeError) as error:
+            raise RuntimeError(f"Tool checksum mismatch: {name} ({error})")
+        if digest != expected:
+            raise RuntimeError(f"Tool checksum mismatch: {name}")
+    else:
+        raise RuntimeError(f"No hash pinned for tool {name!r}")
 
 
 def child_env():
@@ -178,7 +152,7 @@ def child_env():
     env["PATH"] = os.pathsep.join(
         [
             *([str(sdk)] if env.get("JAVA_HOME") and sdk.is_dir() else []),
-            str(CACHE / "bin"),
+            str(cache_dir() / "bin"),
             *(
                 entry
                 for entry in env.get("PATH", "").split(os.pathsep)
@@ -288,7 +262,11 @@ def read_url(url):
 
 
 def download(name, url, checksum, *, cache=None):
-    target = (CACHE if cache is None else cache) / name
+    """Single pinned file: cached copy verified, else downloaded with retries
+    and published atomically. Kept for explicit callers; lock-driven code
+    uses fetch() for ordered source fallback."""
+    root = Path(cache) if cache is not None else cache_dir()
+    target = root / name
     if target.is_file():
         data = target.read_bytes()
         if hashlib.sha256(data).hexdigest() != checksum:
@@ -318,97 +296,181 @@ def download(name, url, checksum, *, cache=None):
     return target
 
 
-def check_java(directory, system):
-    extension = ".exe" if system == "windows" else ""
-    binary = directory / "bin"
-    if not all(
-        (binary / (name + extension)).is_file() for name in ("java", "javac", "jdb")
-    ):
-        raise RuntimeError(
-            "A complete managed JDK 21 is required, including javac and jdb"
-        )
+def fetch(tool_name, filename=None, *, cache=None, platform=None):
+    """Locked tool file: each source tried in lock order (registry or GitHub
+    first, then the content-addressed R2 mirror while it is set), every
+    source retried and hash-verified. A null mirror is skipped, never fetched."""
+    lock = load_lock()
+    entry, key, spec = lock_platform(tool_name, platform, lock)
+    urls = list(spec["urls"])
+    mirror = lock.get("mirror")
+    if mirror and entry.get("mirror", True) and "sha256" in spec:
+        urls.append(mirror.rstrip("/") + "/" + spec["sha256"])
+    name = filename or Path(urls[0]).name
+    root = Path(cache) if cache is not None else cache_dir()
+    target = root / name
+    if target.is_file():
+        try:
+            check_hash(target.read_bytes(), spec, name)
+        except RuntimeError as error:
+            raise RuntimeError(f"{error} (delete {target} and retry)")
+        return target
+    failures = []
+    for url in urls:
+        try:
+            with progress(f"Downloading {name}"):
+                data = retried(lambda url=url: read_url(url))
+        except (OSError, subprocess.SubprocessError) as error:
+            failures.append(f"{url}: {error}")
+            continue
+        try:
+            check_hash(data, spec, name)
+        except RuntimeError as error:
+            failures.append(f"{url}: {error}")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=".dl-", delete=False
+        ) as file:
+            temporary = Path(file.name)
+            try:
+                file.write(data)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+        try:
+            temporary.replace(target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return target
+    raise RuntimeError(f"Tool {tool_name!r} download failed: " + "; ".join(failures))
+
+
+def tool_ruff():
+    expected = "ruff " + lock_tool("ruff")["version"]
+    directory = cache_dir() / "venv"
+    python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file():
+        call(canonical_python(), "-I", "-m", "venv", "--clear", directory)
     probe = subprocess.run(
-        [str(binary / ("java" + extension)), "-version"],
+        [str(python), "-I", "-m", "ruff", "--version"],
         env=child_env(),
         capture_output=True,
         text=True,
-        timeout=10,
     )
-    if probe.returncode or not re.search(
-        re.escape(JAVA_VERSION) + r"(?![\d.+])", probe.stderr
-    ):
-        raise RuntimeError(
-            f"Managed Java version mismatch: expected Temurin {JAVA_VERSION}"
+    if probe.returncode or probe.stdout.strip() != expected:
+        # The wheel is hash-verified by fetch(); pip installs the local file.
+        wheel = fetch("ruff")
+        # pip does not retry a read timeout in the middle of a download.
+        retried(
+            lambda: call(
+                python,
+                "-I",
+                "-m",
+                "pip",
+                "--isolated",
+                "install",
+                "--disable-pip-version-check",
+                str(wheel),
+            )
         )
+    return directory / ("Scripts/ruff.exe" if os.name == "nt" else "bin/ruff")
 
 
-def java_home():
+def tool_npm(name):
+    # Keyed by the locked version, like canonical_python: a lock bump must not reuse an old install.
+    directory = cache_dir() / ("npm-" + name + "-" + lock_tool(name)["version"])
+    binary = (
+        directory
+        / "node_modules"
+        / ".bin"
+        / (name + ".cmd" if os.name == "nt" else name)
+    )
+    if not binary.is_file():
+        # The tarball carries the registry integrity hash; npm installs the
+        # verified local file, so no registry round-trip can swap the bytes.
+        tarball = fetch(name)
+        call(
+            "npm",
+            "install",
+            "--prefix",
+            directory,
+            "--no-audit",
+            "--no-fund",
+            "--ignore-scripts",
+            "--package-lock=false",
+            "--save-exact",
+            str(tarball),
+        )
+    return binary
+
+
+def tool(name):
+    if name == "ruff":
+        return tool_ruff()
+    if name in ("prettier", "pnpm"):
+        return tool_npm(name)
+    lock = load_lock()
+    if name not in lock["tools"]:
+        from toolchain_local import local_tool
+
+        return local_tool(name)
     system, arch = host()
-    key = system + "-" + arch
-    home = Path(os.environ.get("BF_DEV_HOME") or ROOT / ".dev").resolve() / "jdk"
-    directory = home / ("temurin-" + JAVA_VERSION + "-" + key)
-    cached = DEV_CACHE / "jdk" / directory.name
-    if not directory.is_dir() and cached.is_dir():
-        home.mkdir(parents=True, exist_ok=True)
-        # Clone via a temporary name so an interrupted copy is never mistaken
-        # for an installed JDK on the next run.
-        with tempfile.TemporaryDirectory(dir=home) as temporary:
-            pending = Path(temporary) / "tree"
-            clone_tree(cached, pending)
-            try:
-                pending.rename(directory)
-            except OSError as error:
-                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
-                    raise
-    if not directory.is_dir():
-        url, checksum = JAVA_ASSETS[key]
-        print(f"Installing Temurin {JAVA_VERSION} in {directory}", file=sys.stderr)
-        archive = download(Path(url).name, url, checksum, cache=DEV_CACHE / "jdk")
-        home.mkdir(parents=True, exist_ok=True)
-        with (
-            progress("Unpacking and verifying Java runtime"),
-            tempfile.TemporaryDirectory(dir=home) as temporary,
-        ):
-            staging = Path(temporary)
-            if system == "windows":
-                with zipfile.ZipFile(archive) as source:
-                    for member in source.infolist():
-                        name = member.filename.replace("\\", "/")
-                        path = PurePosixPath(name)
-                        if (
-                            path.is_absolute()
-                            or ".." in path.parts
-                            or PureWindowsPath(name).drive
-                            or stat.S_ISLNK(member.external_attr >> 16)
-                        ):
-                            raise RuntimeError(f"Unsafe JDK archive member: {name}")
-                    source.extractall(staging)
-            else:
-                with tarfile.open(archive) as source:
-                    source.extractall(staging, filter="data")
-            extracted = staging / ("jdk-" + JAVA_VERSION)
-            check_java(extracted, system)
-            if not cached.exists():
-                cached.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.TemporaryDirectory(dir=cached.parent) as cache_tmp:
-                    pending = Path(cache_tmp) / "tree"
-                    clone_tree(extracted, pending)
-                    try:
-                        pending.rename(cached)
-                    except OSError as error:
-                        if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
-                            raise
-            with tempfile.TemporaryDirectory(dir=home) as temporary:
-                pending = Path(temporary) / "tree"
-                clone_tree(cached, pending)
-                try:
-                    pending.rename(directory)
-                except OSError as error:
-                    if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
-                        raise
+    _, _, spec = lock_platform(name, lock=lock)
+    archive = fetch(name, name + "-" + Path(spec["urls"][0]).name)
+    filename = name + (".exe" if system == "windows" else "")
+    if spec["kind"] == "zip":
+        with zipfile.ZipFile(archive) as source:
+            member = next(n for n in source.namelist() if Path(n).name == filename)
+            data = source.read(member)
+    elif spec["kind"] == "tar.gz":
+        with tarfile.open(archive) as source:
+            member = next(
+                m for m in source.getmembers() if Path(m.name).name == filename
+            )
+            data = source.extractfile(member).read()
     else:
-        check_java(directory, system)
-    return directory
+        data = archive.read_bytes()
+    binary = cache_dir() / "bin" / filename
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    if not binary.is_file() or binary.read_bytes() != data:
+        binary.write_bytes(data)
+    binary.chmod(0o755)
+    return binary
+
+
+def canonical_python():
+    if sys.version_info < (3, 12):
+        raise RuntimeError("Install native Python 3.12 or later to run project tools")
+    if sys.version_info[:3] == (3, 12, 14) and (
+        zlib.ZLIB_VERSION,
+        zlib.ZLIB_RUNTIME_VERSION,
+    ) == ("1.3.2", "1.3.2"):
+        return Path(sys.executable)
+    key = "-".join(host())
+    version = lock_tool("python")["version"].split("+")[0]
+    directory = cache_dir() / ("python-" + version + "-" + key)
+    relative = Path("python") / ("python.exe" if os.name == "nt" else "bin/python3")
+    python = directory / relative
+    if not python.is_file():
+        archive = fetch("python", "python-" + version + "-" + key + ".tar.gz")
+        with (
+            progress("Unpacking and verifying Python runtime"),
+            tempfile.TemporaryDirectory(dir=cache_dir()) as temporary,
+        ):
+            staging = Path(temporary) / "install"
+            staging.mkdir()
+            with tarfile.open(archive) as source:
+                source.extractall(staging, filter="data")
+            probed = python_version(staging / relative)
+            if probed != "(3, 12, 14) 1.3.2 1.3.2":
+                raise RuntimeError(f"Canonical Python compressor mismatch: {probed}")
+            staging.rename(directory)
+    probed = python_version(python)
+    if probed != "(3, 12, 14) 1.3.2 1.3.2":
+        raise RuntimeError(f"Canonical Python compressor mismatch: {probed}")
+    return python
 
 
 def python_version(python):
@@ -423,160 +485,65 @@ def python_version(python):
     ).strip()
 
 
-def canonical_python():
-    if sys.version_info < (3, 12):
-        raise RuntimeError("Install native Python 3.12 or later to run project tools")
-    if sys.version_info[:3] == (3, 12, 14) and (
-        zlib.ZLIB_VERSION,
-        zlib.ZLIB_RUNTIME_VERSION,
-    ) == ("1.3.2", "1.3.2"):
-        return Path(sys.executable)
-    key = "-".join(host())
-    directory = CACHE / ("python-3.12.14-" + key)
-    relative = Path("python") / ("python.exe" if os.name == "nt" else "bin/python3")
-    python = directory / relative
-    if not python.is_file():
-        archive = download("python-3.12.14-" + key + ".tar.gz", *PYTHON_ASSETS[key])
-        with (
-            progress("Unpacking and verifying Python runtime"),
-            tempfile.TemporaryDirectory(dir=CACHE) as temporary,
-        ):
-            staging = Path(temporary) / "install"
-            staging.mkdir()
-            with tarfile.open(archive) as source:
-                source.extractall(staging, filter="data")
-            version = python_version(staging / relative)
-            if version != "(3, 12, 14) 1.3.2 1.3.2":
-                raise RuntimeError(f"Canonical Python compressor mismatch: {version}")
-            staging.rename(directory)
-    version = python_version(python)
-    if version != "(3, 12, 14) 1.3.2 1.3.2":
-        raise RuntimeError(f"Canonical Python compressor mismatch: {version}")
-    return python
+def prefetch(names):
+    """Download named tools into the shared cache for CI: one explicit list,
+    no lazy downloads inside later steps."""
+    for name in names:
+        tool(name)
 
 
-def deb_payload(archive):
-    """The data.tar.xz of a Debian package, opened."""
-    package = io.BytesIO(archive.read_bytes())
-    if package.read(8) != b"!<arch>\n":
-        raise RuntimeError("Invalid Debian tool archive")
-    while header := package.read(60):
-        if len(header) != 60 or header[58:] != b"`\n":
-            raise RuntimeError("Invalid Debian tool member")
-        size = int(header[48:58])
-        payload = package.read(size)
-        if size % 2:
-            package.read(1)
-        if header[:16].strip().rstrip(b"/") == b"data.tar.xz":
-            return tarfile.open(fileobj=io.BytesIO(payload))
-    raise RuntimeError("Missing Debian tool payload")
-
-
-def deb_libraries(name, *paths):
-    """Files of a pinned Debian package (by package path), extracted into the cache."""
-    system, arch = host()
-    url, checksum = BINARY_ASSETS[name + "-" + system + "-" + arch]
-    archive = download(name + "-" + Path(url).name, url, checksum)
-    files = []
-    with deb_payload(archive) as source:
-        for path in paths:
-            data = source.extractfile("./" + path).read()
-            target = CACHE / name / Path(path).name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if not target.is_file() or target.read_bytes() != data:
-                target.write_bytes(data)
-            files.append(target)
-    return files
-
-
-def tool(name):
-    if name == "ruff":
-        directory = CACHE / "venv"
-        python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        if not python.is_file():
-            call(canonical_python(), "-I", "-m", "venv", "--clear", directory)
-        probe = subprocess.run(
-            [str(python), "-I", "-m", "ruff", "--version"],
-            env=child_env(),
-            capture_output=True,
-            text=True,
-        )
-        if probe.returncode or probe.stdout.strip() != "ruff 0.15.7":
-            # pip does not retry a read timeout in the middle of a download.
-            retried(
-                lambda: call(
-                    python,
-                    "-I",
-                    "-m",
-                    "pip",
-                    "--isolated",
-                    "install",
-                    "--disable-pip-version-check",
-                    "ruff==0.15.7",
-                )
-            )
-        return directory / ("Scripts/ruff.exe" if os.name == "nt" else "bin/ruff")
-    if name in ("prettier", "pnpm"):
-        version = {"prettier": "3.8.3", "pnpm": "11.18.0"}[name]
-        directory = CACHE / "npm"
-        binary = (
-            directory
-            / "node_modules"
-            / ".bin"
-            / (name + ".cmd" if os.name == "nt" else name)
-        )
-        if not binary.is_file():
-            call(
-                "npm",
-                "install",
-                "--prefix",
-                directory,
-                "--no-audit",
-                "--no-fund",
-                "--ignore-scripts",
-                "--package-lock=false",
-                "--save-exact",
-                name + "@" + version,
-            )
-        return binary
-    system, arch = host()
-    # These tools publish amd64 Windows binaries, supported by Windows 11 ARM64 emulation.
-    if system == "windows" and name in ("shellcheck", "shfmt", "boat"):
-        arch = "amd64"
-    url, checksum = BINARY_ASSETS[name + "-" + system + "-" + arch]
-    archive = download(name + "-" + Path(url).name, url, checksum)
-    filename = name + (".exe" if system == "windows" else "")
-    if url.endswith(".deb"):
-        with deb_payload(archive) as source:
-            data = source.extractfile("./usr/bin/" + filename).read()
-    elif url.endswith(".zip"):
-        with zipfile.ZipFile(archive) as source:
-            member = next(n for n in source.namelist() if Path(n).name == filename)
-            data = source.read(member)
-    elif url.endswith(".tar.gz"):
-        with tarfile.open(archive) as source:
-            member = next(
-                m for m in source.getmembers() if Path(m.name).name == filename
-            )
-            data = source.extractfile(member).read()
+def main(argv):
+    wanted = None
+    for index, arg in enumerate(argv):
+        if arg == "--tools" and index + 1 < len(argv):
+            wanted = argv[index + 1]
+        elif arg.startswith("--tools="):
+            wanted = arg.partition("=")[2]
+    if "--ci" in argv or wanted is not None:
+        names = [name for name in (wanted or "").split(",") if name]
+        if "--ci" in argv and not names:
+            names = ["just", "shellcheck"]
+        prefetch(names)
+        if "--ci" in argv:
+            python = canonical_python()
+            if "GITHUB_PATH" in os.environ:
+                with Path(os.environ["GITHUB_PATH"]).open(
+                    "a", encoding="utf-8", newline="\n"
+                ) as output:
+                    output.write(
+                        str(cache_dir() / "bin") + "\n" + str(python.parent) + "\n"
+                    )
     else:
-        data = archive.read_bytes()
-    binary = CACHE / "bin" / filename
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    if not binary.is_file() or binary.read_bytes() != data:
-        binary.write_bytes(data)
-    binary.chmod(0o755)
-    return binary
+        call(canonical_python(), "-I", "-X", "utf8", *argv)
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--ci"]:
-        tool("just")
-        tool("shellcheck")
-        python = canonical_python()
-        with Path(os.environ["GITHUB_PATH"]).open(
-            "a", encoding="utf-8", newline="\n"
-        ) as output:
-            output.write(str(CACHE / "bin") + "\n" + str(python.parent) + "\n")
-    else:
-        call(canonical_python(), "-I", "-X", "utf8", *sys.argv[1:])
+    main(sys.argv[1:])
+
+
+try:
+    from toolchain_local import (  # noqa: F401
+        JAVA_ASSETS,
+        JAVA_VERSION,
+        check_java,
+        deb_libraries,
+        deb_payload,
+        java_home,
+    )
+except ImportError:
+    # Standalone core without the workspace module (other repos vendor their
+    # own repo-specific module next to their copy of the core).
+    JAVA_VERSION = None
+    JAVA_ASSETS = {}
+
+    def check_java(*args, **kwargs):
+        raise RuntimeError("toolchain_local is not vendored in this repo")
+
+    def deb_payload(*args, **kwargs):
+        raise RuntimeError("toolchain_local is not vendored in this repo")
+
+    def deb_libraries(*args, **kwargs):
+        raise RuntimeError("toolchain_local is not vendored in this repo")
+
+    def java_home(*args, **kwargs):
+        raise RuntimeError("toolchain_local is not vendored in this repo")

@@ -238,6 +238,24 @@ class Toolchain(unittest.TestCase):
             prefetch.assert_called_once_with(["ruff"])
 
 
+class WrapperJava(unittest.TestCase):
+    def test_missing_jdk_home_runs_wrapper_from_path_without_java_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shims = Path(temporary)
+            wrapper = shims / ("java.exe" if os.name == "nt" else "java")
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o755)
+            env = {"PATH": str(shims), "JAVA_HOME": "/stale"}
+            with (
+                patch.object(toolchain, "java_home", return_value=None),
+                patch.object(toolchain, "child_env", side_effect=lambda: dict(env)),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                self.assertEqual(Path(toolchain.native("java")), wrapper)
+                self.assertNotIn("JAVA_HOME", os.environ)
+                self.assertNotIn("JAVA_HOME", toolchain.jdk_env())
+
+
 class ManagedJava(unittest.TestCase):
     def archive(self, system, unsafe=False):
         output = io.BytesIO()

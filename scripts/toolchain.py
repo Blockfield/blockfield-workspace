@@ -172,8 +172,11 @@ def jdk_env():
     """Env with the pinned Temurin 21 first: every Gradle/Java entrypoint uses
     this instead of inheriting whatever java the host PATH happens to carry."""
     environment = child_env()
-    sdk = str(java_home())
-    environment["JAVA_HOME"] = sdk
+    sdk = java_home()
+    if sdk is None:
+        environment.pop("JAVA_HOME", None)
+        return environment
+    environment["JAVA_HOME"] = str(sdk)
     entries = [str(Path(sdk) / "bin"), *environment.get("PATH", "").split(os.pathsep)]
     environment["PATH"] = os.pathsep.join(
         dict.fromkeys(part for part in entries if part)
@@ -195,15 +198,24 @@ def native(name):
     ):
         sdk = java_home()
         environment = child_env()
-        environment["JAVA_HOME"] = str(sdk)
-        environment["PATH"] = os.pathsep.join(
-            dict.fromkeys([str(sdk / "bin"), *environment["PATH"].split(os.pathsep)])
-        )
-        os.environ.clear()
-        os.environ.update(environment)
-        if java_tool not in ("gradlew", "gradlew.bat"):
-            extension = ".exe" if host()[0] == "windows" else ""
-            name = sdk / "bin" / (java_tool.removesuffix(".exe") + extension)
+        if sdk is None:
+            # A repo module returns None for java from a wrapper without a JDK
+            # layout (asdf shims): run it from the filtered PATH, no JAVA_HOME.
+            environment.pop("JAVA_HOME", None)
+            os.environ.clear()
+            os.environ.update(environment)
+        else:
+            environment["JAVA_HOME"] = str(sdk)
+            environment["PATH"] = os.pathsep.join(
+                dict.fromkeys(
+                    [str(sdk / "bin"), *environment["PATH"].split(os.pathsep)]
+                )
+            )
+            os.environ.clear()
+            os.environ.update(environment)
+            if java_tool not in ("gradlew", "gradlew.bat"):
+                extension = ".exe" if host()[0] == "windows" else ""
+                name = sdk / "bin" / (java_tool.removesuffix(".exe") + extension)
     executable = shutil.which(str(name), path=child_env()["PATH"])
     if executable is None:
         raise RuntimeError(

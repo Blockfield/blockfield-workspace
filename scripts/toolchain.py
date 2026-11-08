@@ -379,7 +379,8 @@ def tool_ruff():
 
 
 def tool_npm(name):
-    directory = cache_dir() / "npm"
+    # Keyed by the locked version, like canonical_python: a lock bump must not reuse an old install.
+    directory = cache_dir() / ("npm-" + name + "-" + lock_tool(name)["version"])
     binary = (
         directory
         / "node_modules"

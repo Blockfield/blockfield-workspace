@@ -508,3 +508,21 @@ class LockDownloader(unittest.TestCase):
                     with patch.dict(os.environ, env, clear=True):
                         out = toolchain.fetch("probe", "legacy.bin")
                         self.assertEqual(out, Path(tmp) / "legacy" / "legacy.bin")
+
+    def test_npm_tool_reinstalls_after_a_lock_bump(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = Path(tmp) / "npm-prettier-1.0.0" / "node_modules" / ".bin"
+            stale.mkdir(parents=True)
+            (stale / ("prettier.cmd" if os.name == "nt" else "prettier")).write_text("")
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain, "lock_tool", return_value={"version": "2.0.0"}),
+                patch.object(
+                    toolchain, "fetch", return_value=Path(tmp) / "p.tgz"
+                ) as fetch,
+                patch.object(toolchain, "call") as call,
+            ):
+                binary = toolchain.tool_npm("prettier")
+            self.assertIn("npm-prettier-2.0.0", str(binary))
+            fetch.assert_called_once_with("prettier")
+            call.assert_called_once()

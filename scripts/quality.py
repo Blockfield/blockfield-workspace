@@ -491,7 +491,7 @@ def main():
             with Path(os.environ["GITHUB_PATH"]).open(
                 "a", encoding="utf-8", newline="\n"
             ) as output:
-                output.write(str(ROOT / ".cache/quality/npm/node_modules/.bin") + "\n")
+                output.write(str(Path(tool("pnpm")).parent) + "\n")
         return
     if mode in ("dev", "start", "test-postgres"):
         if (ROOT / "package.json").is_file():

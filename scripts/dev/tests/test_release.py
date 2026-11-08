@@ -677,12 +677,16 @@ class Ship(unittest.TestCase):
         self.assertEqual(
             kinds,
             [
+                "ff",
+                "ff",
                 "rc-gate",
                 "green",
                 "merge",
+                "ff",
                 "tag",
                 "green",
                 "merge",
+                "ff",
                 "run",
                 "gate",
                 "tag",
@@ -733,15 +737,19 @@ class Ship(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                ("ff", "client"),
+                ("ff", "server"),
                 ("rc-gate",),
                 ("green", release.REPO["client"]),
                 ("merge", release.REPO["client"], "a" * 40),
+                ("ff", "client"),
                 ("tag", "client"),
                 ("run", "client"),
                 ("published", "client"),
                 ("candidate",),
                 ("green", release.REPO["server"], "candidate-sha"),
                 ("merge", release.REPO["server"], "candidate-sha"),
+                ("ff", "server"),
                 ("tag", "server"),
                 ("run", "server"),
                 ("published", "server"),
@@ -758,6 +766,35 @@ class Ship(unittest.TestCase):
                 ("ff", "server"),
             ],
         )
+
+    def test_merge_then_failure_still_ffs_and_rerun_heals_first(self):
+        calls = []
+        tags = {"server": "v2.77.0"}
+        prepared = (tags, "server-only", [("tag", "server")], "")
+        # First run: the release PR merges, then tagging dies. The merge
+        # already moved next, and nothing after it ran.
+        with contextlib.ExitStack() as stack:
+            for patch in self.base_patches(calls, prepared):
+                stack.enter_context(patch)
+            stack.enter_context(
+                mock.patch.object(
+                    release, "push_tag", side_effect=RuntimeError("tag failed")
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "tag failed"):
+                release.cmd_ship(self.ship_args())
+        merge_at = calls.index(("merge", release.REPO["server"], "a" * 40))
+        self.assertIn(("ff", "server"), calls[merge_at + 1 :])
+        self.assertNotIn(("pin",), calls)
+        # Rerun: the start-of-ship resync heals next before anything else.
+        calls.clear()
+        self.assertTrue(
+            self.run_patches(
+                self.base_patches(calls, prepared),
+                lambda: release.cmd_ship(self.ship_args()),
+            )
+        )
+        self.assertEqual(calls[:2], [("ff", "client"), ("ff", "server")])
 
     def test_dry_run_prepares_but_mutates_nothing(self):
         prepared = ({"server": "v2.76.3"}, "server-only", [("tag", "server")], "")
@@ -783,6 +820,7 @@ class Ship(unittest.TestCase):
             mock.patch.object(release, "prepare_all", return_value=prepared),
             mock.patch.object(release, "say"),
             mock.patch.object(release, "mod_published", return_value=True),
+            mock.patch.object(release, "ff_next_to_main", return_value=True),
             mock.patch.object(release, "require_rc_gate", return_value=True),
             mock.patch.object(
                 release,
@@ -2696,6 +2734,43 @@ class FfNextToMain(unittest.TestCase):
         side = self.fixture(with_next=False)
         with mock.patch.object(release, "repo_dir", return_value=side):
             self.assertFalse(release.ff_next_to_main("server", False))
+
+    def test_report_only_names_exact_command_and_pushes_nothing(self):
+        side = self.fixture()
+        before = self.remote(side, "refs/heads/next")
+        main = self.remote(side, "refs/heads/main")
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False, report_only=True))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+        self.assertIn(f"push origin {main}:refs/heads/next", "\n".join(said))
+
+    def test_report_only_synced_is_a_quiet_ok(self):
+        side = self.fixture()
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", False))
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertTrue(release.ff_next_to_main("server", False, report_only=True))
+        self.assertIn("already at", "\n".join(said))
+
+    def test_report_only_diverged_reports_without_raising(self):
+        side = self.fixture(next_extra=True)
+        before = self.remote(side, "refs/heads/next")
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False, report_only=True))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+        self.assertIn("refusing to move next", "\n".join(said))
 
 
 if __name__ == "__main__":

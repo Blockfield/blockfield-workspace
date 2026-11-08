@@ -939,6 +939,9 @@ def cmd_status(args):
         f"production: client {prod['build']}, server {prod['server_build']}, contract {prod['compatibility'][:12]}"
     )
     say_held()
+    say("\nnext resync (a stale next makes the next prepare collide):")
+    for side in SIDES:
+        ff_next_to_main(side, False, report_only=True)
     changed, compat, broken = {}, {}, False
     mods = {}
     for side in SIDES:
@@ -1864,13 +1867,15 @@ def post_deploy_probes(tags, client=None, timeout_s=1800, interval_s=5):
     return True
 
 
-def ff_next_to_main(side, dry):
+def ff_next_to_main(side, dry, report_only=False):
     """Fast-forward origin/next to origin/main after the release merge. Never forces.
 
     The release PR is cut from origin/next and merged into main with a merge
     commit; without this step the next prepare would cut from a stale base and
     collide on the bumped version line. Raises (moving nothing) when next
     holds commits main does not contain: fast-forward it by hand instead.
+    With report_only (used by `release status`) nothing is pushed or raised:
+    a stale next is reported with the exact command that moves it.
     """
     repo = repo_dir(side)
     if not has_next(repo):
@@ -1882,11 +1887,22 @@ def ff_next_to_main(side, dry):
         say(f"  {side}: origin/next already at {main[:12]}")
         return True
     if not is_ancestor(repo, nxt, main):
-        raise RuntimeError(
+        message = (
             f"{side}: origin/next ({nxt[:7]}) is not an ancestor of origin/main"
             f" ({main[:7]}); refusing to move next (never force) — fast-forward"
             " it by hand, then continue"
         )
+        if report_only:
+            say(f"  {message}")
+            return False
+        raise RuntimeError(message)
+    if report_only:
+        say(
+            f"  {side}: origin/next ({nxt[:7]}) is behind origin/main"
+            f" ({main[:7]}); run: git -C {repo} push origin"
+            f" {main}:refs/heads/next"
+        )
+        return False
     ship_mutate(dry, "git", "push", "origin", f"{main}:refs/heads/next", cwd=repo)
     say(f"  {side}: fast-forwarded origin/next to {main[:12]}")
     return True
@@ -1924,6 +1940,9 @@ def ship_tag_side(
         args.dry_run,
         head,
     )
+    # A later gate may still fail: move next now, so a rerun never builds
+    # on the stale base.
+    ff_next_to_main(side, args.dry_run)
     sha = push_tag(
         side,
         tag,
@@ -2014,6 +2033,11 @@ def cmd_ship(args):
             "dry run: prepare pushed nothing, so merge/tag/watch/pin steps above are not executed"
         )
         return True
+    # Resume: an earlier ship may have merged a release PR and died before
+    # moving next; heal it now so this run cannot build on a stale base.
+    # (Dry runs return above: they merge nothing, so there is nothing to heal.)
+    for side in SIDES:
+        ff_next_to_main(side, dry)
     require_rc_gate(
         tags, getattr(args, "rc_record", None), getattr(args, "gate_waiver", None)
     )
@@ -2101,6 +2125,9 @@ def cmd_ship(args):
             dry,
             head,
         )
+        # A later gate may still fail: move next now, so a rerun never
+        # builds on the stale base.
+        ff_next_to_main("server", dry)
         server_sha = push_tag(
             "server",
             tags["server"],
@@ -2119,6 +2146,7 @@ def cmd_ship(args):
             dry,
             head,
         )
+        ff_next_to_main("client", dry)
         server_run = wait_release_run(
             "server", server_sha, timeout_s, interval_s, tags["server"]
         )

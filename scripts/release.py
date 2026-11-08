@@ -1923,7 +1923,8 @@ def ff_next_to_main(side, dry, report_only=False):
             "-m",
             "Merge main into next after release",
         )
-        ship_mutate(dry, "git", "push", "origin", f"{commit}:refs/heads/next", cwd=repo)
+        if not push_next(side, repo, dry, commit):
+            return False
         say(f"  {side}: merged origin/main into origin/next at {commit[:12]}")
         return True
     if report_only:
@@ -1933,8 +1934,22 @@ def ff_next_to_main(side, dry, report_only=False):
             f" {main}:refs/heads/next"
         )
         return False
-    ship_mutate(dry, "git", "push", "origin", f"{main}:refs/heads/next", cwd=repo)
+    if not push_next(side, repo, dry, main):
+        return False
     say(f"  {side}: fast-forwarded origin/next to {main[:12]}")
+    return True
+
+
+def push_next(side, repo, dry, sha):
+    """Move next without force. A rejected push (next moved meanwhile) only
+    warns: this runs between the release merge and the tag; rerun ship to heal."""
+    try:
+        ship_mutate(dry, "git", "push", "origin", f"{sha}:refs/heads/next", cwd=repo)
+    except RuntimeError as error:
+        say(
+            f"  WARNING {side}: could not move origin/next ({error}); rerun release ship"
+        )
+        return False
     return True
 
 

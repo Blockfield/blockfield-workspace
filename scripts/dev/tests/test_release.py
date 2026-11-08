@@ -2775,6 +2775,19 @@ class FfNextToMain(unittest.TestCase):
         self.assertEqual(self.remote(side, "refs/heads/next"), before)
         self.assertIn("conflicts", "\n".join(said))
 
+    def test_rejected_push_warns_instead_of_raising(self):
+        side = self.fixture()
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(
+                release, "ship_mutate", side_effect=RuntimeError("rejected")
+            ),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False))
+        self.assertIn("could not move origin/next", "\n".join(said))
+
     def test_missing_next_is_a_noop(self):
         side = self.fixture(with_next=False)
         with mock.patch.object(release, "repo_dir", return_value=side):

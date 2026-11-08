@@ -30,6 +30,7 @@ from scenarios import (  # noqa: E402
     readiness,
     seam,
     world_c2,
+    weapons_sweep,
 )
 
 
@@ -5337,3 +5338,111 @@ class HudChecks(unittest.TestCase):
         self.assertRaises(ValueError, hud_checks.magenta_fraction_png, b"nope")
         gray = self.png([[(7, 7, 7)]], ctype=0)
         self.assertRaises(ValueError, hud_checks.magenta_fraction_png, gray)
+
+
+class WeaponsSweep(unittest.TestCase):
+    def make_jar(self, directory, name, entries):
+        import zipfile
+
+        path = Path(directory) / name
+        with zipfile.ZipFile(path, "w") as archive:
+            for entry, payload in entries.items():
+                archive.writestr(entry, payload)
+        return path
+
+    def test_tacz_inventory_reads_pack_gun_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_jar(
+                tmp,
+                "pack.jar",
+                {
+                    "assets/elitex/custom/elitex_quality_guns/data/elitex/data/guns/benelli_super_data.json": "{}",
+                    "assets/tacz/custom/tacz_default_gun/data/tacz/data/guns/glock_17_data.json": "{}",
+                    "assets/elitex/custom/elitex_quality_guns/assets/elitex/display/guns/benelli_super_display.json": "{}",
+                },
+            )
+            self.make_jar(tmp, "empty.jar", {"readme.txt": "hi"})
+            found = weapons_sweep.tacz_gun_ids(tmp)
+            self.assertEqual(
+                found,
+                {
+                    "elitex:benelli_super": "pack.jar",
+                    "tacz:glock_17": "pack.jar",
+                },
+            )
+
+    def test_sbw_inventory_reads_gun_definitions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_jar(
+                tmp,
+                "sbw.jar",
+                {
+                    "assets/superbwarfare/sbw/guns/ak_12.json": "{}",
+                    "assets/superbwarfare/sbw/guns/ammo_762x39.json": "{}",
+                },
+            )
+            found, skipped = weapons_sweep.sbw_weapon_items(tmp)
+            self.assertEqual(found, ["superbwarfare:ak_12"])
+            self.assertEqual(skipped, ["superbwarfare:ammo_762x39"])
+
+    def make_pair(self, log_lines=(), fail_shoot=False, ammo=(300, 299)):
+        log_path = Path(tempfile.mkdtemp()) / "latest.log"
+        log_path.write_text("".join(log_lines), encoding="utf-8")
+
+        class Rcon:
+            def cmd(self, command):
+                if command == "list":
+                    return "players: hitbot"
+                if "GunCurrentAmmoCount" in command:
+                    return f"data: {ammo[0] if 'Hotbar' not in command else ammo[0]}"
+                if command.startswith("data get entity hitbot Health"):
+                    return "hitbot has the following entity data: 20.0f"
+                if command == "kill hitbot":
+                    return "Killed hitbot"
+                if command.startswith("execute if items"):
+                    return (
+                        "Test passed"
+                        if "give" in " ".join([])
+                        else "Test passed, count: 1"
+                    )
+                return "ok"
+
+        def bot(command):
+            if command == "state":
+                return {
+                    "name": "hitbot",
+                    "held": "tacz:modern_kinetic_gun",
+                    "dimension": "blockfield:range",
+                }
+            if command == "tacz shoot":
+                if fail_shoot:
+                    raise OSError("bot lost: server gone")
+                return {"result": "SUCCESS"}
+            return {"ok": True}
+
+        return Rcon(), bot, log_path
+
+    def test_tacz_happy_path_fires_and_survives(self):
+        rcon, bot, log_path = self.make_pair()
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+        )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+
+    def test_server_log_exception_stops_the_weapon(self):
+        rcon, bot, log_path = self.make_pair(
+            log_lines=["[Server thread/ERROR]: java.lang.RuntimeException: boom\n"]
+        )
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+        )
+        self.assertEqual(stop, "server-log-exception")
+        self.assertTrue(detail["log_hits"])
+
+    def test_lost_bot_aborts_the_weapon_loudly(self):
+        rcon, bot, log_path = self.make_pair(fail_shoot=True)
+        with self.assertRaises(OSError):
+            weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )

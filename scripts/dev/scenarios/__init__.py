@@ -27,6 +27,7 @@ from . import (
     stress,
     tablet,
     world_c2,
+    weapons_sweep,
 )
 
 MODULES = (
@@ -48,6 +49,7 @@ MODULES = (
     rc,
     seam,
     world_c2,
+    weapons_sweep,
 )
 
 SCENARIOS = {m.SCENARIO["name"]: m for m in MODULES}

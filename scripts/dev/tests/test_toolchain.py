@@ -285,12 +285,12 @@ class WrapperJava(unittest.TestCase):
             shims = Path(temporary) / "shims"
             shims.mkdir()
             env = {
-                "PATH": os.pathsep.join([str(stale), str(shims)]),
+                "PATH": os.pathsep.join([str(stale), str(shims), str(stale)]),
                 "JAVA_HOME": str(stale.parent),
             }
             result = toolchain.without_java_home(dict(env))
             self.assertNotIn("JAVA_HOME", result)
-            self.assertEqual(result["PATH"], str(shims))
+            self.assertEqual(result["PATH"], os.pathsep.join([str(shims), str(stale)]))
 
 
 class ManagedJava(unittest.TestCase):

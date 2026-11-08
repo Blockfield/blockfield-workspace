@@ -173,12 +173,10 @@ def without_java_home(environment):
     """No JDK home: drop JAVA_HOME and the $JAVA_HOME/bin entry child_env() put first on PATH."""
     home = environment.pop("JAVA_HOME", None)
     if home:
-        stale = str(Path(home) / "bin")
-        environment["PATH"] = os.pathsep.join(
-            part
-            for part in environment.get("PATH", "").split(os.pathsep)
-            if part != stale
-        )
+        # Only the entry child_env() prepended; the same dir may also be a real host PATH entry.
+        parts = environment.get("PATH", "").split(os.pathsep)
+        if parts and parts[0] == str(Path(home) / "bin"):
+            environment["PATH"] = os.pathsep.join(parts[1:])
     return environment
 
 

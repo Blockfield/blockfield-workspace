@@ -280,6 +280,20 @@ class WrapperJava(unittest.TestCase):
                 self.assertNotIn("JAVA_HOME", os.environ)
                 self.assertNotIn("JAVA_HOME", toolchain.jdk_env())
 
+    def test_stale_java_home_bin_is_dropped_from_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stale = Path(temporary) / "stale" / "bin"
+            stale.mkdir(parents=True)
+            shims = Path(temporary) / "shims"
+            shims.mkdir()
+            env = {
+                "PATH": os.pathsep.join([str(stale), str(shims)]),
+                "JAVA_HOME": str(stale.parent),
+            }
+            result = toolchain.without_java_home(dict(env))
+            self.assertNotIn("JAVA_HOME", result)
+            self.assertEqual(result["PATH"], str(shims))
+
 
 class ManagedJava(unittest.TestCase):
     def archive(self, system, unsafe=False):

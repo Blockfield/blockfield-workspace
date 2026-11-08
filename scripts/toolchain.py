@@ -169,14 +169,26 @@ def child_env():
     return env
 
 
+def without_java_home(environment):
+    """No JDK home: drop JAVA_HOME and the $JAVA_HOME/bin entry child_env() put first on PATH."""
+    home = environment.pop("JAVA_HOME", None)
+    if home:
+        stale = str(Path(home) / "bin")
+        environment["PATH"] = os.pathsep.join(
+            part
+            for part in environment.get("PATH", "").split(os.pathsep)
+            if part != stale
+        )
+    return environment
+
+
 def jdk_env():
     """Env with the pinned Temurin 21 first: every Gradle/Java entrypoint uses
     this instead of inheriting whatever java the host PATH happens to carry."""
     environment = child_env()
     sdk = java_home()
     if sdk is None:
-        environment.pop("JAVA_HOME", None)
-        return environment
+        return without_java_home(environment)
     environment["JAVA_HOME"] = str(sdk)
     entries = [str(Path(sdk) / "bin"), *environment.get("PATH", "").split(os.pathsep)]
     environment["PATH"] = os.pathsep.join(
@@ -202,7 +214,7 @@ def native(name):
         if sdk is None:
             # A repo module returns None for java from a wrapper without a JDK
             # layout (asdf shims): run it from the filtered PATH, no JAVA_HOME.
-            environment.pop("JAVA_HOME", None)
+            without_java_home(environment)
             os.environ.clear()
             os.environ.update(environment)
         else:

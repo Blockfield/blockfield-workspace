@@ -132,7 +132,7 @@ Gradle 2 ГБ. Стенд один; Gradle — до двух одновреме�
 - Каждый тег `vX.Y.Z` клиента/сервера и ручной Deploy требуют явного подтверждения владельца в текущем разговоре:
   они запускают выпуск **и прод-деплой**. Подготовка PR/тестов/release notes это разрешение не заменяет.
 - Отложенное до релиза (пины, теги ресурсов, проверки) — открытые issues с меткой `next-release` в client/server;
-  `just release status` и `prepare` их выводят. Выполните их до тега; закрываются, как и все issues, при слиянии.
+  `just release status` и `prepare` их выводят. Выполните их до тега: issue закрывается при слиянии PR, который выполняет пункт (он попадёт в тег); пункт без PR — после выполнения.
 - Релиз: `release-notes.md`, `announcement.json` и описания PR пишет CI по фактам (`.github/actions/release-text`);
   агент прозу не пишет, `release-notes/vX.Y.Z.md` не готовит, PR достаточно названия. [Формат](client/docs/RELEASE-NOTES.md). Контракт: Minecraft/Fabric, protocol, общие моды/ресурсы.
   Изменение `side = "both"` — парный выпуск, сервер первым: [DEPLOY](server/docs/DEPLOY.md).

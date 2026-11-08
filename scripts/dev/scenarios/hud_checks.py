@@ -75,8 +75,12 @@ def gun_replace_command(name, gun_id, ammo=30000):
 
 
 def parse_health(reply):
-    """Float from `data get entity <name> Health` (`... has Health: 20.0f`)."""
-    match = re.search(r"Health: (-?\d+(?:\.\d+)?)f", reply or "")
+    """Float from `data get entity <name> Health`.
+
+    The reply names the path (`... has Health: 20.0f`) or, for a path query, only the value
+    (`... has the following entity data: 20.0f`).
+    """
+    match = re.search(r"(?:Health: |entity data: )(-?\d+(?:\.\d+)?)f", reply or "")
     if not match:
         raise ValueError(f"no Health in {reply!r:.120}")
     return float(match.group(1))

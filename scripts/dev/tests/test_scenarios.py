@@ -5298,8 +5298,8 @@ class HudChecks(unittest.TestCase):
             out = hud_checks.scenario_isolation(rcon, victim, parked, "room1")
         self.assertEqual(out, [0] * 6, out)
 
-    def test_tag_exact_evil_name(self):
-        evil = "<tag>Probe"
+    def test_tag_exact_tricky_name(self):
+        evil = "x_reset_x"
 
         def bot(command):
             assert command == "messages 30", command
@@ -5312,12 +5312,20 @@ class HudChecks(unittest.TestCase):
         entry = {"attacker": "Player1103", "target": evil, "headshot": False}
         self.assertEqual(hud_checks.scenario_tag(None, bot, bot2, entry), [0, 0])
 
-    def test_tag_requires_evil_name(self):
+    def test_tag_requires_tricky_name(self):
         def bot2(command):
             assert command == "state", command
             return {"name": "Normal", "dimension": "blockfield:hamburg_2"}
 
         self.assertEqual(hud_checks.scenario_tag(None, lambda cmd: [], bot2, None), [1])
+
+    def test_tricky_names_are_login_valid(self):
+        for name in hud_checks.TRICKY_NAMES:
+            with self.subTest(name=name):
+                self.assertTrue(hud_checks.is_tricky_name(name))
+                hud_checks.gun_replace_command(name, "elitex:mp5_classic")
+        self.assertFalse(hud_checks.is_tricky_name("Normal"))
+        self.assertFalse(hud_checks.is_tricky_name("<tag>Probe"))
 
     def test_magenta_fraction(self):
         black = self.png([[(0, 0, 0), (10, 20, 30)], [(1, 2, 3), (4, 5, 6)]])

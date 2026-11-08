@@ -493,7 +493,8 @@ def main(argv):
             wanted = argv[index + 1]
         elif arg.startswith("--tools="):
             wanted = arg.partition("=")[2]
-    if "--ci" in argv or wanted is not None:
+    # Only a leading flag selects prefetch; `toolchain.py script.py --ci` must run the script.
+    if argv and (argv[0] in ("--ci", "--tools") or argv[0].startswith("--tools=")):
         names = [name for name in (wanted or "").split(",") if name]
         if "--ci" in argv and not names:
             names = ["just", "shellcheck"]

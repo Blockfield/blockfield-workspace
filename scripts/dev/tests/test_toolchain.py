@@ -155,6 +155,27 @@ class Toolchain(unittest.TestCase):
         self.assertEqual(env["JAVA_HOME"], "/native/jdk")
         self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
 
+    def test_flags_after_a_script_run_the_script_instead_of_prefetching(self):
+        with (
+            patch.object(toolchain, "prefetch") as prefetch,
+            patch.object(toolchain, "call") as call,
+            patch.object(toolchain, "canonical_python", return_value=Path("py")),
+        ):
+            toolchain.main(["scripts/check.py", "--ci", "--tools", "ruff"])
+            prefetch.assert_not_called()
+            call.assert_called_once_with(
+                Path("py"),
+                "-I",
+                "-X",
+                "utf8",
+                "scripts/check.py",
+                "--ci",
+                "--tools",
+                "ruff",
+            )
+            toolchain.main(["--tools=ruff"])
+            prefetch.assert_called_once_with(["ruff"])
+
 
 class ManagedJava(unittest.TestCase):
     def archive(self, system, unsafe=False):

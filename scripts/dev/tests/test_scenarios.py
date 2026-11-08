@@ -5176,6 +5176,55 @@ class HudChecks(unittest.TestCase):
                 self.assertEqual(cmds[0].count(uid), 2)
                 self.assertNotIn(observer, cmds[0])
 
+    def test_isolation_minimap_waits_for_render(self):
+        # The client hides and re-renders the minimap a few query ticks after
+        # the deployed flag flips; instant reads flaked on slow stands.
+        arena = "blockfield:dm_arena_1"
+        victim, observer = "Victim", "Observer"
+        entry = {"attacker": victim, "target": victim}
+        state = {"dead": False, "reads": 0}
+
+        def member(text):
+            if text == "state":
+                return {"name": victim, "dimension": arena}
+            if text == "killfeed":
+                return {"entries": [entry] if state["dead"] else []}
+            if text == "markers":
+                state["reads"] += 1
+                if state["dead"]:
+                    # deployed drops at once, the minimap hides two ticks later
+                    return {
+                        "deployed": False,
+                        "minimap": None if state["reads"] > 2 else {},
+                    }
+                # respawn flips deployed at once, the minimap renders later
+                minimap = {} if state.get("respawned") and state["reads"] > 2 else None
+                return {"deployed": True, "minimap": minimap, "playerTeam": "A"}
+            if text == "bfaction spawn:BASE":
+                state["dead"] = False
+                state["respawned"] = True
+                state["reads"] = 0
+                return {}
+            raise AssertionError(text)
+
+        def parked(text):
+            if text == "state":
+                return {"name": observer, "dimension": arena + "_2"}
+            if text == "killfeed":
+                return {"entries": []}
+            raise AssertionError(text)
+
+        def command(text):
+            state["dead"] = True
+            state["reads"] = 0
+            return "Applied 100.0 damage to Victim"
+
+        with patch("time.sleep"):
+            out = hud_checks.scenario_isolation(
+                SimpleNamespace(cmd=command), member, parked, "2"
+            )
+        self.assertEqual(out, [0] * 6, out)
+
     def test_parse_health_and_pos(self):
         self.assertEqual(hud_checks.parse_health("bot43 has Health: 20.0f"), 20.0)
         self.assertEqual(

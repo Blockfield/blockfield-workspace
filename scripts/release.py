@@ -262,6 +262,17 @@ def repo_dir(side):
 
 def fetch_main(repo):
     git(repo, "fetch", "-q", "origin", "main")
+    git(repo, "fetch", "-q", "origin", "next", check=False)
+
+
+def has_next(repo):
+    """True when the repo carries unreleased work on origin/next."""
+    return bool(git(repo, "ls-remote", "--heads", "origin", "next").strip())
+
+
+def integration_ref(repo):
+    """Ref carrying unreleased work: origin/next when the repo has it, else origin/main."""
+    return "origin/next" if has_next(repo) else "origin/main"
 
 
 def remote_tags(repo):
@@ -660,18 +671,28 @@ def pr_branch(side, tag):
 def prepare_side(side, args, prod, manifest, repin):
     repo = repo_dir(side)
     fetch_main(repo)
+    base = integration_ref(repo)
     tags = remote_tags(repo)
     last = newest(tags)
-    version = next_version(last, show_pack(repo, "origin/main"), args.bump)
+    version = next_version(last, show_pack(repo, base), args.bump)
     tag, branch = f"v{version}", pr_branch(side, f"v{version}")
     waiver = getattr(args, "gate_waiver", None)
     body = f"Release-gate waiver: {waiver}\n" if waiver else ""
+    if base == "origin/next":
+        # The release PR merges next into main: it must stay a merge commit
+        # (never squash), and next is fast-forwarded to main right after.
+        body += (
+            "Merge with a merge commit (never squash); after the merge run: "
+            f"git -C {side} fetch -q origin && "
+            "git -C {side} push origin origin/main:refs/heads/next "
+            "(fast-forward next to main)\n"
+        )
     if git(repo, "ls-remote", "--heads", "origin", branch):
         raise SystemExit(
             f"{branch} already exists on origin; delete or reuse it manually"
         )
     say(f"== {side} {tag}")
-    with worktree(repo, "origin/main", branch, side) as tree:
+    with worktree(repo, base, branch, side) as tree:
         files, parts = [], []
         if side == "server" and args.server_merge:
             for name in (piece.strip() for piece in args.server_merge.split(",")):
@@ -690,8 +711,8 @@ def prepare_side(side, args, prod, manifest, repin):
         if args.decor:
             files.append(pin_jar(tree, "decor", args.decor))
             parts.append(f"decor {args.decor}")
-        if not git(tree, "diff", "origin/main", "--name-only"):
-            # Fork-pin-only path: mod/decor pins match origin/main, but the
+        if not git(tree, "diff", base, "--name-only"):
+            # Fork-pin-only path: mod/decor pins match the integration base, but the
             # tree may still carry unreleased content vs the newest tag
             # (client main, or the merged server branch). Release then.
             if not last:
@@ -780,6 +801,13 @@ def tag_lines(order, tags, branch):
             lines.append(
                 shlex.join(deploy_command(side, tags[side]))
                 + "   # wait for this new dispatch run to succeed"
+            )
+    for action, side in order:
+        if action == "tag":
+            lines.append(
+                f"after the {side} release merge: merge with a merge commit (never squash), then "
+                f"git -C {side} fetch -q origin && git -C {side} push origin origin/main:refs/heads/next"
+                "   # fast-forward next to main; hotfixes go via next too"
             )
     return lines
 
@@ -916,6 +944,7 @@ def cmd_status(args):
     for side in SIDES:
         repo = repo_dir(side)
         fetch_main(repo)
+        base = integration_ref(repo)
         tags, last = remote_tags(repo), published(side)
         log = (
             git(
@@ -923,15 +952,15 @@ def cmd_status(args):
                 "log",
                 "--no-merges",
                 "--format=%h %s",
-                f"{tags[last]}..origin/main",
+                f"{tags[last]}..{base}",
             ).splitlines()
             if last in tags
             else []
         )
         changed[side] = bool(log)
-        mods[side] = pins(repo, "origin/main")
+        mods[side] = pins(repo, base)
         say(
-            f"\n{side}: last published {last}, pack.toml on main {show_pack(repo, 'origin/main')}, {len(log)} unreleased commit(s)"
+            f"\n{side}: last published {last}, pack.toml on {base.removeprefix('origin/')} {show_pack(repo, base)}, {len(log)} unreleased commit(s)"
         )
         for line in log[:8]:
             say(f"  {line}")
@@ -950,16 +979,21 @@ def cmd_status(args):
     for side in SIDES:
         if changed[side]:
             repo = repo_dir(side)
-            with worktree(repo, "origin/main", side=side) as tree:
-                say(f"\nbuilding {side} main to read its contract ...")
+            base = integration_ref(repo)
+            with worktree(repo, base, side=side) as tree:
+                say(
+                    f"\nbuilding {side} {base.removeprefix('origin/')} to read its contract ..."
+                )
                 try:
-                    tag = "v" + show_pack(repo, "origin/main")
+                    tag = "v" + show_pack(repo, base)
                     meta = build(side, tree, tag)
                     compat[side] = meta["compatibility"]
                     broken |= not show(contract_checks(side, meta, prod))
                 except RuntimeError as error:
                     broken = True
-                    say(f"{side} main does not build/pass its checks:\n{error}")
+                    say(
+                        f"{side} {base.removeprefix('origin/')} does not build/pass its checks:\n{error}"
+                    )
     if broken:
         say("\nrelease kind: blocked by the failures above")
         return False

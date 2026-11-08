@@ -130,6 +130,20 @@ def workspace_tip_ref(root):
     return None
 
 
+def integration_base(repo):
+    """Ref carrying unreleased work: origin/next when the repo has it, else the origin default.
+
+    One place for the next-branch policy: pr_ship, boat helpers and release
+    tooling resolve their base through this instead of hard-coding origin/main.
+    """
+    probe = git(
+        repo, "rev-parse", "--verify", "refs/remotes/origin/next^{commit}", check=False
+    )
+    if probe.returncode == 0 and probe.stdout.strip():
+        return "origin/next"
+    return workspace_tip_ref(repo) or "origin/main"
+
+
 def submodules(root):
     out = git(
         root,
@@ -254,7 +268,7 @@ def source_identity(root, rel, fetch, mode, source=None):
         git(root, "rev-parse", "--verify", f"HEAD:{rel}", check=False) if rel else None
     )
     pin = pin_out.stdout.strip() if pin_out and pin_out.returncode == 0 else None
-    upstream = workspace_tip_ref(repo) or "origin/main"
+    upstream = integration_base(repo)
     tip_out = git(repo, "rev-parse", "--verify", f"{upstream}^{{commit}}", check=False)
     tip = tip_out.stdout.strip() if tip_out.returncode == 0 else None
     ref = (

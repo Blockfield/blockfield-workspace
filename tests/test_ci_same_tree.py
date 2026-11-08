@@ -10,13 +10,16 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "ci-same-tree.sh"
 
 # Fake `gh`: answers the API calls ci-same-tree.sh makes using COMMIT_TREE and
-# ARTIFACT_NAMES from the environment, so no network is needed.
+# ARTIFACT_NAMES from the environment, so no network is needed. PR_RUN_IDS /
+# REVIEW_RUN_IDS override which run ids each event lookup returns (default: one
+# pull_request run, no review runs).
 FAKE_GH = """#!/bin/sh
 args="$*"
 case "$args" in
   *"/runs?status=success"*) printf 'abc123\\n' ;;
   *"/git/commits/"*) printf '%s\\n' "${COMMIT_TREE:-other}" ;;
-  *"?event=pull_request"*) printf '42\\n' ;;
+  *"?event=pull_request_review"*) printf '%s' "${REVIEW_RUN_IDS:-}" ;;
+  *"?event=pull_request"*) printf '%s' "${PR_RUN_IDS:-42\\n}" ;;
   *"/artifacts"*) printf '%s\\n' "${ARTIFACT_NAMES:-unrelated}" ;;
 esac
 """
@@ -63,11 +66,11 @@ class SameTree(unittest.TestCase):
     def run_cmd(self, cmd):
         return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
 
-    def lookup(self, extra_env=None):
+    def lookup(self, extra_env=None, *argv):
         env = dict(self.env)
         env.update(extra_env or {})
         proc = subprocess.run(
-            ["sh", str(SCRIPT), "standards.yml"],
+            ["sh", str(SCRIPT), "standards.yml", *argv],
             capture_output=True,
             text=True,
             cwd=self.repo,
@@ -91,6 +94,21 @@ class SameTree(unittest.TestCase):
     def test_unknown_tree_reports_untested(self):
         rc, out = self.lookup({"COMMIT_TREE": "no-match"})
         self.assertEqual((rc, out), (0, "false"))
+
+    def test_review_run_artifact_reports_tested(self):
+        rc, out = self.lookup(
+            {
+                "COMMIT_TREE": "no-match",
+                "PR_RUN_IDS": "",
+                "REVIEW_RUN_IDS": "43\n",
+                "ARTIFACT_NAMES": f"tested-tree-{self.tree}",
+            }
+        )
+        self.assertEqual((rc, out), (0, "true"))
+
+    def test_branch_filter_keeps_matching(self):
+        rc, out = self.lookup({"COMMIT_TREE": self.tree}, "next")
+        self.assertEqual((rc, out), (0, "true"))
 
     def test_missing_workflow_argument_fails_closed(self):
         proc = subprocess.run(

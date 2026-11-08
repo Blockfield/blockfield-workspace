@@ -49,19 +49,12 @@ def gh(repo, *args):
 
 
 def default_branch(repo):
-    tip = agent_preflight.default_tip(repo)
-    if not tip:
-        raise SystemExit(f"{repo}: cannot find origin's default branch; fetch first")
-    head = agent_preflight.git(
-        repo, "symbolic-ref", "refs/remotes/origin/HEAD", check=False
-    ).stdout.strip()
-    if head.startswith("refs/remotes/"):
-        return head.split("refs/remotes/")[-1]
-    for ref in ("origin/main", "origin/master"):
-        out = run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
-        if out.returncode == 0 and out.stdout.strip() == tip:
-            return ref
-    return "origin/main"
+    # Integration base (origin/next when the repo has it): task branches rebase
+    # onto / merge from unreleased work, not from the last release on main.
+    base = agent_preflight.integration_base(repo)
+    if run(repo, "rev-parse", "--verify", f"{base}^{{commit}}", check=False).returncode:
+        raise SystemExit(f"{repo}: cannot find {base}; fetch first")
+    return base
 
 
 def main(argv):

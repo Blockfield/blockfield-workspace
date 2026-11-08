@@ -5121,6 +5121,61 @@ class HudChecks(unittest.TestCase):
             0,
         )
 
+    def test_isolation_suicide_stays_in_started_room(self):
+        arena = "blockfield:dm_arena_1"
+        victim, observer = "Victim", "Observer"
+        entry = {"attacker": victim, "target": victim}
+        uid = hud_checks.offline_uuid(victim)
+        for reply, leaked, want in (
+            ("Applied 100.0 damage to Victim", False, [0] * 6),
+            ("Applied 100.0 damage to Victim", True, [0, 0, 1, 0, 0, 0]),
+            ("Target is invulnerable", False, [1]),
+        ):
+            with self.subTest(reply=reply, leaked=leaked):
+                state = {"dead": False}
+                cmds = []
+
+                def command(text):
+                    cmds.append(text)
+                    if "Applied" in reply:
+                        state["dead"] = True
+                    return reply
+
+                def member(text):
+                    if text == "state":
+                        return {"name": victim, "dimension": arena}
+                    if text == "killfeed":
+                        return {"entries": [entry] if state["dead"] else []}
+                    if text == "markers":
+                        if state["dead"]:
+                            return {"deployed": False, "minimap": None}
+                        return {
+                            "deployed": True,
+                            "minimap": {},
+                            "playerTeam": "A",
+                        }
+                    if text == "bfaction spawn:BASE":
+                        state["dead"] = False
+                        return {}
+                    raise AssertionError(text)
+
+                def parked(text):
+                    if text == "state":
+                        return {"name": observer, "dimension": arena + "_2"}
+                    if text == "killfeed":
+                        return {
+                            "entries": [entry] if (leaked and state["dead"]) else []
+                        }
+                    raise AssertionError(text)
+
+                with patch("time.sleep"):
+                    out = hud_checks.scenario_isolation(
+                        SimpleNamespace(cmd=command), member, parked, "2"
+                    )
+                self.assertEqual(out, want)
+                self.assertEqual(cmds[0].count(uid), 2)
+                self.assertNotIn(observer, cmds[0])
+
     def test_parse_health_and_pos(self):
         self.assertEqual(hud_checks.parse_health("bot43 has Health: 20.0f"), 20.0)
         self.assertEqual(
@@ -5151,7 +5206,7 @@ class HudChecks(unittest.TestCase):
     def test_isolation_empty_parked_feed_passes(self):
         # The parked client sees no line: match returns None, and the old
         # `not any(match)` raised TypeError on exactly this outcome.
-        line = {"attacker": "Killer", "target": "Victim"}
+        line = {"attacker": "Victim", "target": "Victim"}
         state = {"spawned": False, "killed": False}
 
         def victim(text):
@@ -5174,7 +5229,7 @@ class HudChecks(unittest.TestCase):
 
         def parked(text):
             if text == "state":
-                return {"name": "Killer", "dimension": "minecraft:overworld"}
+                return {"name": "Observer", "dimension": "minecraft:overworld"}
             if text == "killfeed":
                 return {"entries": []}
             if text.startswith("bfaction"):

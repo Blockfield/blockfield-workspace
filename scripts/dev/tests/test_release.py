@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -2750,7 +2751,12 @@ class FfNextToMain(unittest.TestCase):
         side = self.fixture(next_extra=True)
         before = self.remote(side, "refs/heads/next")
         main = self.remote(side, "refs/heads/main")
-        with mock.patch.object(release, "repo_dir", return_value=side):
+        identity = {k: "t" for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")}
+        identity |= {k: "t@t" for k in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")}
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.dict(os.environ, identity),
+        ):
             self.assertTrue(release.ff_next_to_main("server", False))
         after = self.remote(side, "refs/heads/next")
         subprocess.run(["git", "-C", str(side), "fetch", "-q", "origin"], check=True)

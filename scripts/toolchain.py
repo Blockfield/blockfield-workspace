@@ -684,7 +684,10 @@ def main(argv):
                 ) as output:
                     output.write("\n".join([*pinned_bins(), str(python.parent)]) + "\n")
     else:
-        call(canonical_python(), "-I", "-X", "utf8", *argv)
+        # Inherit stdout (JSON/MCP callers read it) and return the child's status.
+        return subprocess.run(
+            [native(canonical_python()), "-I", "-X", "utf8", *argv], env=child_env()
+        ).returncode
 
 
 if __name__ == "__main__":

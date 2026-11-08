@@ -220,21 +220,19 @@ class Toolchain(unittest.TestCase):
     def test_flags_after_a_script_run_the_script_instead_of_prefetching(self):
         with (
             patch.object(toolchain, "prefetch") as prefetch,
-            patch.object(toolchain, "call") as call,
+            patch.object(toolchain, "native", side_effect=lambda name: name),
+            patch.object(toolchain, "child_env", return_value={}),
             patch.object(toolchain, "canonical_python", return_value=Path("py")),
+            patch.object(
+                toolchain.subprocess, "run", return_value=SimpleNamespace(returncode=3)
+            ) as run,
         ):
-            toolchain.main(["scripts/check.py", "--ci", "--tools", "ruff"])
+            argv = ["scripts/check.py", "--ci", "--tools", "ruff"]
+            self.assertEqual(toolchain.main(argv), 3)
             prefetch.assert_not_called()
-            call.assert_called_once_with(
-                Path("py"),
-                "-I",
-                "-X",
-                "utf8",
-                "scripts/check.py",
-                "--ci",
-                "--tools",
-                "ruff",
-            )
+            command = run.call_args.args[0]
+            self.assertEqual(command, [Path("py"), "-I", "-X", "utf8", *argv])
+            self.assertNotIn("stdout", run.call_args.kwargs)
             toolchain.main(["--tools=ruff"])
             prefetch.assert_called_once_with(["ruff"])
 

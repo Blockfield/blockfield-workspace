@@ -879,7 +879,8 @@ def write_env(vm_id, remote_root, task):
         " && python3 -I scripts/quality.py run java -version"
         " && JH=$(python3 -c \"import sys; sys.path.insert(0, 'scripts');"
         ' from toolchain import java_home; print(java_home())")'
-        " && QBIN=$PWD/.cache/quality/bin"
+        " && QBIN=$(python3 -c \"import sys; sys.path.insert(0, 'scripts');"
+        " from toolchain import pinned_bins; print(':'.join(pinned_bins()))\")"
         " && PYBIN=$(python3 -c \"import sys; sys.path.insert(0, 'scripts');"
         " from toolchain import canonical_python;"
         ' print(canonical_python().parent)")'

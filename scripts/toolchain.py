@@ -13,6 +13,7 @@ module next to it.
 """
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -46,7 +47,7 @@ __all__ = [
     "lock_platform",
     "lock_tool",
     "native",
-    "publish_link",
+    "pinned_bins",
     "read_url",
     "replace",
     "retried",
@@ -153,7 +154,7 @@ def child_env():
     env["PATH"] = os.pathsep.join(
         [
             *([str(sdk)] if env.get("JAVA_HOME") and sdk.is_dir() else []),
-            str(cache_dir() / "bin"),
+            *pinned_bins(),
             *(
                 entry
                 for entry in env.get("PATH", "").split(os.pathsep)
@@ -343,6 +344,84 @@ def fetch(tool_name, filename=None, *, cache=None, platform=None):
     raise RuntimeError(f"Tool {tool_name!r} download failed: " + "; ".join(failures))
 
 
+def _pin_key(spec):
+    """Cache subdirectory for one locked asset: the first 16 hex digits of
+    its pin, so a lock bump never reuses (or flips) another pin's binaries."""
+    if "sha256" in spec:
+        return spec["sha256"][:16]
+    return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def pinned_bins():
+    """Every `bin/<pin>` directory of this checkout's lock for the current
+    host. Child processes and CI resolve bare tool names from these, so no
+    shared `bin/<name>` link can flip between pins under a shared cache."""
+    try:
+        lock = load_lock()
+    except RuntimeError:
+        return []
+    directories = []
+    for name in lock.get("tools", {}):
+        try:
+            _, _, spec = lock_platform(name, lock=lock)
+        except RuntimeError:
+            continue  # no asset pinned for this host
+        directories.append(str(cache_dir() / "bin" / _pin_key(spec)))
+    return directories
+
+
+@contextlib.contextmanager
+def _held(lock_path, timeout=600):
+    """Exclusive OS file lock beside an install dir (flock on POSIX,
+    msvcrt.locking on Windows). The OS releases it if the holder dies, so a
+    crashed builder can never wedge later runs; only the holder may
+    delete or rebuild the guarded dir."""
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    with open(lock_path, "a+b") as handle:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Tool install is locked by another process ({lock_path}); "
+                        f"gave up after {timeout}s"
+                    )
+                time.sleep(1)
+        try:
+            yield handle
+        finally:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
+def _mark_complete(directory):
+    """Completion marker written last: an install dir counts as usable only
+    when its builder finished and left this file."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".complete").write_text("complete\n", encoding="utf-8")
+
+
 def ruff_version(python):
     try:
         probe = subprocess.run(
@@ -380,34 +459,7 @@ def _install_ruff_venv(directory, python, expected):
     if ruff_version(python) != expected:
         shutil.rmtree(directory, ignore_errors=True)
         raise RuntimeError(f"ruff install did not produce {expected}")
-
-
-def _build_ruff_venv(directory, python, expected):
-    """One builder per versioned dir wins a mkdir claim and builds in place: a
-    venv is not relocatable (renaming breaks installed shebangs with "bad
-    interpreter"), so there is no staging rename. Losers wait for a valid
-    install; nothing installed is ever cleared or reinstalled under a runner."""
-    try:
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        directory.mkdir()
-    except FileExistsError:
-        pass
-    else:
-        _install_ruff_venv(directory, python, expected)
-        return
-    for _ in range(60):  # a cold venv+pip build takes ~1-2 min; bound the wait
-        if python.is_file() and ruff_version(python) == expected:
-            return
-        time.sleep(5)
-    # Nobody published: reclaim a stalled or damaged dir, else say how to fix.
-    shutil.rmtree(directory, ignore_errors=True)
-    try:
-        directory.mkdir()
-    except FileExistsError:
-        raise RuntimeError(
-            f"Tool ruff install is contested: delete {directory} and retry"
-        )
-    _install_ruff_venv(directory, python, expected)
+    _mark_complete(directory)
 
 
 def tool_ruff():
@@ -417,9 +469,19 @@ def tool_ruff():
     expected = "ruff " + version
     directory = cache_dir() / ("venv-ruff-" + version)
     python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file() or ruff_version(python) != expected:
-        _build_ruff_venv(directory, python, expected)
-    return directory / ("Scripts/ruff.exe" if os.name == "nt" else "bin/ruff")
+    ruff = directory / ("Scripts/ruff.exe" if os.name == "nt" else "bin/ruff")
+    marker = directory / ".complete"
+    if marker.is_file() and ruff_version(python) == expected:
+        return ruff
+    with _held(cache_dir() / (directory.name + ".lock")):
+        if marker.is_file() and ruff_version(python) == expected:
+            return ruff  # a lock holder finished while we waited
+        if directory.exists():
+            # Only the lock holder reaches here, so no live builder or runner
+            # can be using this unmarked dir.
+            shutil.rmtree(directory, ignore_errors=True)
+        _install_ruff_venv(directory, python, expected)
+    return ruff
 
 
 def tool_npm(name):
@@ -431,7 +493,16 @@ def tool_npm(name):
         / ".bin"
         / (name + ".cmd" if os.name == "nt" else name)
     )
-    if not binary.is_file():
+    marker = directory / ".complete"
+    if marker.is_file() and binary.is_file():
+        return binary
+    with _held(cache_dir() / (directory.name + ".lock")):
+        if marker.is_file() and binary.is_file():
+            return binary  # a lock holder finished while we waited
+        if directory.exists():
+            # Only the lock holder reaches here, so no live npm run can be
+            # using this unmarked dir.
+            shutil.rmtree(directory, ignore_errors=True)
         # The tarball carries the registry integrity hash; npm installs the
         # verified local file, so no registry round-trip can swap the bytes.
         tarball = fetch(name)
@@ -447,35 +518,8 @@ def tool_npm(name):
             "--save-exact",
             str(tarball),
         )
+        _mark_complete(directory)
     return binary
-
-
-def publish_link(binary):
-    """Point bin/<name> at the pinned binary with an atomic link swap, so
-    bare-name PATH use (CI exports, VM provisioning) keeps resolving while the
-    pin-keyed file itself is never rewritten under a runner. Best effort: the
-    absolute pinned path is the contract, the link is compatibility."""
-    binary = Path(binary)
-    link = binary.parent.parent / binary.name
-    try:
-        if link.is_symlink() and link.readlink() == binary:
-            return
-    except OSError:
-        pass
-    try:
-        descriptor, name = tempfile.mkstemp(dir=link.parent, prefix=".link-")
-        os.close(descriptor)
-        candidate = Path(name)
-    except OSError as error:
-        print(f"toolchain: no PATH link for {binary} ({error})", file=sys.stderr)
-        return
-    try:
-        candidate.unlink()
-        candidate.symlink_to(binary)
-        os.replace(candidate, link)
-    except OSError as error:
-        candidate.unlink(missing_ok=True)
-        print(f"toolchain: no PATH link for {binary} ({error})", file=sys.stderr)
 
 
 def tool(name):
@@ -506,16 +550,11 @@ def tool(name):
         data = archive.read_bytes()
     # Keyed by the pin, so checkouts on other pins never swap the binary under
     # a running check (same pattern as the mod's old toolchain).
-    key = (
-        spec["sha256"][:16]
-        if "sha256" in spec
-        else hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
-    )
+    key = _pin_key(spec)
     binary = cache_dir() / "bin" / key / filename
     if not binary.is_file() or binary.read_bytes() != data:
         replace(binary, data, mode=0o755)
     binary.chmod(0o755)
-    publish_link(binary)
     return binary
 
 
@@ -581,15 +620,29 @@ def prefetch(names):
 
 
 def main(argv):
-    wanted = None
-    for index, arg in enumerate(argv):
-        if arg == "--tools" and index + 1 < len(argv):
-            wanted = argv[index + 1]
-        elif arg.startswith("--tools="):
-            wanted = arg.partition("=")[2]
-    # Only a leading flag selects prefetch; `toolchain.py script.py --ci` must run the script.
+    # Only a leading flag selects prefetch; `toolchain.py script.py --ci`
+    # must run the script. Prefetch takes nothing but the known flags: any
+    # other argument is a caller mistake that must fail loudly (exit 2)
+    # instead of exiting 0 without running anything.
     if argv and (argv[0] in ("--ci", "--tools") or argv[0].startswith("--tools=")):
-        names = [name for name in (wanted or "").split(",") if name]
+        names = []
+        index = 0
+        while index < len(argv):
+            arg = argv[index]
+            if arg == "--ci":
+                index += 1
+            elif arg == "--tools" and index + 1 < len(argv):
+                names.extend(name for name in argv[index + 1].split(",") if name)
+                index += 2
+            elif arg.startswith("--tools="):
+                names.extend(name for name in arg.partition("=")[2].split(",") if name)
+                index += 1
+            else:
+                print(
+                    "usage: toolchain.py [--ci] [--tools name[,name]]",
+                    file=sys.stderr,
+                )
+                return 2
         if "--ci" in argv and not names:
             names = ["just", "shellcheck"]
         prefetch(names)
@@ -599,15 +652,13 @@ def main(argv):
                 with Path(os.environ["GITHUB_PATH"]).open(
                     "a", encoding="utf-8", newline="\n"
                 ) as output:
-                    output.write(
-                        str(cache_dir() / "bin") + "\n" + str(python.parent) + "\n"
-                    )
+                    output.write("\n".join([*pinned_bins(), str(python.parent)]) + "\n")
     else:
         call(canonical_python(), "-I", "-X", "utf8", *argv)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))
 
 
 try:

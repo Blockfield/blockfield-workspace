@@ -486,7 +486,16 @@ class Ship(unittest.TestCase):
                     patches, lambda: release.cmd_ship(self.ship_args(server_merge=None))
                 )
             )
-        self.assertEqual(calls[:2], [("prepare", "client"), ("prepare", "server")])
+        # next is healed before prepare cuts a release from it.
+        self.assertEqual(
+            calls[:4],
+            [
+                ("ff", "client"),
+                ("ff", "server"),
+                ("prepare", "client"),
+                ("prepare", "server"),
+            ],
+        )
         self.assertLess(
             calls.index(("prepare", "server")), calls.index(("tag", "client"))
         )
@@ -664,6 +673,23 @@ class Ship(unittest.TestCase):
             for patch in patches:
                 stack.enter_context(patch)
             return func()
+
+    def test_unsynced_next_stops_ship_before_prepare(self):
+        calls = []
+        tags = {"server": "v2.76.3", "client": "v2.76.3"}
+        patches = self.base_patches(calls, (tags, "pair", [], ""))
+        prepare = mock.Mock(return_value=(tags, "pair", [], ""))
+        patches = [
+            p for p in patches if p.attribute not in ("ff_next_to_main", "prepare_all")
+        ] + [
+            mock.patch.object(release, "prepare_all", prepare),
+            mock.patch.object(release, "ff_next_to_main", return_value=False),
+            mock.patch.object(release, "has_next", return_value=True),
+            mock.patch.object(release, "repo_dir", side_effect=lambda side: side),
+        ]
+        with self.assertRaises(SystemExit):
+            self.run_patches(patches, lambda: release.cmd_ship(self.ship_args()))
+        prepare.assert_not_called()
 
     def test_independent_gates_client_tag_on_server_deploy(self):
         calls = []

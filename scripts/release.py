@@ -1942,12 +1942,12 @@ def ff_next_to_main(side, dry, report_only=False):
 
 def push_next(side, repo, dry, sha):
     """Move next without force. A rejected push (next moved meanwhile) only
-    warns: this runs between the release merge and the tag; rerun ship to heal."""
+    warns: this runs between the release merge and the tag."""
     try:
         ship_mutate(dry, "git", "push", "origin", f"{sha}:refs/heads/next", cwd=repo)
     except RuntimeError as error:
         say(
-            f"  WARNING {side}: could not move origin/next ({error}); rerun release ship"
+            f"  WARNING {side}: could not move origin/next ({error}); move next to main by hand (no force) before the next release"
         )
         return False
     return True
@@ -2061,6 +2061,15 @@ def cmd_ship(args):
         raise SystemExit("--client-stage-run requires --resume-client-published")
     if resume and (args.only or args.server_merge):
         raise SystemExit("resume cannot be combined with --only or --server-merge")
+    # An earlier ship may have merged a release PR and died before moving next:
+    # heal it before prepare cuts a release from a stale next. Nothing is
+    # merged yet, so a next that cannot be synced stops the ship here.
+    if not dry:
+        for side in SIDES:
+            if not ff_next_to_main(side, dry) and has_next(repo_dir(side)):
+                raise SystemExit(
+                    f"ship stopped: origin/next of {side} is not synced with origin/main; fix it first"
+                )
     tags, kind, order, branch = resume_pair(args) if resume else prepare_all(args)
     if kind in ("none", "mismatch") or not tags:
         raise SystemExit(f"ship stopped: release kind is {kind}")
@@ -2078,11 +2087,6 @@ def cmd_ship(args):
             "dry run: prepare pushed nothing, so merge/tag/watch/pin steps above are not executed"
         )
         return True
-    # Resume: an earlier ship may have merged a release PR and died before
-    # moving next; heal it now so this run cannot build on a stale base.
-    # (Dry runs return above: they merge nothing, so there is nothing to heal.)
-    for side in SIDES:
-        ff_next_to_main(side, dry)
     require_rc_gate(
         tags, getattr(args, "rc_record", None), getattr(args, "gate_waiver", None)
     )

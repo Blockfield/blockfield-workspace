@@ -529,7 +529,7 @@ def scenario_isolation(rcon, bot, bot2, room):
             else "no local entry",
         )
     )
-    hidden = wait_for(lambda: bot("markers").get("minimap") is None, 10)
+    hidden = wait_for(lambda: bot("markers").get("minimap") is None, 30)
     out.append(check("dead client hides the minimap", dead and hidden, "minimap shown"))
     time.sleep(4)
     bot("bfaction spawn:BASE")

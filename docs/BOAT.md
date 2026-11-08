@@ -141,7 +141,7 @@ git status --short
 git submodule update --init --recursive
 python3 -I scripts/quality.py run just --version
 python_bin=$(python3 -I scripts/quality.py run python -c 'import sys; from pathlib import Path; print(Path(sys.executable).parent)')
-export PATH="$python_bin:$PWD/.cache/quality/bin:$PATH"
+export PATH="$python_bin:$(python3 -c "import sys; sys.path.insert(0, 'scripts'); from toolchain import pinned_bins; print(':'.join(pinned_bins()))"):$PATH"
 unset DISPLAY WAYLAND_DISPLAY
 export AI_AGENT_SESSION_ID=boat-bx_ID-task-name
 export BF_DEV_HOME="$PWD/.dev/boat-task-name"
@@ -269,8 +269,8 @@ snapd.refresh.timer`): в образе Boat он падает с кодом 42 �
 golden ради неё не нужен.
 `just` на golden нет (образ без него): агенты ставят pinned `just` 1.57.0
 из workspace (`python3 -I scripts/quality.py run just --version` проверяет
-checksum и кладёт бинарь в `.cache/quality/bin`) и добавляют в PATH
-(`install -m755 .cache/quality/bin/just "$HOME/.local/bin/just"`). При обновлении
+checksum и кладёт бинарь в `.cache/quality/bin/<pin>`) и добавляют в PATH
+(`JBIN=$(python3 -c "import sys; sys.path.insert(0, 'scripts'); from toolchain import tool; print(tool('just'))") && install -m755 "$JBIN" "$HOME/.local/bin/just"`). При обновлении
 golden ставьте `just` так же, чтобы `just ...` работал сразу, без `bf.py`.
 Правила cleanup из раздела «Проверка и завершение» действуют как прежде.
 

@@ -59,8 +59,8 @@ Workshop, `Blockfield-Launcher`, proxy, releases и distribution находят�
 `git submodule update --init --recursive` восстанавливает **закреплённые** SHA
 workspace; он не выбирает самые свежие версии всех модов. Перед его запуском
 убедитесь, что в submodules нет незакоммиченных изменений.
-Для разработки переведите нужный чистый submodule на `main` и получите изменения
-через `git pull --ff-only`. Каталоги существующих клонов не переименовывайте.
+Для разработки переведите нужный чистый submodule на `next` (где ветки `next`
+нет — на `main`) и получите изменения через `git pull --ff-only`. Каталоги существующих клонов не переименовывайте.
 
 Новые worktree T3 сами не инициализируют submodules (`t3.json`: `worktreeSubmodules: none`, у T3 30 с
 на команду не хватает); их готовит `python3 scripts/worktree_setup.py <worktree>`. Повторный запуск
@@ -76,6 +76,21 @@ amd64/arm64 закреплены по версии и SHA256 в `scripts/toolcha
 используют этот JDK. Первый запуск требует сети; последующие используют кеш.
 `status`, bot/RCON, справка и запуск MCP не скачивают JDK.
 
+## Закреплённые инструменты
+
+Единственный набор версий — `scripts/tools.lock.json`, читает его
+`scripts/toolchain.py`. Каждый инструмент перечисляет несколько независимых
+источников (npm, Maven, PyPI — по два-три; у релизов GitHub второго
+постоянного адреса нет), все источники сверяются одним хешем, порядок —
+порядок попыток. Отдельного зеркала нет: отказоустойчивость дают
+источники, а скорость — кеш CI (`.cache/quality`, ключ —
+`os-arch-hashFiles('scripts/tools.lock.json')`).
+
+Повышение версии инструмента: обновить запись в `tools.lock.json` (версия,
+URL, хеш), прогнать `just lint`, `just format-check`, `just test` и
+разослать файлы `scripts/sync_tools.py <checkout соседнего репозитория>`
+(проверка дрейфа — `sync_tools.py <checkout> --check`).
+
 ## Быстрая проверка без игры
 
 ```sh
@@ -86,9 +101,9 @@ just dev --help
 ```
 
 Preflight запрещает основной checkout workspace по origin и Git metadata; linked worktrees и standalone clones других repo проходят. Без justfile: `python3 -I <worktree>/scripts/dev/agent_preflight.py`.
-`just agent-preflight [--source client=origin/main ...] [--mode upstream-main|pinned-candidate|task-branch]` показывает SHA источника, pin, fetched origin/main и behind каждого submodule.
-По умолчанию `upstream-main` предупреждает об отставшем pin и печатает `git -C <sub> show origin/main:<path>`; неразрешимый `--source` блокирует работу, checkout не меняется.
-`just pr-ship <repo> <branch>` использует rebase только до публикации ветки/PR; опубликованная ветка получает merge базы.
+`just agent-preflight [--source client=origin/next ...] [--mode upstream-main|pinned-candidate|task-branch]` показывает SHA источника, pin, fetched origin/next (иначе main) и behind каждого submodule.
+По умолчанию `upstream-main` предупреждает об отставшем pin и печатает `git -C <sub> show <base>:<path>`; неразрешимый `--source` блокирует работу, checkout не меняется.
+`just pr-ship <repo> <branch>` использует rebase только до публикации ветки/PR; опубликованная ветка получает merge базы (`origin/next`, где она есть).
 Конфликт возвращает JSON `CONFLICT` с файлами без push; remote tip вне истории HEAD блокирует push, force-push запрещён.
 
 `lint` проверяет Python и workflows; `format-check` — формат отслеживаемого
@@ -1098,9 +1113,16 @@ notes с `backfilled: false` и последней опубликованной 
 команды тегов и Deploy только печатаются, выполнять их можно после явного подтверждения владельца.
 Рабочие копии клиента и сервера в `client/` и `server/` не меняются: проверки идут во временных worktree в `.dev/release/`, кеши загрузок общие.
 
+Product-репозитории работают через интеграционную ветку `next`: feature-PR вливаются
+в `next` (squash), а выпуск — это один `next→main` merge commit после явного
+подтверждения владельца (не squash); сразу после слияния `next` fast-forwardится
+на `main`, хотфиксы идут тоже через `next`. `status`/`prepare` читают незавершённую
+работу из `origin/next` (у репозиториев без `next` — из `origin/main`), а ветки
+`release/<сторона>-X.Y.Z` режутся из `next` с PR в `main`.
+
 | Команда                                                                                            | Что делает                                                                                                                                                                                                                                                                |
 | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `just release status`                                                                              | Последний опубликованный тег, пины Blockfield-репозиториев против последних релизов, незавершённые коммиты main, контракт против продакшена, вид выпуска                                                                                                                  |
+| `just release status`                                                                              | Последний опубликованный тег, пины Blockfield-репозиториев против последних релизов, незавершённые коммиты `next` (`origin/main` у репозиториев без `next`), контракт против продакшена, вид выпуска                                                                      |
 | `just release preflight <сторона> vX.Y.Z [--ref origin/main]`                                      | Тег = `pack.toml`, тег свободен и больше существующих, release notes (пока их требует workflow тега), `just build` репозитория, контракт и gate                                                                                                                           |
 | `just release prepare --mod vX [--decor vY] [--bump minor] [--server-merge BRANCH] [--dry-run]`    | Пины, версия (по умолчанию patch), preflight, коммит, ветка `release/<сторона>-X.Y.Z` и PR с заголовком; печатает порядок тегов. Серверный jar мода собирается в CI из `mod-server`, локальный preflight серверной стороны читает контракт без Gradle (`--no-server-jar`) |
 | `just release candidate vC --branch release/server-X.Y.Z [--dry-run]`                              | Пин опубликованного клиента в `client_candidate` сервера, preflight, коммит в ветку PR                                                                                                                                                                                    |

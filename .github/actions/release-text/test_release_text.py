@@ -834,6 +834,7 @@ class MergedPrs(unittest.TestCase):
             commit("Merge pull request #2 from a/c"),
             commit("Merge pull request #3 from a/d"),
             commit("Speed up saves (#4)"),
+            commit("Merge pull request #5 from o/next"),
         ]
         footer = (
             "<!-- codesmith:footer -->\n---\nBlacksmith\n<!-- /codesmith:footer -->"
@@ -846,6 +847,7 @@ class MergedPrs(unittest.TestCase):
                 "deletions": 3,
             },
             2: {"title": "Bump x", "body": "", "user": {"type": "Bot"}},
+            5: {"title": "Release", "body": "", "head": {"ref": "next"}},
         }
 
         def api(*args, **_):

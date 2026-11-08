@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -320,6 +321,7 @@ class Ship(unittest.TestCase):
         self.assertFalse(any(c[0] == "published" for c in calls))
         self.assertFalse(any(c[0] == "approve" for c in calls))
         self.assertFalse(any(c[0] == "deploy" for c in calls))
+        self.assertIn(("ff", "server"), calls)
 
     def test_wait_until_returns_first_truthy_and_times_out(self):
         self.assertEqual(release.wait_until("x", 60, 0, lambda: "done"), "done")
@@ -484,7 +486,16 @@ class Ship(unittest.TestCase):
                     patches, lambda: release.cmd_ship(self.ship_args(server_merge=None))
                 )
             )
-        self.assertEqual(calls[:2], [("prepare", "client"), ("prepare", "server")])
+        # next is healed before prepare cuts a release from it.
+        self.assertEqual(
+            calls[:4],
+            [
+                ("ff", "client"),
+                ("ff", "server"),
+                ("prepare", "client"),
+                ("prepare", "server"),
+            ],
+        )
         self.assertLess(
             calls.index(("prepare", "server")), calls.index(("tag", "client"))
         )
@@ -650,6 +661,11 @@ class Ship(unittest.TestCase):
                     calls.append(("probes", next(iter(tags)))) or True
                 ),
             ),
+            mock.patch.object(
+                release,
+                "ff_next_to_main",
+                side_effect=lambda side, dry: calls.append(("ff", side)) or True,
+            ),
         )
 
     def run_patches(self, patches, func):
@@ -657,6 +673,23 @@ class Ship(unittest.TestCase):
             for patch in patches:
                 stack.enter_context(patch)
             return func()
+
+    def test_unsynced_next_stops_ship_before_prepare(self):
+        calls = []
+        tags = {"server": "v2.76.3", "client": "v2.76.3"}
+        patches = self.base_patches(calls, (tags, "pair", [], ""))
+        prepare = mock.Mock(return_value=(tags, "pair", [], ""))
+        patches = [
+            p for p in patches if p.attribute not in ("ff_next_to_main", "prepare_all")
+        ] + [
+            mock.patch.object(release, "prepare_all", prepare),
+            mock.patch.object(release, "ff_next_to_main", return_value=False),
+            mock.patch.object(release, "has_next", return_value=True),
+            mock.patch.object(release, "repo_dir", side_effect=lambda side: side),
+        ]
+        with self.assertRaises(SystemExit):
+            self.run_patches(patches, lambda: release.cmd_ship(self.ship_args()))
+        prepare.assert_not_called()
 
     def test_independent_gates_client_tag_on_server_deploy(self):
         calls = []
@@ -671,12 +704,16 @@ class Ship(unittest.TestCase):
         self.assertEqual(
             kinds,
             [
+                "ff",
+                "ff",
                 "rc-gate",
                 "green",
                 "merge",
+                "ff",
                 "tag",
                 "green",
                 "merge",
+                "ff",
                 "run",
                 "gate",
                 "tag",
@@ -688,6 +725,8 @@ class Ship(unittest.TestCase):
                 "pin",
                 "green",
                 "merge",
+                "ff",
+                "ff",
             ],
         )
         # The client tag run is a publish-only stub: serving needs the dispatch.
@@ -725,15 +764,19 @@ class Ship(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                ("ff", "client"),
+                ("ff", "server"),
                 ("rc-gate",),
                 ("green", release.REPO["client"]),
                 ("merge", release.REPO["client"], "a" * 40),
+                ("ff", "client"),
                 ("tag", "client"),
                 ("run", "client"),
                 ("published", "client"),
                 ("candidate",),
                 ("green", release.REPO["server"], "candidate-sha"),
                 ("merge", release.REPO["server"], "candidate-sha"),
+                ("ff", "server"),
                 ("tag", "server"),
                 ("run", "server"),
                 ("published", "server"),
@@ -746,8 +789,39 @@ class Ship(unittest.TestCase):
                 ("pin",),
                 ("green", release.WORKSPACE_REPO),
                 ("merge", release.WORKSPACE_REPO, "a" * 40),
+                ("ff", "client"),
+                ("ff", "server"),
             ],
         )
+
+    def test_merge_then_failure_still_ffs_and_rerun_heals_first(self):
+        calls = []
+        tags = {"server": "v2.77.0"}
+        prepared = (tags, "server-only", [("tag", "server")], "")
+        # First run: the release PR merges, then tagging dies. The merge
+        # already moved next, and nothing after it ran.
+        with contextlib.ExitStack() as stack:
+            for patch in self.base_patches(calls, prepared):
+                stack.enter_context(patch)
+            stack.enter_context(
+                mock.patch.object(
+                    release, "push_tag", side_effect=RuntimeError("tag failed")
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "tag failed"):
+                release.cmd_ship(self.ship_args())
+        merge_at = calls.index(("merge", release.REPO["server"], "a" * 40))
+        self.assertIn(("ff", "server"), calls[merge_at + 1 :])
+        self.assertNotIn(("pin",), calls)
+        # Rerun: the start-of-ship resync heals next before anything else.
+        calls.clear()
+        self.assertTrue(
+            self.run_patches(
+                self.base_patches(calls, prepared),
+                lambda: release.cmd_ship(self.ship_args()),
+            )
+        )
+        self.assertEqual(calls[:2], [("ff", "client"), ("ff", "server")])
 
     def test_dry_run_prepares_but_mutates_nothing(self):
         prepared = ({"server": "v2.76.3"}, "server-only", [("tag", "server")], "")
@@ -773,6 +847,7 @@ class Ship(unittest.TestCase):
             mock.patch.object(release, "prepare_all", return_value=prepared),
             mock.patch.object(release, "say"),
             mock.patch.object(release, "mod_published", return_value=True),
+            mock.patch.object(release, "ff_next_to_main", return_value=True),
             mock.patch.object(release, "require_rc_gate", return_value=True),
             mock.patch.object(
                 release,
@@ -1081,6 +1156,7 @@ class PairGates(unittest.TestCase):
                 release, "wait_release_run", return_value={"databaseId": 12}
             ),
             mock.patch.object(release, "wait_publication"),
+            mock.patch.object(release, "ff_next_to_main", return_value=True),
         ):
             release.ship_tag_side(
                 SimpleNamespace(dry_run=False),
@@ -1095,6 +1171,27 @@ class PairGates(unittest.TestCase):
         tag.assert_called_once_with(
             "client", "v2.77.0", False, merged, None, None, pair
         )
+
+    def test_next_ahead_of_main_is_left_alone(self):
+        def ancestor(repo, older, newer):
+            return (older, newer) == ("m" * 40, "n" * 40)
+
+        with (
+            mock.patch.object(release, "repo_dir", return_value=Path("repo")),
+            mock.patch.object(release, "has_next", return_value=True),
+            mock.patch.object(release, "fetch_main"),
+            mock.patch.object(
+                release,
+                "git",
+                side_effect=lambda repo, *a: (
+                    "m" * 40 if a[-1] == "origin/main" else "n" * 40
+                ),
+            ),
+            mock.patch.object(release, "is_ancestor", side_effect=ancestor),
+            mock.patch.object(release, "ship_mutate") as push,
+        ):
+            self.assertTrue(release.ff_next_to_main("client", False))
+        push.assert_not_called()
 
     def test_tag_rejects_unrelated_main(self):
         with (
@@ -2589,6 +2686,175 @@ class PushTagGateTest(unittest.TestCase):
 
     def test_single_side_defaults_to_its_own_tag(self):
         self.assertEqual(self.gated(), [{"server": "v2.79.6"}])
+
+
+class FfNextToMain(unittest.TestCase):
+    """`release ship` fast-forwards origin/next to origin/main (bare fixture)."""
+
+    def fixture(self, with_next=True, next_extra=False, conflict=False):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        origin = base / "origin.git"
+
+        def git(repo, *args):
+            return subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=t@invalid",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                    *args,
+                ],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            ).stdout.strip()
+
+        git(base, "init", "--bare", "-q", "origin.git")
+        git(base, "clone", "-q", str(origin), "seed")
+        seed = base / "seed"
+        (seed / "file.txt").write_text("one\n")
+        git(seed, "add", "file.txt")
+        git(seed, "commit", "-qm", "one")
+        git(seed, "push", "-q", "origin", "HEAD:main")
+        if with_next:
+            git(seed, "push", "-q", "origin", "HEAD:next")
+        (seed / "file.txt").write_text("two\n")
+        git(seed, "commit", "-qam", "two")
+        git(seed, "push", "-q", "origin", "HEAD:main")
+        if next_extra:
+            git(seed, "fetch", "-q", "origin")
+            git(seed, "checkout", "-q", "next")
+            (seed / "other.txt").write_text("fork\n")
+            if conflict:
+                (seed / "file.txt").write_text("three\n")
+            git(seed, "add", "other.txt", "file.txt")
+            git(seed, "commit", "-qm", "fork")
+            git(seed, "push", "-q", "origin", "HEAD:next")
+        git(base, "clone", "-q", "--branch", "main", str(origin), "side")
+        return base / "side"
+
+    def remote(self, side, ref):
+        out = subprocess.run(
+            ["git", "-C", str(side), "ls-remote", "origin", ref],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        return out.split()[0]
+
+    def test_stale_next_moves_to_main(self):
+        side = self.fixture()
+        self.assertNotEqual(
+            self.remote(side, "refs/heads/next"), self.remote(side, "refs/heads/main")
+        )
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", False))
+        self.assertEqual(
+            self.remote(side, "refs/heads/next"), self.remote(side, "refs/heads/main")
+        )
+
+    def test_dry_run_moves_nothing(self):
+        side = self.fixture()
+        before = self.remote(side, "refs/heads/next")
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", True))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+
+    def test_synced_next_is_a_noop(self):
+        side = self.fixture()
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", False))
+            self.assertTrue(release.ff_next_to_main("server", False))
+
+    def test_diverged_next_gets_main_merged_in(self):
+        side = self.fixture(next_extra=True)
+        before = self.remote(side, "refs/heads/next")
+        main = self.remote(side, "refs/heads/main")
+        identity = {k: "t" for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")}
+        identity |= {k: "t@t" for k in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")}
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.dict(os.environ, identity),
+        ):
+            self.assertTrue(release.ff_next_to_main("server", False))
+        after = self.remote(side, "refs/heads/next")
+        subprocess.run(["git", "-C", str(side), "fetch", "-q", "origin"], check=True)
+        for parent in (before, main):
+            self.assertTrue(release.is_ancestor(side, parent, after))
+
+    def test_conflicting_divergence_warns_and_moves_nothing(self):
+        side = self.fixture(next_extra=True, conflict=True)
+        before = self.remote(side, "refs/heads/next")
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+        self.assertIn("conflicts", "\n".join(said))
+
+    def test_rejected_push_warns_instead_of_raising(self):
+        side = self.fixture()
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(
+                release, "ship_mutate", side_effect=RuntimeError("rejected")
+            ),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False))
+        self.assertIn("could not move origin/next", "\n".join(said))
+
+    def test_missing_next_is_a_noop(self):
+        side = self.fixture(with_next=False)
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertFalse(release.ff_next_to_main("server", False))
+
+    def test_report_only_names_exact_command_and_pushes_nothing(self):
+        side = self.fixture()
+        before = self.remote(side, "refs/heads/next")
+        main = self.remote(side, "refs/heads/main")
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False, report_only=True))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+        self.assertIn(f"push origin {main}:refs/heads/next", "\n".join(said))
+
+    def test_report_only_synced_is_a_quiet_ok(self):
+        side = self.fixture()
+        with mock.patch.object(release, "repo_dir", return_value=side):
+            self.assertTrue(release.ff_next_to_main("server", False))
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertTrue(release.ff_next_to_main("server", False, report_only=True))
+        self.assertIn("already at", "\n".join(said))
+
+    def test_report_only_diverged_reports_without_raising(self):
+        side = self.fixture(next_extra=True)
+        before = self.remote(side, "refs/heads/next")
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False, report_only=True))
+        self.assertEqual(self.remote(side, "refs/heads/next"), before)
+        self.assertIn("diverged", "\n".join(said))
 
 
 if __name__ == "__main__":

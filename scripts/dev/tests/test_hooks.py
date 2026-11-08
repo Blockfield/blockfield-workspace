@@ -199,13 +199,20 @@ class PreCommitHook(unittest.TestCase):
 
     def test_commit_formats_staged_files(self):
         # Fail-before: without the hook + format-staged, the raw bytes commit.
-        with tempfile.TemporaryDirectory(prefix="bf precommit ") as tmp:
+        # The fixture reuses the parent checkout's tool cache (the core reads
+        # BF_TOOL_CACHE), so it never downloads into its own empty tree.
+        shared = patch.dict(
+            os.environ, {"BF_TOOL_CACHE": str(ROOT / ".cache" / "quality")}
+        )
+        with shared, tempfile.TemporaryDirectory(prefix="bf precommit ") as tmp:
             root = Path(tmp)
             for name in (
                 ".gitignore",
                 "justfile",
                 "scripts/quality.py",
                 "scripts/toolchain.py",
+                "scripts/toolchain_local.py",
+                "scripts/tools.lock.json",
                 "scripts/terminal.py",
                 "scripts/dev_cache.py",
             ):
@@ -259,13 +266,19 @@ class PreCommitHook(unittest.TestCase):
     def test_commit_leaves_partially_staged_files_alone(self):
         # Fail-before: the old hook formatted the worktree copy and staged it
         # whole, committing hunks the user never staged.
-        with tempfile.TemporaryDirectory(prefix="bf precommit ") as tmp:
+        # Same shared tool cache as above: no downloads into the fixture tree.
+        shared = patch.dict(
+            os.environ, {"BF_TOOL_CACHE": str(ROOT / ".cache" / "quality")}
+        )
+        with shared, tempfile.TemporaryDirectory(prefix="bf precommit ") as tmp:
             root = Path(tmp)
             for name in (
                 ".gitignore",
                 "justfile",
                 "scripts/quality.py",
                 "scripts/toolchain.py",
+                "scripts/toolchain_local.py",
+                "scripts/tools.lock.json",
                 "scripts/terminal.py",
                 "scripts/dev_cache.py",
             ):

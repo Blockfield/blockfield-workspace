@@ -65,7 +65,7 @@ Workspace приватный, поэтому скрипты прикладыва
 
 - Windows: `scripts/speedtest/blockfield-speedtest.cmd`. Использует встроенный `curl.exe`
   (Windows 10 1803 и новее).
-- Linux и macOS: `scripts/speedtest/blockfield-speedtest.sh`.
+- Linux: `scripts/speedtest/blockfield-speedtest.sh`.
 
 Текст сообщения:
 
@@ -76,7 +76,7 @@ Workspace приватный, поэтому скрипты прикладыва
 > 2. Windows: скачайте `blockfield-speedtest.cmd` и запустите двойным щелчком. Браузер или Discord
 >    могут назвать файл опасным, а Windows — предупредить о неизвестном издателе: это обычный
 >    скрипт, «Подробнее» → «Выполнить в любом случае».
->    Linux и macOS: `sh blockfield-speedtest.sh`.
+>    Linux: `sh blockfield-speedtest.sh`.
 > 3. Ответьте цифрами на три вопроса (страна, домашний или мобильный интернет, VPN) и укажите
 >    провайдера латиницей.
 > 4. Результат уже скопирован (на Windows). Вставьте его сюда ответом. Файл

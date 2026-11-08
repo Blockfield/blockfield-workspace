@@ -2,8 +2,10 @@
 
 import contextlib
 import io
+import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_agent_friction as fixtures
@@ -81,6 +83,99 @@ class PublishedHistory(unittest.TestCase, FixtureRepos):
             with patch.object(pr_ship, "run", wraps=pr_ship.run) as calls:
                 self.ship()
         self.assertTrue(any(c.args[1] == "rebase" for c in calls.call_args_list))
+
+
+class PrBase(unittest.TestCase, FixtureRepos):
+    """New PRs target the integration base; existing ones are retargeted (offline)."""
+
+    def setUp(self):
+        FixtureRepos.setUp(self)
+        # unreleased work lives on origin/next; the task branch is cut from it.
+        git(self.clone, "push", "-q", "origin", "HEAD:next")
+        self.repo = self.worktree("unit")
+        fixtures.configure(self.repo)
+        git(self.repo, "fetch", "-q", "origin")
+        git(self.repo, "checkout", "-qb", "feature", "origin/next")
+        (self.repo / "new.txt").write_text("new\n")
+        git(self.repo, "add", "new.txt")
+        git(self.repo, "commit", "-qm", "new")
+        self.calls = []
+        self.base = "main"
+        self.have_pr = True
+
+    def fake_gh(self, repo, *args):
+        self.calls.append(args)
+        if args[:2] == ("pr", "create"):
+            self.base = args[args.index("--base") + 1]
+            return SimpleNamespace(returncode=0, stdout="http://x/42\n", stderr="")
+        if args[:2] == ("pr", "edit"):
+            self.base = args[-1]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[:2] == ("pr", "view") and "statusCheckRollup" in args[-1]:
+            sha = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "number": 42,
+                        "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "CLEAN",
+                        "reviewDecision": "APPROVED",
+                        "headRefOid": sha,
+                        "baseRefName": self.base,
+                        "url": "http://x/42",
+                        "statusCheckRollup": [],
+                    }
+                ),
+                stderr="",
+            )
+        if args[:2] == ("pr", "view"):
+            if not self.have_pr:
+                return SimpleNamespace(
+                    returncode=1, stdout="", stderr="no pull requests found"
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"number": 42, "url": "http://x/42", "baseRefName": self.base}
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    def ship(self):
+        out = io.StringIO()
+        with (
+            contextlib.redirect_stdout(out),
+            patch.object(pr_ship, "gh", side_effect=self.fake_gh),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            pr_ship.main([str(self.repo), "feature"])
+        return ctx.exception.code, out.getvalue()
+
+    def test_create_targets_integration_base(self):
+        self.have_pr = False
+        code, out = self.ship()
+        self.assertEqual(code, 0)
+        creates = [c for c in self.calls if c[:2] == ("pr", "create")]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("--base", creates[0])
+        self.assertEqual(creates[0][creates[0].index("--base") + 1], "next")
+        self.assertIn("base=next", out)
+
+    def test_existing_pr_is_retargeted(self):
+        code, out = self.ship()
+        self.assertEqual(code, 0)
+        edits = [c for c in self.calls if c[:2] == ("pr", "edit")]
+        self.assertIn(("pr", "edit", "42", "--base", "next"), edits)
+        self.assertIn("retargeted from main to next", out)
+        self.assertIn("base=next", out)
+
+    def test_existing_pr_on_base_is_left_alone(self):
+        self.base = "next"
+        code, _ = self.ship()
+        self.assertEqual(code, 0)
+        self.assertFalse([c for c in self.calls if c[:2] == ("pr", "edit")])
 
 
 class SourceIdentity(unittest.TestCase):

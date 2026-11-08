@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Kill-gated combat checks: grenade death-drop, killfeed isolation + own marker, MP5A3, <tag> names.
+"""Kill-gated combat checks: grenade death-drop, killfeed isolation + own marker, MP5A3, tricky names.
 
 Needs the testbot killfeed/markers/usestate queries (scripts/dev/testbot).
 Two headless clients: the killer and the victim/observer. Room-killfeed only
 delivers kills whose victim (or, when the victim is not a room member, whose
 attacker) belongs to the recipient's room, so carpet victims never feed a room
-member's killfeed — the victim here is always the second client. A `<tag>`
+member's killfeed — the victim here is always the second client. A tricky
 name rides the offline stand as the second client's login name (`just play
---client 2 --name '<tag>...'`); RCON never sees it, entity references go by
-offline UUID (devstack.offline_uuid, the same derivation the stand uses).
+--client 2 --name <one of TRICKY_NAMES>`); RCON never sees it, entity
+references go by offline UUID (devstack.offline_uuid, the same derivation the
+stand uses). Vanilla login rejects <>/spaces/unicode, so `<tag>` names can
+never join: the literalness check runs against login-valid but render-tricky
+names instead (underscore-heavy, placeholder-word-like, digits-only, 16-char).
 """
 
 import re
@@ -24,8 +27,26 @@ from .rc import deploy, open_room
 
 SCENARIO = {
     "name": "hud-checks",
-    "help": "kill-gated checks: grenade drop, killfeed isolation, MP5A3, <tag> names",
+    "help": "kill-gated checks: grenade drop, killfeed isolation, MP5A3, tricky names",
 }
+# Login-valid ([A-Za-z0-9_]{3,16}) but render-tricky second-client names for
+# the tag/countdown/killfeed literalness check. Vanilla login rejects <> and
+# friends, so the runner launches --client 2 with one of these.
+TRICKY_NAMES = (
+    "__x__",
+    "_reset_",
+    "x_reset_x",
+    "player_name",
+    "007",
+    "1234567890123456",
+)
+
+
+def is_tricky_name(name):
+    """True for a scenario tricky name (login-valid, render-tricky)."""
+    return name in TRICKY_NAMES
+
+
 KIT_GUN = "tacz:modern_kinetic_gun"
 ZERO_SPREAD = "tacz:ak47_zero_spread"
 MP5 = "elitex:mp5_classic"
@@ -271,7 +292,7 @@ def lane_ammo(rcon, shooter_uuid, slot):
 def lane_kill(rcon, shooter, victim, arena, gun_id=None, bounds=None):
     """Gun kill down the open lane: kit gun first (the true product path),
     zero-spread admin gun second (harness control). UUIDs only on RCON; the
-    aim matches the literal name client-side, so `<tag>` victims work.
+    aim matches the literal name client-side, so tricky-name victims work.
     Returns (ok, detail, used_admin_gun)."""
     from devstack import offline_uuid
 
@@ -598,22 +619,22 @@ def scenario_mp5(rcon, bot, server_log):
 
 
 def scenario_tag(rcon, bot, bot2, entry):
-    """A `<tag>` name in killfeed/countdown/messages: exact, uninterpreted, no crash."""
+    """A tricky name in killfeed/countdown/messages: exact, uninterpreted, no crash."""
     out = []
     evil = bot2("state")["name"]
-    if "<" not in evil and ">" not in evil:
+    if not is_tricky_name(evil):
         out.append(
             check(
-                "second client carries an evil name",
+                "second client carries a tricky name",
                 False,
-                f"launch it with --name '<tag>...': {evil!r}",
+                f"launch it with --name <one of {', '.join(TRICKY_NAMES)}>: {evil!r}",
             )
         )
         return out
     ok = entry is not None and entry.get("target") == evil
     out.append(
         check(
-            "killfeed carries the evil name exactly",
+            "killfeed carries the tricky name exactly",
             ok,
             str(entry)[:160],
         )
@@ -626,7 +647,7 @@ def scenario_tag(rcon, bot, bot2, entry):
         connected = False
     out.append(
         check(
-            "countdown/actionbar lines stay clean with the evil name around",
+            "countdown/actionbar lines stay clean with the tricky name around",
             connected and isinstance(lines, list),
             " | ".join(lines)[:200] if isinstance(lines, list) else str(lines)[:200],
         )
@@ -809,16 +830,13 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             if bot2 is None:
                 print("tag check needs a second client: skipped")
             elif duel_entry is None:
-                # Standalone tag run: the duel is the evil-name kill.
-                if (
-                    "<" not in bot2("state")["name"]
-                    and ">" not in bot2("state")["name"]
-                ):
+                # Standalone tag run: the duel is the tricky-name kill.
+                if not is_tricky_name(bot2("state")["name"]):
                     out.append(
                         check(
-                            "second client carries an evil name",
+                            "second client carries a tricky name",
                             False,
-                            "launch it with --name '<tag>...'",
+                            f"launch it with --name <one of {', '.join(TRICKY_NAMES)}>",
                         )
                     )
                 else:

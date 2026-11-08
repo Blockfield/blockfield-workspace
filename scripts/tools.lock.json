@@ -1,5 +1,4 @@
 {
-  "mirror": null,
   "tools": {
     "actionlint": {
       "platforms": {
@@ -40,7 +39,9 @@
           "kind": "jar",
           "sha256": "876eab6a83daecad5ca67eb9fcabb063c97b5aeb8cf1fca7a989ecde17522051",
           "urls": [
-            "https://repo.maven.apache.org/maven2/org/ow2/asm/asm/9.8/asm-9.8.jar"
+            "https://repo.maven.apache.org/maven2/org/ow2/asm/asm/9.8/asm-9.8.jar",
+            "https://repo1.maven.org/maven2/org/ow2/asm/asm/9.8/asm-9.8.jar",
+            "https://maven-central.storage-download.googleapis.com/maven2/org/ow2/asm/asm/9.8/asm-9.8.jar"
           ]
         }
       },
@@ -52,7 +53,9 @@
           "kind": "jar",
           "sha256": "14b7880cb7c85eed101e2710432fc3ffb83275532a6a894dc4c4095d49ad59f1",
           "urls": [
-            "https://repo.maven.apache.org/maven2/org/ow2/asm/asm-tree/9.8/asm-tree-9.8.jar"
+            "https://repo.maven.apache.org/maven2/org/ow2/asm/asm-tree/9.8/asm-tree-9.8.jar",
+            "https://repo1.maven.org/maven2/org/ow2/asm/asm-tree/9.8/asm-tree-9.8.jar",
+            "https://maven-central.storage-download.googleapis.com/maven2/org/ow2/asm/asm-tree/9.8/asm-tree-9.8.jar"
           ]
         }
       },
@@ -64,7 +67,9 @@
           "kind": "jar",
           "sha256": "25b400f003089d23cc5320cdaf1a16cabee19b8aa3434d0ff021b3d9f42154b4",
           "urls": [
-            "https://repo.maven.apache.org/maven2/com/google/googlejavaformat/google-java-format/1.36.1/google-java-format-1.36.1-all-deps.jar"
+            "https://repo.maven.apache.org/maven2/com/google/googlejavaformat/google-java-format/1.36.1/google-java-format-1.36.1-all-deps.jar",
+            "https://repo1.maven.org/maven2/com/google/googlejavaformat/google-java-format/1.36.1/google-java-format-1.36.1-all-deps.jar",
+            "https://maven-central.storage-download.googleapis.com/maven2/com/google/googlejavaformat/google-java-format/1.36.1/google-java-format-1.36.1-all-deps.jar"
           ]
         }
       },
@@ -104,8 +109,7 @@
       "version": "1.57.0"
     },
     "ktlint": {
-      "mirror": false,
-      "platforms": {
+    "platforms": {
         "any": {
           "kind": "raw",
           "sha256": "a3fd620207d5c40da6ca789b95e7f823c54e854b7fade7f613e91096a3706d75",
@@ -122,7 +126,8 @@
           "integrity": "sha512-M9g8d9qC9J+6g2klxvG4QRgewxMrZwY5vQEvcHX1x89jTF+HAUfBmq50ePrAHfCdiJLogEVIlu3SPumzN1dWPA==",
           "kind": "tgz",
           "urls": [
-            "https://registry.npmjs.org/pnpm/-/pnpm-11.18.0.tgz"
+            "https://registry.npmjs.org/pnpm/-/pnpm-11.18.0.tgz",
+            "https://registry.npmmirror.com/pnpm/-/pnpm-11.18.0.tgz"
           ]
         }
       },
@@ -134,7 +139,8 @@
           "integrity": "sha512-7igPTM53cGHMW8xWuVTydi2KO233VFiTNyF5hLJqpilHfmn8C8gPf+PS7dUT64YcXFbiMGZxS9pCSxL/Dxm/Jw==",
           "kind": "tgz",
           "urls": [
-            "https://registry.npmjs.org/prettier/-/prettier-3.8.3.tgz"
+            "https://registry.npmjs.org/prettier/-/prettier-3.8.3.tgz",
+            "https://registry.npmmirror.com/prettier/-/prettier-3.8.3.tgz"
           ]
         }
       },

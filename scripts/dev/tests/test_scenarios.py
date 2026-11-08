@@ -5230,6 +5230,9 @@ class HudChecks(unittest.TestCase):
     def test_parse_health_and_pos(self):
         self.assertEqual(hud_checks.parse_health("bot43 has Health: 20.0f"), 20.0)
         self.assertEqual(
+            hud_checks.parse_health("Zombie has the following entity data: 7.5f"), 7.5
+        )
+        self.assertEqual(
             hud_checks.parse_pos("bot43 has Pos: [1.5d, 65.0d, -14.5d]"),
             (1.5, 65.0, -14.5),
         )

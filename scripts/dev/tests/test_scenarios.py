@@ -5386,7 +5386,14 @@ class WeaponsSweep(unittest.TestCase):
             self.assertEqual(found, ["superbwarfare:ak_12"])
             self.assertEqual(skipped, ["superbwarfare:ammo_762x39"])
 
-    def make_pair(self, log_lines=(), fail_shoot=False, ammo=(300, 299), victim_hp=()):
+    def make_pair(
+        self,
+        log_lines=(),
+        fail_shoot=False,
+        ammo=(300, 299),
+        victim_hp=(),
+        have_item=True,
+    ):
         log_path = Path(tempfile.mkdtemp()) / "latest.log"
         log_path.write_text("".join(log_lines), encoding="utf-8")
         hp_calls = {"n": 0}
@@ -5399,6 +5406,8 @@ class WeaponsSweep(unittest.TestCase):
                     hp_calls["n"] += 1
                     if victim_hp:
                         hp = victim_hp[min(hp_calls["n"], len(victim_hp)) - 1]
+                        if hp is None:
+                            return "ok"
                         return f"hitbot has Health: {hp}f"
                     return "ok"
                 if "sweep_victim" in command and "Pos" in command:
@@ -5410,11 +5419,9 @@ class WeaponsSweep(unittest.TestCase):
                 if command == "kill hitbot":
                     return "Killed hitbot"
                 if command.startswith("execute if items"):
-                    return (
-                        "Test passed"
-                        if "give" in " ".join([])
-                        else "Test passed, count: 1"
-                    )
+                    if "give" in " ".join([]):
+                        return "Test passed"
+                    return f"Test passed, count: {1 if have_item else 0}"
                 return "ok"
 
         def bot(command):
@@ -5458,6 +5465,62 @@ class WeaponsSweep(unittest.TestCase):
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 10.0])
+
+    def test_victim_killed_counts_as_fired(self):
+        # A dead victim reads None, which is a hit, not a miss: the round
+        # connected. ensure_victim resummons the zombie for the next weapon.
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, None))
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, None])
+
+    def test_resume_skips_only_passed_weapons(self):
+        prev = [
+            {"weapon": "a", "stop": None},
+            {"weapon": "b", "stop": "inconclusive-no-shot"},
+            {"weapon": "c", "stop": "server-log-exception"},
+        ]
+        self.assertEqual(weapons_sweep.passes_to_skip(prev), {"a"})
+        merged, passed, inconclusive, failed = weapons_sweep.merged_verdict(
+            prev, [{"weapon": "c", "stop": None}]
+        )
+        self.assertEqual((passed, inconclusive, failed), (2, 1, 0))
+        self.assertEqual(len(merged), 3)
+
+    def test_new_log_lines_unreadable(self):
+        lines, pos = weapons_sweep.new_log_lines(
+            Path(tempfile.mkdtemp()) / "missing" / "latest.log", 0
+        )
+        self.assertIsNone(lines)
+        self.assertEqual(pos, 0)
+
+    def test_unreadable_log_is_fail(self):
+        log_path = Path(tempfile.mkdtemp()) / "missing" / "latest.log"
+        rcon, bot, _ = self.make_pair()
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+        )
+        self.assertEqual(stop, "server-log-unreadable")
+        self.assertTrue(detail.get("log_unreadable"))
+
+    def test_sbw_give_failure_is_fail(self):
+        rcon, bot, log_path = self.make_pair(have_item=False)
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        )
+        self.assertEqual(stop, "server-give-failed")
+        self.assertFalse(detail.get("gave"))
+
+    def test_tacz_give_failure_is_fail(self):
+        rcon, bot, log_path = self.make_pair(have_item=False)
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+        )
+        self.assertEqual(stop, "server-give-failed")
+        self.assertFalse(detail.get("gave"))
 
     def test_server_log_exception_stops_the_weapon(self):
         rcon, bot, log_path = self.make_pair(

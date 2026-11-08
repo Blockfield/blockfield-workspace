@@ -203,13 +203,14 @@ def aim_at_victim(bot, rcon, player):
 
 
 def new_log_lines(log_path, position):
+    """(lines, position); None lines when the log is unreadable (never PASS)."""
     try:
         with open(log_path, encoding="utf-8", errors="replace") as handle:
             handle.seek(position)
             lines = handle.read().splitlines()
             return lines, handle.tell()
     except OSError:
-        return [], position
+        return None, position
 
 
 def ensure_in_range(bot, rcon, player):
@@ -259,6 +260,8 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     rcon.cmd(hud_checks.gun_replace_command(player, gun_id, ammo=300))
     time.sleep(0.4)
     detail["gave"] = items_count(rcon, player, KIT_GUN) >= 1
+    if not detail["gave"]:
+        return "server-give-failed", log_pos
     if not alive(rcon, player):
         return "server-dead-after-give", log_pos
     bot("slot 0")
@@ -327,7 +330,12 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     if aim_at_victim(bot, rcon, player):
         tacz_shoot(bot, attempts=2)
         time.sleep(0.8)
-    detail["victim_hp"] = [hp_before, victim_health(rcon, player)]
+    hp_after = victim_health(rcon, player)
+    detail["victim_hp"] = [hp_before, hp_after]
+    # A dead/missing victim after the shot means a round connected.
+    detail["victim_hit"] = hp_before is not None and (
+        hp_after is None or hp_after < hp_before
+    )
     if not alive(rcon, player):
         return "server-dead-after-victim", log_pos
     detail["reselected"] = bot("state").get("held") == KIT_GUN
@@ -382,6 +390,8 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         rcon.cmd(f"item replace entity {player} hotbar.0 with {weapon_id}")
         time.sleep(0.4)
         detail["gave"] = items_count(rcon, player, weapon_id) >= 1
+        if not detail["gave"]:
+            return "server-give-failed", detail, log_pos
         if not alive(rcon, player):
             return "server-dead-after-give", detail, log_pos
         bot("slot 0")
@@ -417,9 +427,10 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
             time.sleep(1.4)
         hp_after = victim_health(rcon, player)
         detail["victim_hp"] = [hp_before, hp_after]
-        # SBW guns expose no ammo counter: only a wounded victim confirms a shot.
-        detail["fired"] = (
-            hp_before is not None and hp_after is not None and hp_after < hp_before
+        # SBW guns expose no ammo counter: a wounded or killed victim confirms
+        # a shot (a dead victim reads None, which is a hit, not a miss).
+        detail["fired"] = hp_before is not None and (
+            hp_after is None or hp_after < hp_before
         )
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos
@@ -434,30 +445,52 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         rcon, bot, player, item, log_path, log_pos, detail
     )
     lines, log_pos = new_log_lines(log_path, log_pos)
+    if lines is None:
+        detail["log_unreadable"] = True
+        return "server-log-unreadable", detail, log_pos
     hits = [line[-220:] for line in lines if LOG_WATCH.search(line)][:5]
     if hits:
         detail["log_hits"] = hits
         return "server-log-exception", detail, log_pos
     if stop:
         return stop, detail, log_pos
+    if not detail.get("gave"):
+        return "server-give-failed", detail, log_pos
     if not detail.get("fired"):
         return "inconclusive-no-shot", detail, log_pos
     return None, detail, log_pos
 
 
-def load_done(results_path):
-    """Weapons already recorded, so a cut run continues where it stopped."""
-    done = set()
+def load_rows(results_path):
+    """Previously recorded rows, so a cut run continues where it stopped."""
+    rows = []
     try:
         with open(results_path, encoding="utf-8") as handle:
             for line in handle:
                 try:
-                    done.add(json.loads(line)["weapon"])
-                except (ValueError, KeyError, TypeError):
+                    row = json.loads(line)
+                except ValueError:
                     continue
+                if isinstance(row, dict) and "weapon" in row:
+                    rows.append(row)
     except OSError:
         pass
-    return done
+    return rows
+
+
+def passes_to_skip(rows):
+    """Weapons with a recorded PASS; failures rerun, never silently dropped."""
+    return {row["weapon"] for row in rows if row.get("stop") is None}
+
+
+def merged_verdict(prev_rows, new_rows):
+    """All rows with new rows winning; (rows, passed, inconclusive, failed)."""
+    by_weapon = {row["weapon"]: row for row in prev_rows}
+    by_weapon.update({row["weapon"]: row for row in new_rows})
+    rows = list(by_weapon.values())
+    passed = sum(1 for row in rows if row.get("stop") is None)
+    inconclusive = sum(1 for row in rows if row.get("stop") == "inconclusive-no-shot")
+    return rows, passed, inconclusive, len(rows) - passed - inconclusive
 
 
 def record_result(results_path, row):
@@ -465,7 +498,7 @@ def record_result(results_path, row):
         handle.write(json.dumps(row) + "\n")
 
 
-def write_progress(results_path, rows, total):
+def write_progress(results_path, rows):
     passed = sum(1 for r in rows if r["stop"] is None)
     inconclusive = sum(1 for r in rows if r["stop"] == "inconclusive-no-shot")
     failed = len(rows) - passed - inconclusive
@@ -474,7 +507,7 @@ def write_progress(results_path, rows, total):
     try:
         progress.write_text(
             "# weapons-sweep progress\n\n"
-            f"- swept: {len(rows)}/{total}, pass {passed},"
+            f"- swept: {len(rows)}, pass {passed},"
             f" inconclusive {inconclusive}, fail {failed}\n"
             f"- last: {last.get('weapon')} {last.get('stop')}\n"
             "- resume: rerun with the same --results path\n",
@@ -497,7 +530,8 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             results_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-    done = load_done(results_path) if results_path else set()
+    prev_rows = load_rows(results_path) if results_path else []
+    skip = passes_to_skip(prev_rows)
     results = []
     try:
         player = bot("state")["name"]
@@ -531,14 +565,13 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             )
             return 0
         print(f"sweeping {len(inventory)} weapons as {player}", flush=True)
-        if done:
-            skipped = [w for _, w in inventory if w in done]
-            inventory = [(k, w) for k, w in inventory if w not in done]
-            print(f"resuming: skipping {len(skipped)} recorded weapons", flush=True)
+        if skip:
+            skipped = [w for _, w in inventory if w in skip]
+            inventory = [(k, w) for k, w in inventory if w not in skip]
+            print(f"resuming: skipping {len(skipped)} passed weapons", flush=True)
         out = []
         log_pos = log_path.stat().st_size if log_path.exists() else 0
         crashed = None
-        total = len(inventory) + len(done)
         for kind, weapon_id in inventory:
             try:
                 stop, detail, log_pos = sweep_weapon(
@@ -555,7 +588,8 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             results.append({"weapon": weapon_id, "stop": stop, **detail})
             if results_path:
                 record_result(results_path, results[-1])
-                write_progress(results_path, results, total)
+                merged, _, _, _ = merged_verdict(prev_rows, results)
+                write_progress(results_path, merged)
             if stop in (None, "inconclusive-no-shot"):
                 out.append(
                     check(f"sweep {weapon_id}", stop is None, json.dumps(detail)[:300])
@@ -572,7 +606,13 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
                     crashed = weapon_id
                     break
         print(json.dumps({"results": results}, indent=1)[:6000])
-        failed = tally(out)
+        tally(out)
+        merged, passed, inconclusive, failed = merged_verdict(prev_rows, results)
+        print(
+            f"merged verdict over {len(merged)} weapons:"
+            f" pass {passed}, inconclusive {inconclusive}, fail {failed}",
+            flush=True,
+        )
         if crashed:
             print(
                 f"SERVER DIED during {crashed}; restart the stand then rerun"
@@ -580,7 +620,7 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
                 flush=True,
             )
             return 1
-        return failed and 1 or 0
+        return 1 if failed else 0
     finally:
         try:
             clear_victims(rcon)
@@ -602,7 +642,7 @@ def register(sub):
     parser.add_argument(
         "--results",
         default="",
-        help="jsonl path: append each weapon row + progress.md, skip done on rerun",
+        help="jsonl path: append each weapon row + progress.md, skip passed on rerun",
     )
     rcon_args(parser)
     parser.set_defaults(func=run)

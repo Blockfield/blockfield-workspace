@@ -5,7 +5,7 @@ Needs the testbot killfeed/markers/usestate queries (scripts/dev/testbot).
 Two headless clients: the killer and the victim/observer. Room-killfeed only
 delivers kills whose victim (or, when the victim is not a room member, whose
 attacker) belongs to the recipient's room, so carpet victims never feed a room
-member's killfeed — the victim here is always the second client. A tricky
+member's killfeed — the victim is the second client (duel, grenade, tag) except the isolation kill, a first-client suicide its room still feeds. A tricky
 name rides the offline stand as the second client's login name (`just play
 --client 2 --name <one of TRICKY_NAMES>`); RCON never sees it, entity
 references go by offline UUID (devstack.offline_uuid, the same derivation the
@@ -418,7 +418,8 @@ def scenario_duel(rcon, bot, bot2, arena, bounds):
 
 def rcon_kill(rcon, killer, victim):
     """Lethal RCON hit with player attribution: deterministic killfeed source
-    when guns are unavailable. Victim stays a room member; killer anywhere."""
+    when guns are unavailable. Victim stays a room member; killer in-match
+    (countdown attackers are denied the damage)."""
     dim = victim("state")["dimension"]
     killer_name, victim_name = killer("state")["name"], victim("state")["name"]
     before_killer = len(killer("killfeed").get("entries", []))
@@ -472,17 +473,18 @@ def rcon_kill(rcon, killer, victim):
 def scenario_isolation(rcon, bot, bot2, room):
     """Observer parked outside must not see the next room kill; the victim's own
     map context hides while dead and returns on respawn. The lethal hit is an
-    RCON damage with the parked observer as credited attacker, so the victim
-    stays a room member (a non-member victim's line is filtered for everyone)."""
+    in-room suicide (the victim credits itself), so attacker and victim are the
+    same started-room member: the countdown damage gate never denies it, the
+    room killfeed still feeds, and the parked observer must gain no line."""
     out = []
-    killer, victim = bot2("state")["name"], bot("state")["name"]
+    victim = bot("state")["name"]
     dim = bot("state")["dimension"]
     before = len(bot("killfeed").get("entries", []))
     before2 = len(bot2("killfeed").get("entries", []))
     try:
         reply = rcon.cmd(
-            f"execute in {dim} run damage {victim} 100 blockfield:knife by "
-            f"{offline_uuid(killer)}"
+            f"execute in {dim} run damage {offline_uuid(victim)} 100"
+            f" blockfield:knife by {offline_uuid(victim)}"
         )
     except (ValueError, RuntimeError) as error:
         out.append(check("RCON lethal hit lands", False, str(error)[:160]))
@@ -500,20 +502,20 @@ def scenario_isolation(rcon, bot, bot2, room):
     )
     entry = killfeed_match(
         (bot("killfeed").get("entries", [])[before:] if dead else []),
-        attacker=killer,
+        attacker=victim,
         target=victim,
     )
     out.append(
         check(
-            "killer-credited RCON death feeds the room killfeed",
+            "self-credited RCON death feeds the room killfeed",
             entry is not None,
-            f"no {killer}->{victim} line",
+            f"no {victim}->{victim} line",
         )
     )
     isolated = (
         killfeed_match(
             bot2("killfeed").get("entries", [])[before2:],
-            attacker=killer,
+            attacker=victim,
             target=victim,
         )
         is None
@@ -527,12 +529,12 @@ def scenario_isolation(rcon, bot, bot2, room):
             else "no local entry",
         )
     )
-    hidden = bot("markers").get("minimap") is None
+    hidden = wait_for(lambda: bot("markers").get("minimap") is None, 30)
     out.append(check("dead client hides the minimap", dead and hidden, "minimap shown"))
     time.sleep(4)
     bot("bfaction spawn:BASE")
     back = wait_for(lambda: bot("markers").get("deployed") is True, 30)
-    shown = bot("markers").get("minimap") is not None
+    shown = wait_for(lambda: bot("markers").get("minimap") is not None, 30)
     out.append(
         check("respawn restores deployment and minimap", back and shown, "hidden")
     )

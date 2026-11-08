@@ -5,11 +5,11 @@ For each weapon id (TaCZ gun packs from the stand mods plus SuperbWarfare gun
 definitions): give to the bot, select, single fire, hold fire, reload, aim,
 cycle fire modes (single + burst hold in AUTO), moving fire, switch away/back,
 drop, pick up, die holding it. Every shot goes into the blocks ahead so
-explosive rounds detonate against the world. After every step the server must
-answer RCON, and no new server-log exception may appear for that weapon.
-
-Known gap: no victim bot yet, so anti-player hit paths are not exercised;
-blocks only.
+explosive rounds detonate against the world; then a NoAI zombie victim is
+summoned ahead of the player and shot at with `lookat` aim so bullets hit an
+entity (BodyPart/headshot paths), explosive rounds included. After every step
+the server must answer RCON, and no new server-log exception may appear for
+that weapon.
 
 Fail-before for server#365: an explosive round whose bullet hits a block used
 to kill the server (blockfield ProjectileExplosionMixin shadow miss).
@@ -32,6 +32,9 @@ SCENARIO = {
 KIT_GUN = "tacz:modern_kinetic_gun"
 FIRE_MODES = ("SEMI", "BURST", "AUTO")
 LOG_WATCH = re.compile(r"ERROR|Exception|Ticking (entity|server)|field_9190|FATAL")
+VICTIM_TYPE = "minecraft:zombie"
+VICTIM_TAG = "sweep_victim"
+VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1,sort=nearest]"
 
 SKIP_ITEMS = (
     "ammo",
@@ -146,6 +149,57 @@ def health(rcon, player):
         return hud_checks.parse_health(rcon.cmd(f"data get entity {player} Health"))
     except (ValueError, OSError, RuntimeError):
         return None
+
+
+def victim_health(rcon, player):
+    try:
+        return hud_checks.parse_health(
+            rcon.cmd(
+                f"execute at {player} run data get entity {VICTIM_SELECTOR} Health"
+            )
+        )
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+def victim_pos(rcon, player):
+    try:
+        return hud_checks.parse_pos(
+            rcon.cmd(f"execute at {player} run data get entity {VICTIM_SELECTOR} Pos")
+        )
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+def ensure_victim(rcon, player):
+    """One NoAI zombie ahead of the player so bullets hit an entity, not blocks.
+
+    Caret summon is facing-relative, so it lands ahead whatever the yaw is;
+    the shooter then aims with absolute `lookat` coordinates, never `look`.
+    """
+    if victim_health(rcon, player) is None:
+        rcon.cmd(
+            f"execute at {player} run summon {VICTIM_TYPE} ^ ^ ^8"
+            f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{VICTIM_TAG}"]}}'
+        )
+
+
+def clear_victims(rcon):
+    try:
+        rcon.cmd(f"kill {VICTIM_SELECTOR}")
+    except (OSError, RuntimeError):
+        pass
+
+
+def aim_at_victim(bot, rcon, player):
+    """Aim at the victim's chest; False when its position is unreadable."""
+    pos = victim_pos(rcon, player)
+    if pos is None:
+        return False
+    x, y, z = pos
+    bot(f"lookat {x} {y + 1.0} {z}")
+    time.sleep(0.6)
+    return True
 
 
 def new_log_lines(log_path, position):
@@ -268,6 +322,14 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     bot("hold key.forward 0")
     if not alive(rcon, player):
         return "server-dead-after-moving", log_pos
+    ensure_victim(rcon, player)
+    hp_before = victim_health(rcon, player)
+    if aim_at_victim(bot, rcon, player):
+        tacz_shoot(bot, attempts=2)
+        time.sleep(0.8)
+    detail["victim_hp"] = [hp_before, victim_health(rcon, player)]
+    if not alive(rcon, player):
+        return "server-dead-after-victim", log_pos
     detail["reselected"] = bot("state").get("held") == KIT_GUN
     if not alive(rcon, player):
         return "server-dead-after-reselect", log_pos
@@ -334,7 +396,6 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         time.sleep(1.4)
         bot("hold key.use 20")
         time.sleep(1.2)
-        detail["fired"] = True
         if not alive(rcon, player):
             return "server-dead-after-hold", detail, log_pos
         bot("hold key.attack 20")
@@ -347,6 +408,21 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         detail["moving_single"] = True
         if not alive(rcon, player):
             return "server-dead-after-moving", detail, log_pos
+        ensure_victim(rcon, player)
+        hp_before = victim_health(rcon, player)
+        if aim_at_victim(bot, rcon, player):
+            bot("attack")
+            time.sleep(0.8)
+            bot("hold key.attack 20")
+            time.sleep(1.4)
+        hp_after = victim_health(rcon, player)
+        detail["victim_hp"] = [hp_before, hp_after]
+        # SBW guns expose no ammo counter: only a wounded victim confirms a shot.
+        detail["fired"] = (
+            hp_before is not None and hp_after is not None and hp_after < hp_before
+        )
+        if not alive(rcon, player):
+            return "server-dead-after-victim", detail, log_pos
         bot("slot 1")
         time.sleep(0.2)
         bot("slot 0")
@@ -369,6 +445,45 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
     return None, detail, log_pos
 
 
+def load_done(results_path):
+    """Weapons already recorded, so a cut run continues where it stopped."""
+    done = set()
+    try:
+        with open(results_path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    done.add(json.loads(line)["weapon"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return done
+
+
+def record_result(results_path, row):
+    with open(results_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def write_progress(results_path, rows, total):
+    passed = sum(1 for r in rows if r["stop"] is None)
+    inconclusive = sum(1 for r in rows if r["stop"] == "inconclusive-no-shot")
+    failed = len(rows) - passed - inconclusive
+    last = rows[-1] if rows else {}
+    progress = results_path.with_name("progress.md")
+    try:
+        progress.write_text(
+            "# weapons-sweep progress\n\n"
+            f"- swept: {len(rows)}/{total}, pass {passed},"
+            f" inconclusive {inconclusive}, fail {failed}\n"
+            f"- last: {last.get('weapon')} {last.get('stop')}\n"
+            "- resume: rerun with the same --results path\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
     from devstack import SERVER
 
@@ -376,10 +491,18 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
     log_path = server_dir / "logs" / "latest.log"
     rcon = rcon_factory(args.rcon_host, args.rcon_port, args.rcon_password)
     bot = bot_factory(args.bot_port)
+    results_path = Path(args.results) if args.results else None
+    if results_path:
+        try:
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    done = load_done(results_path) if results_path else set()
     results = []
     try:
         player = bot("state")["name"]
         assert re.fullmatch(r"[A-Za-z0-9_]{1,16}", player), player
+        clear_victims(rcon)
         wanted = set(args.weapons.split(",")) if args.weapons else None
         inventory = []
         if args.kind in ("tacz", "all"):
@@ -408,9 +531,14 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             )
             return 0
         print(f"sweeping {len(inventory)} weapons as {player}", flush=True)
+        if done:
+            skipped = [w for _, w in inventory if w in done]
+            inventory = [(k, w) for k, w in inventory if w not in done]
+            print(f"resuming: skipping {len(skipped)} recorded weapons", flush=True)
         out = []
         log_pos = log_path.stat().st_size if log_path.exists() else 0
         crashed = None
+        total = len(inventory) + len(done)
         for kind, weapon_id in inventory:
             try:
                 stop, detail, log_pos = sweep_weapon(
@@ -425,6 +553,9 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             ) as error:
                 stop, detail = "rcon-or-bot-lost", {"error": f"{error!r}"[:200]}
             results.append({"weapon": weapon_id, "stop": stop, **detail})
+            if results_path:
+                record_result(results_path, results[-1])
+                write_progress(results_path, results, total)
             if stop in (None, "inconclusive-no-shot"):
                 out.append(
                     check(f"sweep {weapon_id}", stop is None, json.dumps(detail)[:300])
@@ -444,13 +575,15 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         failed = tally(out)
         if crashed:
             print(
-                f"SERVER DIED during {crashed}; restart the stand before rerunning",
+                f"SERVER DIED during {crashed}; restart the stand then rerun"
+                " with the same --results path to continue",
                 flush=True,
             )
             return 1
         return failed and 1 or 0
     finally:
         try:
+            clear_victims(rcon)
             bot("bfaction leave")
         except (OSError, RuntimeError):
             pass
@@ -465,6 +598,11 @@ def register(sub):
     parser.add_argument("--server-dir", default="")
     parser.add_argument(
         "--list-only", action="store_true", help="print inventory, no firing"
+    )
+    parser.add_argument(
+        "--results",
+        default="",
+        help="jsonl path: append each weapon row + progress.md, skip done on rerun",
     )
     rcon_args(parser)
     parser.set_defaults(func=run)

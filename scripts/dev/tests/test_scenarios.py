@@ -685,6 +685,7 @@ class Registry(unittest.TestCase):
                 "seam",
                 "stress",
                 "tablet",
+                "weapons-sweep",
                 "world-c2",
             ],
         )
@@ -5385,14 +5386,23 @@ class WeaponsSweep(unittest.TestCase):
             self.assertEqual(found, ["superbwarfare:ak_12"])
             self.assertEqual(skipped, ["superbwarfare:ammo_762x39"])
 
-    def make_pair(self, log_lines=(), fail_shoot=False, ammo=(300, 299)):
+    def make_pair(self, log_lines=(), fail_shoot=False, ammo=(300, 299), victim_hp=()):
         log_path = Path(tempfile.mkdtemp()) / "latest.log"
         log_path.write_text("".join(log_lines), encoding="utf-8")
+        hp_calls = {"n": 0}
 
         class Rcon:
             def cmd(self, command):
                 if command == "list":
                     return "players: hitbot"
+                if "sweep_victim" in command and "Health" in command:
+                    hp_calls["n"] += 1
+                    if victim_hp:
+                        hp = victim_hp[min(hp_calls["n"], len(victim_hp)) - 1]
+                        return f"hitbot has Health: {hp}f"
+                    return "ok"
+                if "sweep_victim" in command and "Pos" in command:
+                    return "[10.0d, 64.0d, 10.0d]" if victim_hp else "ok"
                 if "GunCurrentAmmoCount" in command:
                     return f"data: {ammo[0] if 'Hotbar' not in command else ammo[0]}"
                 if command.startswith("data get entity hitbot Health"):
@@ -5429,6 +5439,25 @@ class WeaponsSweep(unittest.TestCase):
         )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
+
+    def test_sbw_unconfirmed_shot_is_inconclusive(self):
+        # Fail-before for the review finding: the old code hard-coded
+        # fired=True, so this returned None (PASS) with no shot evidence.
+        rcon, bot, log_path = self.make_pair()
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        )
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertFalse(detail.get("fired"))
+
+    def test_sbw_victim_hp_drop_confirms_shot(self):
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0))
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, 10.0])
 
     def test_server_log_exception_stops_the_weapon(self):
         rcon, bot, log_path = self.make_pair(

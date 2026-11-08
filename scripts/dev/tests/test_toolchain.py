@@ -370,8 +370,8 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
 
 
 class LockDownloader(unittest.TestCase):
-    """Lock-driven fetch: ordered fallback, retry, checksum gate, null mirror
-    skip, BF_TOOL_CACHE. Local HTTP server only, no external network."""
+    """Lock-driven fetch: ordered fallback, retry, checksum gate,
+    BF_TOOL_CACHE. Local HTTP server only, no external network."""
 
     GOOD = b"pinned tool bytes fixture"
     BAD = b"wrong bytes"
@@ -381,7 +381,7 @@ class LockDownloader(unittest.TestCase):
         cls.sha = hashlib.sha256(cls.GOOD).hexdigest()
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FixtureHandler)
         cls.server.hits = collections.Counter()
-        cls.server.good = {"/good", "/m/" + cls.sha}
+        cls.server.good = {"/good"}
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(
             target=cls.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
@@ -400,7 +400,7 @@ class LockDownloader(unittest.TestCase):
     def url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
 
-    def write_lock(self, tmp, mirror, urls, digest=None, integrity=False):
+    def write_lock(self, tmp, urls, digest=None, integrity=False):
         spec = {"urls": urls, "kind": "raw"}
         if integrity:
             raw = hashlib.sha512(self.GOOD).digest()
@@ -409,7 +409,6 @@ class LockDownloader(unittest.TestCase):
             spec["sha256"] = digest or self.sha
         lock = {
             "version": 1,
-            "mirror": mirror,
             "tools": {"probe": {"version": "0", "platforms": {"any": spec}}},
         }
         path = Path(tmp) / "tools.lock.json"
@@ -418,9 +417,7 @@ class LockDownloader(unittest.TestCase):
 
     def test_ordered_fallback_first_verified_source_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(
-                tmp, None, [self.url("/always500"), self.url("/good")]
-            )
+            lock = self.write_lock(tmp, [self.url("/always500"), self.url("/good")])
             with (
                 patch.object(toolchain, "LOCK_PATH", lock),
                 patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
@@ -433,7 +430,7 @@ class LockDownloader(unittest.TestCase):
 
     def test_checksum_mismatch_rejects_without_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(tmp, None, [self.url("/good")], digest="0" * 64)
+            lock = self.write_lock(tmp, [self.url("/good")], digest="0" * 64)
             with (
                 patch.object(toolchain, "LOCK_PATH", lock),
                 patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
@@ -445,7 +442,7 @@ class LockDownloader(unittest.TestCase):
 
     def test_retry_recovers_flaky_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(tmp, None, [self.url("/flaky")])
+            lock = self.write_lock(tmp, [self.url("/flaky")])
             with (
                 patch.object(toolchain, "LOCK_PATH", lock),
                 patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
@@ -455,37 +452,9 @@ class LockDownloader(unittest.TestCase):
             self.assertEqual(out.read_bytes(), self.GOOD)
             self.assertEqual(self.server.hits["/flaky"], 2)
 
-    def test_null_mirror_skipped(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(tmp, None, [self.url("/good")])
-            self.assertIsNone(json.loads(lock.read_text(encoding="utf-8"))["mirror"])
-            with (
-                patch.object(toolchain, "LOCK_PATH", lock),
-                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
-            ):
-                out = toolchain.fetch("probe", "probe.bin")
-            self.assertEqual(out.read_bytes(), self.GOOD)
-            self.assertEqual(set(self.server.hits), {"/good"})
-
-    def test_mirror_is_last_resort_content_addressed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(
-                tmp, self.url("/m"), [self.url("/always500"), self.url("/missing")]
-            )
-            with (
-                patch.object(toolchain, "LOCK_PATH", lock),
-                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
-                patch("time.sleep"),
-            ):
-                out = toolchain.fetch("probe", "probe.bin")
-            self.assertEqual(out.read_bytes(), self.GOOD)
-            self.assertEqual(self.server.hits["/always500"], 3)
-            self.assertEqual(self.server.hits["/missing"], 1)
-            self.assertEqual(self.server.hits["/m/" + self.sha], 1)
-
     def test_registry_integrity_verified(self):
         with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(tmp, None, [self.url("/good")], integrity=True)
+            lock = self.write_lock(tmp, [self.url("/good")], integrity=True)
             with (
                 patch.object(toolchain, "LOCK_PATH", lock),
                 patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
@@ -495,7 +464,7 @@ class LockDownloader(unittest.TestCase):
 
     def test_bf_tool_cache_honoured(self):
         with tempfile.TemporaryDirectory() as tmp:
-            lock = self.write_lock(tmp, None, [self.url("/good")])
+            lock = self.write_lock(tmp, [self.url("/good")])
             with patch.object(toolchain, "LOCK_PATH", lock):
                 with patch.dict(
                     os.environ, {"BF_TOOL_CACHE": str(Path(tmp) / "shared")}
@@ -526,3 +495,49 @@ class LockDownloader(unittest.TestCase):
             self.assertIn("npm-prettier-2.0.0", str(binary))
             fetch.assert_called_once_with("prettier")
             call.assert_called_once()
+
+
+class LockSources(unittest.TestCase):
+    """Real scripts/tools.lock.json: every asset lists its sources, all
+    sources of one asset share a single pin. No network."""
+
+    # No second public host serves byte-identical files for these: GitHub
+    # release downloads 302 to expiring signed CDN URLs, and ruff's GitHub
+    # release carries no .whl assets. Keep this list exact: adding a source
+    # must update it here.
+    SINGLE_SOURCE = frozenset(
+        {
+            "actionlint",
+            "just",
+            "ktlint",
+            "python",
+            "rclone",
+            "ruff",
+            "shellcheck",
+            "shfmt",
+            "temurin",
+        }
+    )
+
+    def test_every_source_shares_one_pin(self):
+        lock = toolchain.load_lock()
+        multi = set()
+        for tool, entry in lock["tools"].items():
+            specs = list(entry["platforms"].values())
+            self.assertTrue(specs, f"{tool} has no platform assets")
+            for spec in specs:
+                urls = spec["urls"]
+                self.assertTrue(urls, f"{tool} has a sourceless asset")
+                self.assertEqual(
+                    len(set(urls)), len(urls), f"{tool} lists a source twice"
+                )
+                for url in urls:
+                    self.assertTrue(
+                        url.startswith("https://"),
+                        f"{tool} source is not https: {url}",
+                    )
+                pins = [key for key in ("sha256", "integrity") if key in spec]
+                self.assertEqual(len(pins), 1, f"{tool} needs exactly one pin")
+                if len(urls) > 1:
+                    multi.add(tool)
+        self.assertEqual(set(lock["tools"]) - multi, set(self.SINGLE_SOURCE))

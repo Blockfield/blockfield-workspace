@@ -2,11 +2,9 @@
 
 Core downloader: the single pin set lives in scripts/tools.lock.json and this
 module only reads it. Every download is retried with backoff, written
-atomically, verified against the locked hash, and resolved through the ordered
-source list (registry or GitHub first, then the R2 mirror while it is set).
-`BF_TOOL_CACHE` points all tools at one shared cache directory (hook-test
-fixtures and fresh worktrees use it); `toolchain.py --tools a,b` prefetches
-named tools for CI.
+atomically, and verified against the locked hash. `BF_TOOL_CACHE` points all
+tools at one shared cache directory (hook-test fixtures and fresh worktrees
+use it); `toolchain.py --tools a,b` prefetches named tools for CI.
 
 Workspace-only code (Temurin JDK, boat CLI, Debian Xvfb/VirtualGL) lives in
 scripts/toolchain_local.py and is re-exported here, so existing imports keep
@@ -297,15 +295,11 @@ def download(name, url, checksum, *, cache=None):
 
 
 def fetch(tool_name, filename=None, *, cache=None, platform=None):
-    """Locked tool file: each source tried in lock order (registry or GitHub
-    first, then the content-addressed R2 mirror while it is set), every
-    source retried and hash-verified. A null mirror is skipped, never fetched."""
+    """Locked tool file: each source tried in lock order, every source
+    retried and hash-verified."""
     lock = load_lock()
     entry, key, spec = lock_platform(tool_name, platform, lock)
     urls = list(spec["urls"])
-    mirror = lock.get("mirror")
-    if mirror and entry.get("mirror", True) and "sha256" in spec:
-        urls.append(mirror.rstrip("/") + "/" + spec["sha256"])
     name = filename or Path(urls[0]).name
     root = Path(cache) if cache is not None else cache_dir()
     target = root / name

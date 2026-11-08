@@ -1,5 +1,6 @@
 import base64
 import collections
+import errno
 import hashlib
 import http.server
 import io
@@ -154,6 +155,87 @@ class Toolchain(unittest.TestCase):
         self.assertTrue(set(injected).isdisjoint(env))
         self.assertEqual(env["JAVA_HOME"], "/native/jdk")
         self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+
+    def test_prefetch_rejects_trailing_positional_arguments(self):
+        inner = dict(os.environ)
+        inner.pop("GITHUB_PATH", None)
+        with (
+            patch.dict(os.environ, inner, clear=True),
+            patch.object(toolchain, "prefetch") as prefetch,
+            patch.object(toolchain, "call") as call,
+            patch.object(toolchain, "canonical_python", return_value=Path("py")),
+        ):
+            for argv in (
+                ["--ci", "scripts/check.py"],
+                ["--tools", "just", "scripts/check.py"],
+                ["--tools=just", "scripts/check.py"],
+                ["--ci", "--bogus"],
+                ["--tools"],
+            ):
+                with self.subTest(argv=argv):
+                    self.assertEqual(toolchain.main(argv), 2)
+            prefetch.assert_not_called()
+            call.assert_not_called()
+
+    def test_prefetch_accepts_only_known_flags(self):
+        inner = dict(os.environ)
+        inner.pop("GITHUB_PATH", None)
+        with (
+            patch.dict(os.environ, inner, clear=True),
+            patch.object(toolchain, "prefetch") as prefetch,
+            patch.object(toolchain, "call") as call,
+            patch.object(toolchain, "canonical_python", return_value=Path("py")),
+        ):
+            toolchain.main(["--tools", "ruff"])
+            prefetch.assert_called_once_with(["ruff"])
+            toolchain.main(["--ci", "--tools=ruff"])
+            self.assertEqual(prefetch.call_args_list[1].args[0], ["ruff"])
+            call.assert_not_called()
+
+    def test_ci_prefetch_exports_pinned_bins_to_github_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github_path"
+            python = Path(tmp) / "py" / "bin" / "python3"
+            with (
+                patch.dict(os.environ, {"GITHUB_PATH": str(output)}),
+                patch.object(toolchain, "prefetch") as prefetch,
+                patch.object(toolchain, "canonical_python", return_value=python),
+            ):
+                self.assertIsNone(toolchain.main(["--ci"]))
+                prefetch.assert_called_once_with(["just", "shellcheck"])
+            lines = output.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines, [*toolchain.pinned_bins(), str(python.parent)])
+
+    def test_child_env_lists_pinned_bins_instead_of_shared_bin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"BF_TOOL_CACHE": tmp, "PATH": "/usr/bin"}):
+                env = toolchain.child_env()
+                expected = toolchain.pinned_bins()
+        entries = env["PATH"].split(os.pathsep)
+        self.assertNotIn(str(Path(tmp) / "bin"), entries)
+        for entry in expected:
+            self.assertIn(entry, entries)
+
+    def test_flags_after_a_script_run_the_script_instead_of_prefetching(self):
+        with (
+            patch.object(toolchain, "prefetch") as prefetch,
+            patch.object(toolchain, "call") as call,
+            patch.object(toolchain, "canonical_python", return_value=Path("py")),
+        ):
+            toolchain.main(["scripts/check.py", "--ci", "--tools", "ruff"])
+            prefetch.assert_not_called()
+            call.assert_called_once_with(
+                Path("py"),
+                "-I",
+                "-X",
+                "utf8",
+                "scripts/check.py",
+                "--ci",
+                "--tools",
+                "ruff",
+            )
+            toolchain.main(["--tools=ruff"])
+            prefetch.assert_called_once_with(["ruff"])
 
 
 class ManagedJava(unittest.TestCase):
@@ -495,6 +577,268 @@ class LockDownloader(unittest.TestCase):
             self.assertIn("npm-prettier-2.0.0", str(binary))
             fetch.assert_called_once_with("prettier")
             call.assert_called_once()
+
+    def test_npm_reuses_marked_install_without_running_npm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "npm-prettier-9.9.9"
+            binary = directory / "node_modules" / ".bin" / "prettier"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            (directory / ".complete").write_text("complete\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain, "lock_tool", return_value={"version": "9.9.9"}),
+                patch.object(toolchain, "fetch") as fetch,
+                patch.object(toolchain, "call") as call,
+            ):
+                self.assertEqual(toolchain.tool_npm("prettier"), binary)
+            fetch.assert_not_called()
+            call.assert_not_called()
+
+    def test_npm_reinstalls_unmarked_dir_under_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "npm-prettier-9.9.9"
+            binary = directory / "node_modules" / ".bin" / "prettier"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain, "lock_tool", return_value={"version": "9.9.9"}),
+                patch.object(
+                    toolchain, "fetch", return_value=Path(tmp) / "p.tgz"
+                ) as fetch,
+                patch.object(toolchain, "call") as call,
+            ):
+                self.assertEqual(toolchain.tool_npm("prettier"), binary)
+            fetch.assert_called_once_with("prettier")
+            call.assert_called_once()
+            self.assertTrue((directory / ".complete").is_file())
+
+
+class ConcurrencyPinSafety(unittest.TestCase):
+    """Shared BF_TOOL_CACHE: pins must never clobber each other and concurrent
+    first installs must converge instead of corrupting (fail-before for the
+    core pin-safety fix; each test fails on the pre-fix layout)."""
+
+    def _spec(self, data):
+        return {
+            "urls": ["https://example.invalid/shfmt"],
+            "kind": "raw",
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+
+    def test_tool_binaries_are_keyed_by_pin(self):
+        old, new = b"tool bytes pin 1", b"tool bytes pin 2"
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_old = Path(tmp) / "a1.bin"
+            archive_old.write_bytes(old)
+            archive_new = Path(tmp) / "a2.bin"
+            archive_new.write_bytes(new)
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(
+                    toolchain, "fetch", side_effect=[archive_old, archive_new]
+                ),
+                patch.object(toolchain, "lock_platform") as platform,
+            ):
+                platform.side_effect = [
+                    (None, "any", self._spec(old)),
+                    (None, "any", self._spec(new)),
+                ]
+                first = toolchain.tool("shfmt")
+                second = toolchain.tool("shfmt")
+            self.assertNotEqual(first, second)
+            self.assertIn(hashlib.sha256(old).hexdigest()[:16], str(first))
+            self.assertIn(hashlib.sha256(new).hexdigest()[:16], str(second))
+            self.assertEqual(first.read_bytes(), old)
+            self.assertEqual(second.read_bytes(), new)
+
+    def test_tool_binary_publish_uses_sibling_temp_file(self):
+        data = b"pinned tool binary"
+        real = tempfile.NamedTemporaryFile
+        calls = []
+
+        def recording(*args, **kwargs):
+            calls.append(kwargs)
+            return real(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "a.bin"
+            archive.write_bytes(data)
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain, "fetch", return_value=archive),
+                patch.object(
+                    toolchain,
+                    "lock_platform",
+                    return_value=(None, "any", self._spec(data)),
+                ),
+                patch.object(
+                    toolchain.tempfile, "NamedTemporaryFile", side_effect=recording
+                ),
+            ):
+                binary = toolchain.tool("shfmt")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(Path(calls[0]["dir"]), binary.parent)
+            self.assertEqual(binary.read_bytes(), data)
+
+    def test_ruff_venv_is_versioned_and_leaves_a_completion_marker(self):
+        version = toolchain.lock_tool("ruff")["version"]
+        probe = SimpleNamespace(returncode=0, stdout="ruff " + version)
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain.subprocess, "run", return_value=probe),
+                patch.object(
+                    toolchain, "fetch", return_value=Path(tmp) / "ruff.whl"
+                ) as fetch,
+                patch.object(
+                    toolchain, "canonical_python", return_value=sys.executable
+                ),
+                patch.object(toolchain, "call") as call,
+                patch("time.sleep"),
+            ):
+                binary = toolchain.tool_ruff()
+            self.assertIn("venv-ruff-" + version, str(binary))
+            fetch.assert_called_once_with("ruff")
+            self.assertTrue(call.called)
+            self.assertTrue(
+                (Path(tmp) / ("venv-ruff-" + version) / ".complete").is_file()
+            )
+            for invocation in call.call_args_list:
+                self.assertNotIn("--clear", invocation.args)
+
+    def test_ruff_uses_marked_venv_without_rebuilding(self):
+        version = toolchain.lock_tool("ruff")["version"]
+        probe = SimpleNamespace(returncode=0, stdout="ruff " + version)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / ("venv-ruff-" + version)
+            python = directory / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            (directory / ".complete").write_text("complete\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain.subprocess, "run", return_value=probe),
+                patch.object(toolchain, "fetch") as fetch,
+                patch.object(toolchain, "call") as call,
+            ):
+                binary = toolchain.tool_ruff()
+            self.assertEqual(binary, directory / "bin" / "ruff")
+            fetch.assert_not_called()
+            call.assert_not_called()
+
+    def test_ruff_lock_holder_rebuilds_unmarked_dir(self):
+        version = toolchain.lock_tool("ruff")["version"]
+        probe = SimpleNamespace(returncode=0, stdout="ruff " + version)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / ("venv-ruff-" + version)
+            python = directory / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            sentinel = directory / "stale.txt"
+            sentinel.write_text("stale", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain.subprocess, "run", return_value=probe),
+                patch.object(toolchain, "fetch", return_value=Path(tmp) / "ruff.whl"),
+                patch.object(
+                    toolchain, "canonical_python", return_value=sys.executable
+                ),
+                patch.object(toolchain, "call") as call,
+                patch("time.sleep"),
+            ):
+                binary = toolchain.tool_ruff()
+            self.assertEqual(binary, directory / "bin" / "ruff")
+            self.assertFalse(sentinel.exists())
+            self.assertTrue((directory / ".complete").is_file())
+            self.assertTrue(call.called)
+
+    def test_install_lock_times_out_with_a_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "venv-ruff-0.lock"
+            with toolchain._held(lock):
+                with self.assertRaisesRegex(RuntimeError, "locked by another process"):
+                    with toolchain._held(lock, timeout=0):
+                        pass
+
+    def test_install_lock_releases_on_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "x.lock"
+            with toolchain._held(lock):
+                pass
+            with toolchain._held(lock, timeout=0):
+                pass
+
+    def test_canonical_python_lost_race_uses_winner(self):
+        key = "-".join(toolchain.host())
+        version = toolchain.lock_tool("python")["version"].split("+")[0]
+        probed = "(3, 12, 14) 1.3.2 1.3.2"
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / ("python-" + version + "-" + key)
+            relative = Path("python") / (
+                "python.exe" if os.name == "nt" else "bin/python3"
+            )
+            winner = directory / relative
+            archive = Path(tmp) / "py.tar.gz"
+            with tarfile.open(archive, "w:gz") as source:
+                member = tarfile.TarInfo(str(relative))
+                member.size = 0
+                source.addfile(member, io.BytesIO(b""))
+            real_rename = Path.rename
+
+            def rival(self, target):
+                if Path(target) == directory:
+                    winner.parent.mkdir(parents=True, exist_ok=True)
+                    winner.touch()  # the other process published first
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty")
+                return real_rename(self, target)
+
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain.sys, "version_info", (3, 14, 0)),
+                patch.object(toolchain, "fetch", return_value=archive),
+                patch.object(toolchain, "python_version", return_value=probed),
+                patch.object(Path, "rename", rival),
+            ):
+                self.assertEqual(toolchain.canonical_python(), winner)
+
+    def test_canonical_python_race_with_broken_winner_still_raises(self):
+        key = "-".join(toolchain.host())
+        version = toolchain.lock_tool("python")["version"].split("+")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / ("python-" + version + "-" + key)
+            relative = Path("python") / (
+                "python.exe" if os.name == "nt" else "bin/python3"
+            )
+            archive = Path(tmp) / "py.tar.gz"
+            with tarfile.open(archive, "w:gz") as source:
+                member = tarfile.TarInfo(str(relative))
+                member.size = 0
+                source.addfile(member, io.BytesIO(b""))
+            real_rename = Path.rename
+
+            def rival(self, target):
+                if Path(target) == directory:
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty")
+                return real_rename(self, target)
+
+            with (
+                patch.dict(os.environ, {"BF_TOOL_CACHE": tmp}),
+                patch.object(toolchain.sys, "version_info", (3, 14, 0)),
+                patch.object(toolchain, "fetch", return_value=archive),
+                patch.object(
+                    toolchain,
+                    "python_version",
+                    side_effect=[
+                        "(3, 12, 14) 1.3.2 1.3.2",  # staging build is fine
+                        "(3, 12, 14) 9.9.9 9.9.9",  # the rival's tree is broken
+                    ],
+                ),
+                patch.object(Path, "rename", rival),
+            ):
+                with self.assertRaises(OSError):
+                    toolchain.canonical_python()
 
 
 class LockSources(unittest.TestCase):

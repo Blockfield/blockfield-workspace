@@ -208,7 +208,9 @@ def main(argv=None):
             timings,
             "pinned-just",
             f"cd {remote_root} && python3 -I scripts/quality.py run just --version && "
-            'install -m755 .cache/quality/bin/just "$HOME/.local/bin/just" && '
+            "JBIN=$(python3 -c \"import sys; sys.path.insert(0, 'scripts');"
+            " from toolchain import tool; print(tool('just'))\") && "
+            'install -m755 "$JBIN" "$HOME/.local/bin/just" && '
             'export PATH="$HOME/.local/bin:$PATH" && just --version',
             args.timeout,
         )

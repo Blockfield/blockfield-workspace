@@ -1891,15 +1891,41 @@ def ff_next_to_main(side, dry, report_only=False):
         say(f"  {side}: origin/next ({nxt[:7]}) is ahead of origin/main ({main[:7]})")
         return True
     if not is_ancestor(repo, nxt, main):
-        message = (
-            f"{side}: origin/next ({nxt[:7]}) is not an ancestor of origin/main"
-            f" ({main[:7]}); refusing to move next (never force) — fast-forward"
-            " it by hand, then continue"
-        )
+        # PRs merged into next during a release window: sync main into next with
+        # a merge commit (still a fast-forward of next). Never raise here, this
+        # runs between the release merge and the tag.
         if report_only:
-            say(f"  {message}")
+            say(
+                f"  {side}: origin/next ({nxt[:7]}) and origin/main ({main[:7]}) diverged; ship merges main into next"
+            )
             return False
-        raise RuntimeError(message)
+        done = git(repo, "merge-tree", "--write-tree", nxt, main, check=False)
+        if done.returncode:
+            say(
+                f"  WARNING {side}: merging origin/main into origin/next conflicts;"
+                " merge it by hand in a PR into next (never force)"
+            )
+            return False
+        tree = done.stdout.split()[0]
+        if dry:
+            say(
+                f"  {side}: would merge origin/main into origin/next (tree {tree[:12]})"
+            )
+            return True
+        commit = git(
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            nxt,
+            "-p",
+            main,
+            "-m",
+            "Merge main into next after release",
+        )
+        ship_mutate(dry, "git", "push", "origin", f"{commit}:refs/heads/next", cwd=repo)
+        say(f"  {side}: merged origin/main into origin/next at {commit[:12]}")
+        return True
     if report_only:
         say(
             f"  {side}: origin/next ({nxt[:7]}) is behind origin/main"

@@ -2664,7 +2664,7 @@ class PushTagGateTest(unittest.TestCase):
 class FfNextToMain(unittest.TestCase):
     """`release ship` fast-forwards origin/next to origin/main (bare fixture)."""
 
-    def fixture(self, with_next=True, next_extra=False):
+    def fixture(self, with_next=True, next_extra=False, conflict=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         base = Path(tmp.name)
@@ -2705,7 +2705,9 @@ class FfNextToMain(unittest.TestCase):
             git(seed, "fetch", "-q", "origin")
             git(seed, "checkout", "-q", "next")
             (seed / "other.txt").write_text("fork\n")
-            git(seed, "add", "other.txt")
+            if conflict:
+                (seed / "file.txt").write_text("three\n")
+            git(seed, "add", "other.txt", "file.txt")
             git(seed, "commit", "-qm", "fork")
             git(seed, "push", "-q", "origin", "HEAD:next")
         git(base, "clone", "-q", "--branch", "main", str(origin), "side")
@@ -2744,13 +2746,28 @@ class FfNextToMain(unittest.TestCase):
             self.assertTrue(release.ff_next_to_main("server", False))
             self.assertTrue(release.ff_next_to_main("server", False))
 
-    def test_diverged_next_raises_and_moves_nothing(self):
+    def test_diverged_next_gets_main_merged_in(self):
         side = self.fixture(next_extra=True)
         before = self.remote(side, "refs/heads/next")
+        main = self.remote(side, "refs/heads/main")
         with mock.patch.object(release, "repo_dir", return_value=side):
-            with self.assertRaisesRegex(RuntimeError, "refusing to move next"):
-                release.ff_next_to_main("server", False)
+            self.assertTrue(release.ff_next_to_main("server", False))
+        after = self.remote(side, "refs/heads/next")
+        subprocess.run(["git", "-C", str(side), "fetch", "-q", "origin"], check=True)
+        for parent in (before, main):
+            self.assertTrue(release.is_ancestor(side, parent, after))
+
+    def test_conflicting_divergence_warns_and_moves_nothing(self):
+        side = self.fixture(next_extra=True, conflict=True)
+        before = self.remote(side, "refs/heads/next")
+        said = []
+        with (
+            mock.patch.object(release, "repo_dir", return_value=side),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertFalse(release.ff_next_to_main("server", False))
         self.assertEqual(self.remote(side, "refs/heads/next"), before)
+        self.assertIn("conflicts", "\n".join(said))
 
     def test_missing_next_is_a_noop(self):
         side = self.fixture(with_next=False)
@@ -2792,7 +2809,7 @@ class FfNextToMain(unittest.TestCase):
         ):
             self.assertFalse(release.ff_next_to_main("server", False, report_only=True))
         self.assertEqual(self.remote(side, "refs/heads/next"), before)
-        self.assertIn("refusing to move next", "\n".join(said))
+        self.assertIn("diverged", "\n".join(said))
 
 
 if __name__ == "__main__":

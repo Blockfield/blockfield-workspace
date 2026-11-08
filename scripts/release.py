@@ -262,6 +262,17 @@ def repo_dir(side):
 
 def fetch_main(repo):
     git(repo, "fetch", "-q", "origin", "main")
+    git(repo, "fetch", "-q", "origin", "next", check=False)
+
+
+def has_next(repo):
+    """True when the repo carries unreleased work on origin/next."""
+    return bool(git(repo, "ls-remote", "--heads", "origin", "next").strip())
+
+
+def integration_ref(repo):
+    """Ref carrying unreleased work: origin/next when the repo has it, else origin/main."""
+    return "origin/next" if has_next(repo) else "origin/main"
 
 
 def remote_tags(repo):
@@ -660,18 +671,28 @@ def pr_branch(side, tag):
 def prepare_side(side, args, prod, manifest, repin):
     repo = repo_dir(side)
     fetch_main(repo)
+    base = integration_ref(repo)
     tags = remote_tags(repo)
     last = newest(tags)
-    version = next_version(last, show_pack(repo, "origin/main"), args.bump)
+    version = next_version(last, show_pack(repo, base), args.bump)
     tag, branch = f"v{version}", pr_branch(side, f"v{version}")
     waiver = getattr(args, "gate_waiver", None)
     body = f"Release-gate waiver: {waiver}\n" if waiver else ""
+    if base == "origin/next":
+        # The release PR merges next into main: it must stay a merge commit
+        # (never squash), and next is fast-forwarded to main right after.
+        body += (
+            "Merge with a merge commit (never squash); after the merge run: "
+            f"git -C {side} fetch -q origin && "
+            "git -C {side} push origin origin/main:refs/heads/next "
+            "(fast-forward next to main)\n"
+        )
     if git(repo, "ls-remote", "--heads", "origin", branch):
         raise SystemExit(
             f"{branch} already exists on origin; delete or reuse it manually"
         )
     say(f"== {side} {tag}")
-    with worktree(repo, "origin/main", branch, side) as tree:
+    with worktree(repo, base, branch, side) as tree:
         files, parts = [], []
         if side == "server" and args.server_merge:
             for name in (piece.strip() for piece in args.server_merge.split(",")):
@@ -690,8 +711,8 @@ def prepare_side(side, args, prod, manifest, repin):
         if args.decor:
             files.append(pin_jar(tree, "decor", args.decor))
             parts.append(f"decor {args.decor}")
-        if not git(tree, "diff", "origin/main", "--name-only"):
-            # Fork-pin-only path: mod/decor pins match origin/main, but the
+        if not git(tree, "diff", base, "--name-only"):
+            # Fork-pin-only path: mod/decor pins match the integration base, but the
             # tree may still carry unreleased content vs the newest tag
             # (client main, or the merged server branch). Release then.
             if not last:
@@ -780,6 +801,13 @@ def tag_lines(order, tags, branch):
             lines.append(
                 shlex.join(deploy_command(side, tags[side]))
                 + "   # wait for this new dispatch run to succeed"
+            )
+    for action, side in order:
+        if action == "tag":
+            lines.append(
+                f"after the {side} release merge: merge with a merge commit (never squash), then "
+                f"git -C {side} fetch -q origin && git -C {side} push origin origin/main:refs/heads/next"
+                "   # fast-forward next to main; hotfixes go via next too"
             )
     return lines
 
@@ -911,11 +939,15 @@ def cmd_status(args):
         f"production: client {prod['build']}, server {prod['server_build']}, contract {prod['compatibility'][:12]}"
     )
     say_held()
+    say("\nnext resync (a stale next makes the next prepare collide):")
+    for side in SIDES:
+        ff_next_to_main(side, False, report_only=True)
     changed, compat, broken = {}, {}, False
     mods = {}
     for side in SIDES:
         repo = repo_dir(side)
         fetch_main(repo)
+        base = integration_ref(repo)
         tags, last = remote_tags(repo), published(side)
         log = (
             git(
@@ -923,15 +955,15 @@ def cmd_status(args):
                 "log",
                 "--no-merges",
                 "--format=%h %s",
-                f"{tags[last]}..origin/main",
+                f"{tags[last]}..{base}",
             ).splitlines()
             if last in tags
             else []
         )
         changed[side] = bool(log)
-        mods[side] = pins(repo, "origin/main")
+        mods[side] = pins(repo, base)
         say(
-            f"\n{side}: last published {last}, pack.toml on main {show_pack(repo, 'origin/main')}, {len(log)} unreleased commit(s)"
+            f"\n{side}: last published {last}, pack.toml on {base.removeprefix('origin/')} {show_pack(repo, base)}, {len(log)} unreleased commit(s)"
         )
         for line in log[:8]:
             say(f"  {line}")
@@ -950,16 +982,21 @@ def cmd_status(args):
     for side in SIDES:
         if changed[side]:
             repo = repo_dir(side)
-            with worktree(repo, "origin/main", side=side) as tree:
-                say(f"\nbuilding {side} main to read its contract ...")
+            base = integration_ref(repo)
+            with worktree(repo, base, side=side) as tree:
+                say(
+                    f"\nbuilding {side} {base.removeprefix('origin/')} to read its contract ..."
+                )
                 try:
-                    tag = "v" + show_pack(repo, "origin/main")
+                    tag = "v" + show_pack(repo, base)
                     meta = build(side, tree, tag)
                     compat[side] = meta["compatibility"]
                     broken |= not show(contract_checks(side, meta, prod))
                 except RuntimeError as error:
                     broken = True
-                    say(f"{side} main does not build/pass its checks:\n{error}")
+                    say(
+                        f"{side} {base.removeprefix('origin/')} does not build/pass its checks:\n{error}"
+                    )
     if broken:
         say("\nrelease kind: blocked by the failures above")
         return False
@@ -1830,6 +1867,92 @@ def post_deploy_probes(tags, client=None, timeout_s=1800, interval_s=5):
     return True
 
 
+def ff_next_to_main(side, dry, report_only=False):
+    """Fast-forward origin/next to origin/main after the release merge. Never forces.
+
+    The release PR is cut from origin/next and merged into main with a merge
+    commit; without this step the next prepare would cut from a stale base and
+    collide on the bumped version line. Raises (moving nothing) when next
+    holds commits main does not contain: fast-forward it by hand instead.
+    With report_only (used by `release status`) nothing is pushed or raised:
+    a stale next is reported with the exact command that moves it.
+    """
+    repo = repo_dir(side)
+    if not has_next(repo):
+        return False
+    fetch_main(repo)
+    main = git(repo, "rev-parse", "origin/main")
+    nxt = git(repo, "rev-parse", "origin/next")
+    if main == nxt:
+        say(f"  {side}: origin/next already at {main[:12]}")
+        return True
+    if is_ancestor(repo, main, nxt):
+        # Unreleased work on next ahead of main is the normal pre-release state.
+        say(f"  {side}: origin/next ({nxt[:7]}) is ahead of origin/main ({main[:7]})")
+        return True
+    if not is_ancestor(repo, nxt, main):
+        # PRs merged into next during a release window: sync main into next with
+        # a merge commit (still a fast-forward of next). Never raise here, this
+        # runs between the release merge and the tag.
+        if report_only:
+            say(
+                f"  {side}: origin/next ({nxt[:7]}) and origin/main ({main[:7]}) diverged; ship merges main into next"
+            )
+            return False
+        done = git(repo, "merge-tree", "--write-tree", nxt, main, check=False)
+        if done.returncode:
+            say(
+                f"  WARNING {side}: merging origin/main into origin/next conflicts;"
+                " merge it by hand in a PR into next (never force)"
+            )
+            return False
+        tree = done.stdout.split()[0]
+        if dry:
+            say(
+                f"  {side}: would merge origin/main into origin/next (tree {tree[:12]})"
+            )
+            return True
+        commit = git(
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            nxt,
+            "-p",
+            main,
+            "-m",
+            "Merge main into next after release",
+        )
+        if not push_next(side, repo, dry, commit):
+            return False
+        say(f"  {side}: merged origin/main into origin/next at {commit[:12]}")
+        return True
+    if report_only:
+        say(
+            f"  {side}: origin/next ({nxt[:7]}) is behind origin/main"
+            f" ({main[:7]}); run: git -C {repo} push origin"
+            f" {main}:refs/heads/next"
+        )
+        return False
+    if not push_next(side, repo, dry, main):
+        return False
+    say(f"  {side}: fast-forwarded origin/next to {main[:12]}")
+    return True
+
+
+def push_next(side, repo, dry, sha):
+    """Move next without force. A rejected push (next moved meanwhile) only
+    warns: this runs between the release merge and the tag."""
+    try:
+        ship_mutate(dry, "git", "push", "origin", f"{sha}:refs/heads/next", cwd=repo)
+    except RuntimeError as error:
+        say(
+            f"  WARNING {side}: could not move origin/next ({error}); move next to main by hand (no force) before the next release"
+        )
+        return False
+    return True
+
+
 def ship_tag_side(
     args,
     side,
@@ -1862,6 +1985,9 @@ def ship_tag_side(
         args.dry_run,
         head,
     )
+    # A later gate may still fail: move next now, so a rerun never builds
+    # on the stale base.
+    ff_next_to_main(side, args.dry_run)
     sha = push_tag(
         side,
         tag,
@@ -1935,6 +2061,15 @@ def cmd_ship(args):
         raise SystemExit("--client-stage-run requires --resume-client-published")
     if resume and (args.only or args.server_merge):
         raise SystemExit("resume cannot be combined with --only or --server-merge")
+    # An earlier ship may have merged a release PR and died before moving next:
+    # heal it before prepare cuts a release from a stale next. Nothing is
+    # merged yet, so a next that cannot be synced stops the ship here.
+    if not dry:
+        for side in SIDES:
+            if not ff_next_to_main(side, dry) and has_next(repo_dir(side)):
+                raise SystemExit(
+                    f"ship stopped: origin/next of {side} is not synced with origin/main; fix it first"
+                )
     tags, kind, order, branch = resume_pair(args) if resume else prepare_all(args)
     if kind in ("none", "mismatch") or not tags:
         raise SystemExit(f"ship stopped: release kind is {kind}")
@@ -2039,6 +2174,9 @@ def cmd_ship(args):
             dry,
             head,
         )
+        # A later gate may still fail: move next now, so a rerun never
+        # builds on the stale base.
+        ff_next_to_main("server", dry)
         server_sha = push_tag(
             "server",
             tags["server"],
@@ -2057,6 +2195,7 @@ def cmd_ship(args):
             dry,
             head,
         )
+        ff_next_to_main("client", dry)
         server_run = wait_release_run(
             "server", server_sha, timeout_s, interval_s, tags["server"]
         )
@@ -2101,6 +2240,10 @@ def cmd_ship(args):
         return True
     number, head = wait_pr_green(WORKSPACE_REPO, pin, timeout_s, interval_s)
     merge_pr(WORKSPACE_REPO, number, dry, head)
+    # The release PRs were cut from origin/next and merged into main: move
+    # next onto the release merge so the next prepare cuts from a fresh base.
+    for side in tags:
+        ff_next_to_main(side, dry)
     say(f"\nshipped {kind}: {', '.join(f'{s} {t}' for s, t in tags.items())}")
     return True
 

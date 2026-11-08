@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bake a golden Boat VM: pinned Temurin 21, repos at main, warm caches.
+"""Bake a golden Boat VM: pinned Temurin 21, repos at origin/next where it
+exists (else main), warm caches.
 
 Forks the newest golden (or --from), checks out origin/main everywhere,
 installs pinned `just`, masks snapd, caps Gradle caches, warms Gradle/Loom/
@@ -46,7 +47,8 @@ def checkout_script(remote_root):
         "git checkout -q origin/main && git submodule init -q && "
         # A workspace pin can name an object the submodule origin does not
         # serve (rewritten history, mid-push race): fall back to the
-        # submodule's origin/main so the bake (a cache, not a build input)
+        # submodule's integration base (origin/next when it exists, else
+        # origin/main) so the bake (a cache, not a build input)
         # stays green and warm.
         "for m in client localmods/blockfield-mod; do "
         "want=$(git ls-tree HEAD \"$m\" | awk '{print $3}'); "
@@ -54,7 +56,8 @@ def checkout_script(remote_root):
         'git -C "$m" cat-file -e "$want" 2>/dev/null; then '
         'echo "PIN-OK $m $want"; else '
         'git -C "$m" fetch origin -q && '
-        'git -C "$m" checkout -q origin/main && '
+        '(git -C "$m" checkout -q origin/next 2>/dev/null || '
+        'git -C "$m" checkout -q origin/main) && '
         'echo "FALLBACK-MAIN $m $(git -C "$m" rev-parse HEAD) '
         '(want was $want)"; fi; done && '
         "git rev-parse HEAD && git submodule status | sed 's/^ *//'"

@@ -114,6 +114,7 @@ Gradle 2 ГБ. Стенд один; Gradle — до двух одновреме�
   полный `java-check`/`test` выполняет PR CI — он должен быть зелёным до merge.
   Игровая логика требует сценария до/после; компиляция не заменяет игровую приёмку.
 - Одна задача — один PR в repo, без дробления по шагам/юнитам: каждый PR и merge оплачивают CI-минуты.
+  Product-репозитории: PR — в `next`, не в `main`; выпуск — один next→main merge commit после явного подтверждения владельца (не squash), затем fast-forward `next` на `main`; хотфиксы тоже через `next`.
 - На старте координатор читает `gh issue list --label coordinator-backlog --state open` в публичном workspace и в каждом приватном repo; issue закрывается, как только исправление слито с зелёным CI
   (комментарий: PR и SHA), без ожидания выпуска и проверки на проде. Частично решённый issue остаётся открытым с меткой `partial`.
 - Исполняемые загрузки: immutable full SHA/версия + checksum, без main/latest и сети при импорте.
@@ -141,6 +142,6 @@ Gradle 2 ГБ. Стенд один; Gradle — до двух одновреме�
 ## Дочерние агенты
 
 - Evidence — в `.dev/<задача>/`, никогда только в `/tmp`; «pre-existing» — только с проверкой на базовом коммите (см. «Проверки и выпуск»).
-- Push budget — из брифа (по умолчанию 2); опубликованную ветку не rebase/force — только merge `origin/main`; на PR/CI/бота не ждать — push и финал (см. скилл `blockfield-agent`, шаги 4–6).
+- Push budget — из брифа (по умолчанию 2); опубликованную ветку не rebase/force — только merge базы (`origin/next`, где она есть, иначе `origin/main`); на PR/CI/бота не ждать — push и финал (см. скилл `blockfield-agent`, шаги 4–6).
 - Перед финалом — все свои Boat VM в `state=stopped` (см. «Удалённые стенды Boat»).
 - Финал: первая строка `DONE:/PARTIAL:/BLOCKED:`, далее каждый пункт ACCEPTANCE с evidence, PR URL + head SHA + состояние checks, VM-минуты.

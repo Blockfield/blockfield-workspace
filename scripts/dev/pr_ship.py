@@ -49,19 +49,12 @@ def gh(repo, *args):
 
 
 def default_branch(repo):
-    tip = agent_preflight.default_tip(repo)
-    if not tip:
-        raise SystemExit(f"{repo}: cannot find origin's default branch; fetch first")
-    head = agent_preflight.git(
-        repo, "symbolic-ref", "refs/remotes/origin/HEAD", check=False
-    ).stdout.strip()
-    if head.startswith("refs/remotes/"):
-        return head.split("refs/remotes/")[-1]
-    for ref in ("origin/main", "origin/master"):
-        out = run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
-        if out.returncode == 0 and out.stdout.strip() == tip:
-            return ref
-    return "origin/main"
+    # Integration base (origin/next when the repo has it): task branches rebase
+    # onto / merge from unreleased work, not from the last release on main.
+    base = agent_preflight.integration_base(repo)
+    if run(repo, "rev-parse", "--verify", f"{base}^{{commit}}", check=False).returncode:
+        raise SystemExit(f"{repo}: cannot find {base}; fetch first")
+    return base
 
 
 def main(argv):
@@ -153,7 +146,9 @@ def main(argv):
     else:
         print(f"{branch} already at {head[:12]} on origin; no push needed")
     if number is None:
-        created = gh(repo, "pr", "create", "--fill")
+        created = gh(
+            repo, "pr", "create", "--fill", "--base", base.removeprefix("origin/")
+        )
         if created.returncode != 0:
             raise SystemExit(
                 f"pushed {head[:12]} but no PR exists and creation failed:\n"
@@ -164,6 +159,24 @@ def main(argv):
         lines = created.stdout.strip().splitlines()
         if lines and lines[-1].strip():
             url = lines[-1].strip()
+    else:
+        # An existing PR keeps whatever base it was opened with: verify it
+        # matches the integration base and retarget it when it does not.
+        want = base.removeprefix("origin/")
+        have = gh(repo, "pr", "view", branch, "--json", "baseRefName")
+        if have.returncode == 0:
+            try:
+                current = (json.loads(have.stdout or "{}") or {}).get("baseRefName")
+            except ValueError:
+                current = None
+            if current and current != want:
+                edit = gh(repo, "pr", "edit", str(number), "--base", want)
+                if edit.returncode != 0:
+                    raise SystemExit(
+                        f"PR #{number} targets {current}, want {want}; retarget failed:\n"
+                        f"{edit.stderr.strip()}"
+                    )
+                print(f"PR #{number} retargeted from {current} to {want}", flush=True)
     # One non-blocking read of the currently known state; never wait on it.
     state = gh(
         repo,
@@ -171,7 +184,7 @@ def main(argv):
         "view",
         branch,
         "--json",
-        "number,url,headRefOid,mergeable,mergeStateStatus,reviewDecision,"
+        "number,url,headRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,"
         "statusCheckRollup",
     )
     if state.returncode == 0:
@@ -185,6 +198,7 @@ def main(argv):
             f"{k}={info.get(k) or '-'}"
             for k in ("mergeable", "mergeStateStatus", "reviewDecision")
         )
+        checks += f" base={info.get('baseRefName') or '-'}"
         # per-check states: a failed and a pending bot-review share the
         # same aggregate merge state, so each check is listed individually.
         states = ",".join(

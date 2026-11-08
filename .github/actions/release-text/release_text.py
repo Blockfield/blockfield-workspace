@@ -268,6 +268,10 @@ def merged_prs(source, previous, version, gaps, body_chars=PR_BODY_CHARS):
             continue
         if (pr.get("user") or {}).get("type") == "Bot":
             continue
+        if (pr.get("head") or {}).get("ref") == "next":
+            # The next→main release PR itself: an aggregate of already
+            # reviewed work, not a change to list.
+            continue
         prs.append(
             {
                 "number": number,

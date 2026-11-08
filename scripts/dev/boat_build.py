@@ -560,7 +560,17 @@ def remote_workspace(vm_id, home):
 
 
 def default_tip(local_repo):
-    """Local commit of origin's default branch, or None when unknown."""
+    """Local commit of the integration base (origin/next when the repo has
+    it, else the origin default), or None when unknown."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import agent_preflight
+
+    base = agent_preflight.integration_base(local_repo)
+    out = run_git(
+        "rev-parse", "--verify", f"{base}^{{commit}}", cwd=local_repo, check=False
+    )
+    if out.returncode == 0 and out.stdout.strip():
+        return out.stdout.strip()
     head = run_git(
         "symbolic-ref", "refs/remotes/origin/HEAD", cwd=local_repo, check=False
     ).stdout.strip()
@@ -569,6 +579,8 @@ def default_tip(local_repo):
     )
     candidates += ["origin/main", "origin/master"]
     for ref in candidates:
+        if ref == base:
+            continue
         out = run_git(
             "rev-parse", "--verify", f"{ref}^{{commit}}", cwd=local_repo, check=False
         )

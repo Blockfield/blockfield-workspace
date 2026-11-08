@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -219,23 +220,77 @@ class Toolchain(unittest.TestCase):
     def test_flags_after_a_script_run_the_script_instead_of_prefetching(self):
         with (
             patch.object(toolchain, "prefetch") as prefetch,
-            patch.object(toolchain, "call") as call,
+            patch.object(toolchain, "native", side_effect=lambda name: name),
+            patch.object(toolchain, "child_env", return_value={}),
             patch.object(toolchain, "canonical_python", return_value=Path("py")),
+            patch.object(
+                toolchain.subprocess, "run", return_value=SimpleNamespace(returncode=3)
+            ) as run,
         ):
-            toolchain.main(["scripts/check.py", "--ci", "--tools", "ruff"])
+            argv = ["scripts/check.py", "--ci", "--tools", "ruff"]
+            self.assertEqual(toolchain.main(argv), 3)
             prefetch.assert_not_called()
-            call.assert_called_once_with(
-                Path("py"),
-                "-I",
-                "-X",
-                "utf8",
-                "scripts/check.py",
-                "--ci",
-                "--tools",
-                "ruff",
-            )
+            command = run.call_args.args[0]
+            self.assertEqual(command, [Path("py"), "-I", "-X", "utf8", *argv])
+            self.assertNotIn("stdout", run.call_args.kwargs)
             toolchain.main(["--tools=ruff"])
             prefetch.assert_called_once_with(["ruff"])
+
+
+class TruncatedDownload(unittest.TestCase):
+    def test_incomplete_read_is_retried_as_os_error(self):
+        import http.client
+
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                return toolchain.read_url("x")
+            return b"ok"
+
+        broken = unittest.mock.MagicMock()
+        broken.__enter__.return_value.read.side_effect = http.client.IncompleteRead(
+            b"", 5
+        )
+        with (
+            patch.object(toolchain.urllib.request, "urlopen", return_value=broken),
+            patch.object(toolchain.time, "sleep"),
+        ):
+            self.assertEqual(toolchain.retried(flaky), b"ok")
+        self.assertEqual(len(calls), 2)
+
+
+class WrapperJava(unittest.TestCase):
+    def test_missing_jdk_home_runs_wrapper_from_path_without_java_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shims = Path(temporary)
+            wrapper = shims / ("java.exe" if os.name == "nt" else "java")
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o755)
+            env = {"PATH": str(shims), "JAVA_HOME": "/stale"}
+            with (
+                patch.object(toolchain, "java_home", return_value=None),
+                patch.object(toolchain, "child_env", side_effect=lambda: dict(env)),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                self.assertEqual(Path(toolchain.native("java")), wrapper)
+                self.assertNotIn("JAVA_HOME", os.environ)
+                self.assertNotIn("JAVA_HOME", toolchain.jdk_env())
+
+    def test_stale_java_home_bin_is_dropped_from_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stale = Path(temporary) / "stale" / "bin"
+            stale.mkdir(parents=True)
+            shims = Path(temporary) / "shims"
+            shims.mkdir()
+            env = {
+                "PATH": os.pathsep.join([str(stale), str(shims), str(stale)]),
+                "JAVA_HOME": str(stale.parent),
+            }
+            result = toolchain.without_java_home(dict(env))
+            self.assertNotIn("JAVA_HOME", result)
+            self.assertEqual(result["PATH"], os.pathsep.join([str(shims), str(stale)]))
 
 
 class ManagedJava(unittest.TestCase):

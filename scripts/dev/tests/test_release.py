@@ -1129,6 +1129,7 @@ class PairGates(unittest.TestCase):
                 release, "wait_release_run", return_value={"databaseId": 12}
             ),
             mock.patch.object(release, "wait_publication"),
+            mock.patch.object(release, "ff_next_to_main", return_value=True),
         ):
             release.ship_tag_side(
                 SimpleNamespace(dry_run=False),
@@ -1143,6 +1144,27 @@ class PairGates(unittest.TestCase):
         tag.assert_called_once_with(
             "client", "v2.77.0", False, merged, None, None, pair
         )
+
+    def test_next_ahead_of_main_is_left_alone(self):
+        def ancestor(repo, older, newer):
+            return (older, newer) == ("m" * 40, "n" * 40)
+
+        with (
+            mock.patch.object(release, "repo_dir", return_value=Path("repo")),
+            mock.patch.object(release, "has_next", return_value=True),
+            mock.patch.object(release, "fetch_main"),
+            mock.patch.object(
+                release,
+                "git",
+                side_effect=lambda repo, *a: (
+                    "m" * 40 if a[-1] == "origin/main" else "n" * 40
+                ),
+            ),
+            mock.patch.object(release, "is_ancestor", side_effect=ancestor),
+            mock.patch.object(release, "ship_mutate") as push,
+        ):
+            self.assertTrue(release.ff_next_to_main("client", False))
+        push.assert_not_called()
 
     def test_tag_rejects_unrelated_main(self):
         with (

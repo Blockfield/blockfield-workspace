@@ -1886,6 +1886,10 @@ def ff_next_to_main(side, dry, report_only=False):
     if main == nxt:
         say(f"  {side}: origin/next already at {main[:12]}")
         return True
+    if is_ancestor(repo, main, nxt):
+        # Unreleased work on next ahead of main is the normal pre-release state.
+        say(f"  {side}: origin/next ({nxt[:7]}) is ahead of origin/main ({main[:7]})")
+        return True
     if not is_ancestor(repo, nxt, main):
         message = (
             f"{side}: origin/next ({nxt[:7]}) is not an ancestor of origin/main"

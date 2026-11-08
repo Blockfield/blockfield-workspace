@@ -46,8 +46,11 @@ __all__ = [
     "lock_platform",
     "lock_tool",
     "native",
+    "publish_link",
     "read_url",
+    "replace",
     "retried",
+    "ruff_version",
     "tool",
     # Re-exported from scripts/toolchain_local.py (workspace-only pins).
     "JAVA_ASSETS",
@@ -259,6 +262,33 @@ def read_url(url):
         return response.read()
 
 
+def replace(target, data, mode=None):
+    """Publish bytes so concurrent checkouts never see a partial file (and a
+    running binary is never rewritten in place): sibling temp file, then rename
+    into place. Mode is applied when given (tool binaries need 0o755)."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=target.parent, prefix=".dl-", delete=False
+    ) as file:
+        temporary = Path(file.name)
+        try:
+            file.write(data)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        if mode is not None:
+            os.chmod(temporary, mode)
+        temporary.replace(target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+CANONICAL_PYTHON_PROBE = "(3, 12, 14) 1.3.2 1.3.2"
+
+
 def download(name, url, checksum, *, cache=None):
     """Single pinned file: cached copy verified, else downloaded with retries
     and published atomically. Kept for explicit callers; lock-driven code
@@ -276,21 +306,7 @@ def download(name, url, checksum, *, cache=None):
         data = retried(lambda: read_url(url))
     if hashlib.sha256(data).hexdigest() != checksum:
         raise RuntimeError(f"Tool checksum mismatch: {name}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=target.parent, prefix=".dl-", delete=False
-    ) as file:
-        temporary = Path(file.name)
-        try:
-            file.write(data)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-    try:
-        temporary.replace(target)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    replace(target, data)
     return target
 
 
@@ -322,38 +338,27 @@ def fetch(tool_name, filename=None, *, cache=None, platform=None):
         except RuntimeError as error:
             failures.append(f"{url}: {error}")
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=target.parent, prefix=".dl-", delete=False
-        ) as file:
-            temporary = Path(file.name)
-            try:
-                file.write(data)
-            except BaseException:
-                temporary.unlink(missing_ok=True)
-                raise
-        try:
-            temporary.replace(target)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
+        replace(target, data)
         return target
     raise RuntimeError(f"Tool {tool_name!r} download failed: " + "; ".join(failures))
 
 
-def tool_ruff():
-    expected = "ruff " + lock_tool("ruff")["version"]
-    directory = cache_dir() / "venv"
-    python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file():
-        call(canonical_python(), "-I", "-m", "venv", "--clear", directory)
-    probe = subprocess.run(
-        [str(python), "-I", "-m", "ruff", "--version"],
-        env=child_env(),
-        capture_output=True,
-        text=True,
-    )
-    if probe.returncode or probe.stdout.strip() != expected:
+def ruff_version(python):
+    try:
+        probe = subprocess.run(
+            [str(python), "-I", "-m", "ruff", "--version"],
+            env=child_env(),
+            capture_output=True,
+            text=True,
+        )
+    except OSError:  # interpreter missing or a dangling symlink
+        return ""
+    return "" if probe.returncode else probe.stdout.strip()
+
+
+def _install_ruff_venv(directory, python, expected):
+    try:
+        call(canonical_python(), "-I", "-m", "venv", directory)
         # The wheel is hash-verified by fetch(); pip installs the local file.
         wheel = fetch("ruff")
         # pip does not retry a read timeout in the middle of a download.
@@ -369,6 +374,51 @@ def tool_ruff():
                 str(wheel),
             )
         )
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    if ruff_version(python) != expected:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise RuntimeError(f"ruff install did not produce {expected}")
+
+
+def _build_ruff_venv(directory, python, expected):
+    """One builder per versioned dir wins a mkdir claim and builds in place: a
+    venv is not relocatable (renaming breaks installed shebangs with "bad
+    interpreter"), so there is no staging rename. Losers wait for a valid
+    install; nothing installed is ever cleared or reinstalled under a runner."""
+    try:
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        directory.mkdir()
+    except FileExistsError:
+        pass
+    else:
+        _install_ruff_venv(directory, python, expected)
+        return
+    for _ in range(60):  # a cold venv+pip build takes ~1-2 min; bound the wait
+        if python.is_file() and ruff_version(python) == expected:
+            return
+        time.sleep(5)
+    # Nobody published: reclaim a stalled or damaged dir, else say how to fix.
+    shutil.rmtree(directory, ignore_errors=True)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        raise RuntimeError(
+            f"Tool ruff install is contested: delete {directory} and retry"
+        )
+    _install_ruff_venv(directory, python, expected)
+
+
+def tool_ruff():
+    # Keyed by the locked version, like tool_npm: a lock bump must not reuse
+    # (or reinstall under) another pin's venv.
+    version = lock_tool("ruff")["version"]
+    expected = "ruff " + version
+    directory = cache_dir() / ("venv-ruff-" + version)
+    python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file() or ruff_version(python) != expected:
+        _build_ruff_venv(directory, python, expected)
     return directory / ("Scripts/ruff.exe" if os.name == "nt" else "bin/ruff")
 
 
@@ -400,6 +450,34 @@ def tool_npm(name):
     return binary
 
 
+def publish_link(binary):
+    """Point bin/<name> at the pinned binary with an atomic link swap, so
+    bare-name PATH use (CI exports, VM provisioning) keeps resolving while the
+    pin-keyed file itself is never rewritten under a runner. Best effort: the
+    absolute pinned path is the contract, the link is compatibility."""
+    binary = Path(binary)
+    link = binary.parent.parent / binary.name
+    try:
+        if link.is_symlink() and link.readlink() == binary:
+            return
+    except OSError:
+        pass
+    try:
+        descriptor, name = tempfile.mkstemp(dir=link.parent, prefix=".link-")
+        os.close(descriptor)
+        candidate = Path(name)
+    except OSError as error:
+        print(f"toolchain: no PATH link for {binary} ({error})", file=sys.stderr)
+        return
+    try:
+        candidate.unlink()
+        candidate.symlink_to(binary)
+        os.replace(candidate, link)
+    except OSError as error:
+        candidate.unlink(missing_ok=True)
+        print(f"toolchain: no PATH link for {binary} ({error})", file=sys.stderr)
+
+
 def tool(name):
     if name == "ruff":
         return tool_ruff()
@@ -426,11 +504,18 @@ def tool(name):
             data = source.extractfile(member).read()
     else:
         data = archive.read_bytes()
-    binary = cache_dir() / "bin" / filename
-    binary.parent.mkdir(parents=True, exist_ok=True)
+    # Keyed by the pin, so checkouts on other pins never swap the binary under
+    # a running check (same pattern as the mod's old toolchain).
+    key = (
+        spec["sha256"][:16]
+        if "sha256" in spec
+        else hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
+    )
+    binary = cache_dir() / "bin" / key / filename
     if not binary.is_file() or binary.read_bytes() != data:
-        binary.write_bytes(data)
+        replace(binary, data, mode=0o755)
     binary.chmod(0o755)
+    publish_link(binary)
     return binary
 
 
@@ -458,11 +543,20 @@ def canonical_python():
             with tarfile.open(archive) as source:
                 source.extractall(staging, filter="data")
             probed = python_version(staging / relative)
-            if probed != "(3, 12, 14) 1.3.2 1.3.2":
+            if probed != CANONICAL_PYTHON_PROBE:
                 raise RuntimeError(f"Canonical Python compressor mismatch: {probed}")
-            staging.rename(directory)
+            try:
+                staging.rename(directory)
+            except OSError:
+                # Another process installed it first: use the winner when it
+                # is a valid install (same checks as the cache hit), else raise.
+                if (
+                    not python.is_file()
+                    or python_version(python) != CANONICAL_PYTHON_PROBE
+                ):
+                    raise
     probed = python_version(python)
-    if probed != "(3, 12, 14) 1.3.2 1.3.2":
+    if probed != CANONICAL_PYTHON_PROBE:
         raise RuntimeError(f"Canonical Python compressor mismatch: {probed}")
     return python
 

@@ -155,28 +155,34 @@ class Bootstrap(unittest.TestCase):
         import toolchain
 
         run = subprocess.run
+        version = toolchain.lock_tool("ruff")["version"]
         with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp)
-            binary = cache / "venv" / "bin" / "python"
+            binary = cache / ("venv-ruff-" + version) / "bin" / "python"
             binary.parent.mkdir(parents=True)
             binary.symlink_to(cache / "deleted-checkout" / "python")
+
+            def probe(argv, **kwargs):
+                if Path(argv[0]).is_file():
+                    return SimpleNamespace(returncode=0, stdout="ruff " + version)
+                raise FileNotFoundError(argv[0])
+
+            def fake_call(*args):
+                if "venv" in args:
+                    return run(
+                        [*map(str, args), "--without-pip"], check=True, timeout=30
+                    )
+                return None  # pip: the probe above asserts recovery, not ruff
+
             with (
                 patch.object(toolchain, "CACHE", cache),
                 patch.object(
                     toolchain, "canonical_python", return_value=sys.executable
                 ),
-                patch.object(
-                    toolchain,
-                    "call",
-                    side_effect=lambda *args: run(
-                        [*map(str, args), "--without-pip"], check=True, timeout=30
-                    ),
-                ),
-                patch.object(
-                    toolchain.subprocess,
-                    "run",
-                    return_value=SimpleNamespace(returncode=0, stdout="ruff 0.15.7"),
-                ),
+                patch.object(toolchain, "call", side_effect=fake_call),
+                patch.object(toolchain, "fetch", return_value=cache / "ruff.whl"),
+                patch.object(toolchain.subprocess, "run", side_effect=probe),
+                patch("time.sleep"),
             ):
                 toolchain.tool("ruff")
             self.assertTrue(binary.is_file())

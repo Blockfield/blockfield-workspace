@@ -5461,24 +5461,80 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
 
     def test_sbw_victim_hp_drop_confirms_shot(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0))
-        stop, detail, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-        )
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 10.0))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 10.0])
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
 
     def test_victim_killed_counts_as_fired(self):
         # A dead victim reads None, which is a hit, not a miss: the round
         # connected. ensure_victim resummons the zombie for the next weapon.
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, None))
-        stop, detail, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-        )
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, None))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
         self.assertEqual(detail.get("victim_hp"), [20.0, None])
+
+    def test_sbw_unfired_hp_drop_fails_loudly(self):
+        # Daylight-burn control: the victim loses HP with no shot, so the
+        # weapon must fail, never PASS on the burn as fired evidence.
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0, 10.0))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "victim-died-unfired")
+        self.assertFalse(detail.get("fired"))
+        self.assertEqual(detail.get("victim_control"), [20.0, 10.0])
+
+    def test_sbw_unfired_death_fails_loudly(self):
+        # Victim gone before any shot (burned on its own): fail, not PASS.
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, None, None))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "victim-died-unfired")
+        self.assertFalse(detail.get("fired"))
+
+    def test_tacz_unfired_hp_drop_fails_loudly(self):
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0, 10.0))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertEqual(stop, "victim-died-unfired")
+
+    def test_ensure_victim_summons_helmeted(self):
+        seen = []
+
+        class HelmetRcon:
+            def cmd(self, command):
+                seen.append(command)
+                return "ok"  # no victim present
+
+        weapons_sweep.ensure_victim(HelmetRcon(), "hitbot")
+        summon = next(c for c in seen if "summon" in c)
+        self.assertIn("iron_helmet", summon)
+
+    def test_secure_victim_environment_freezes_clock(self):
+        seen = []
+
+        class ClockRcon:
+            def cmd(self, command):
+                seen.append(command)
+                return "ok"
+
+        weapons_sweep.secure_victim_environment(ClockRcon())
+        self.assertEqual(seen, ["time set midnight", "gamerule doDaylightCycle false"])
 
     def test_resume_skips_only_passed_weapons(self):
         prev = [

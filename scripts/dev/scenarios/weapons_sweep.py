@@ -35,6 +35,11 @@ LOG_WATCH = re.compile(r"ERROR|Exception|Ticking (entity|server)|field_9190|FATA
 VICTIM_TYPE = "minecraft:zombie"
 VICTIM_TAG = "sweep_victim"
 VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1,sort=nearest]"
+# Unfired-control window: the victim's HP must be static over this long with no
+# shot, matching the post-shot observation window below. Zombie daylight burn
+# used to kill the victim on its own, so HP drops without a shot once counted
+# as fired evidence (server#365 sweep).
+UNFIRED_CONTROL_SLEEP = 2.2
 
 SKIP_ITEMS = (
     "ammo",
@@ -171,16 +176,46 @@ def victim_pos(rcon, player):
         return None
 
 
+def secure_victim_environment(rcon):
+    """Midnight + frozen clock so the NoAI zombie victim cannot burn on its own.
+
+    Called once per sweep run; the per-weapon unfired control below stays as
+    the asserting guard.
+    """
+    rcon.cmd("time set midnight")
+    rcon.cmd("gamerule doDaylightCycle false")
+
+
+def victim_baseline(rcon, player, detail):
+    """Unfired control: victim HP must be static over the window with no shot.
+
+    Returns (stable, baseline): baseline is the freshest pre-shot reading for
+    the fired comparison. A victim that loses HP unfired (daylight burn) fails
+    loudly via stable=False; a missing victim stays stable with a None baseline
+    so the shot path still reports inconclusive-no-shot, never PASS.
+    """
+    before = victim_health(rcon, player)
+    time.sleep(UNFIRED_CONTROL_SLEEP)
+    baseline = victim_health(rcon, player)
+    detail["victim_control"] = [before, baseline]
+    if before is None:
+        return True, baseline
+    return baseline is not None and baseline == before, baseline
+
+
 def ensure_victim(rcon, player):
     """One NoAI zombie ahead of the player so bullets hit an entity, not blocks.
 
     Caret summon is facing-relative, so it lands ahead whatever the yaw is;
     the shooter then aims with absolute `lookat` coordinates, never `look`.
+    The iron helmet stops daylight burn on its own (belt and braces with the
+    midnight clock from secure_victim_environment).
     """
     if victim_health(rcon, player) is None:
         rcon.cmd(
             f"execute at {player} run summon {VICTIM_TYPE} ^ ^ ^8"
-            f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{VICTIM_TAG}"]}}'
+            f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{VICTIM_TAG}"],'
+            'ArmorItems:[{},{},{},{id:"minecraft:iron_helmet",Count:1b}]}}'
         )
 
 
@@ -326,15 +361,18 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     if not alive(rcon, player):
         return "server-dead-after-moving", log_pos
     ensure_victim(rcon, player)
-    hp_before = victim_health(rcon, player)
+    stable, hp_ref = victim_baseline(rcon, player, detail)
+    if not stable:
+        return "victim-died-unfired", log_pos
     if aim_at_victim(bot, rcon, player):
         tacz_shoot(bot, attempts=2)
         time.sleep(0.8)
     hp_after = victim_health(rcon, player)
-    detail["victim_hp"] = [hp_before, hp_after]
-    # A dead/missing victim after the shot means a round connected.
-    detail["victim_hit"] = hp_before is not None and (
-        hp_after is None or hp_after < hp_before
+    detail["victim_hp"] = [hp_ref, hp_after]
+    # A dead/missing victim after the shot means a round connected. hp_ref is
+    # the post-control baseline, so a daylight-burn drop can never count here.
+    detail["victim_hit"] = hp_ref is not None and (
+        hp_after is None or hp_after < hp_ref
     )
     if not alive(rcon, player):
         return "server-dead-after-victim", log_pos
@@ -419,19 +457,21 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         if not alive(rcon, player):
             return "server-dead-after-moving", detail, log_pos
         ensure_victim(rcon, player)
-        hp_before = victim_health(rcon, player)
+        stable, hp_ref = victim_baseline(rcon, player, detail)
+        if not stable:
+            return "victim-died-unfired", detail, log_pos
         if aim_at_victim(bot, rcon, player):
             bot("attack")
             time.sleep(0.8)
             bot("hold key.attack 20")
             time.sleep(1.4)
         hp_after = victim_health(rcon, player)
-        detail["victim_hp"] = [hp_before, hp_after]
+        detail["victim_hp"] = [hp_ref, hp_after]
         # SBW guns expose no ammo counter: a wounded or killed victim confirms
         # a shot (a dead victim reads None, which is a hit, not a miss).
-        detail["fired"] = hp_before is not None and (
-            hp_after is None or hp_after < hp_before
-        )
+        # hp_ref is the post-control baseline, so a daylight-burn drop can
+        # never count as fired evidence.
+        detail["fired"] = hp_ref is not None and (hp_after is None or hp_after < hp_ref)
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos
         bot("slot 1")
@@ -537,6 +577,7 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         player = bot("state")["name"]
         assert re.fullmatch(r"[A-Za-z0-9_]{1,16}", player), player
         clear_victims(rcon)
+        secure_victim_environment(rcon)
         wanted = set(args.weapons.split(",")) if args.weapons else None
         inventory = []
         if args.kind in ("tacz", "all"):

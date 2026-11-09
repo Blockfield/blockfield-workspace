@@ -5396,6 +5396,7 @@ class WeaponsSweep(unittest.TestCase):
         ammo=(300, 299),
         victim_hp=(),
         have_item=True,
+        player_pos="[-18.5d, 65.0d, 2.5d]",
     ):
         log_path = Path(tempfile.mkdtemp()) / "latest.log"
         log_path.write_text("".join(log_lines), encoding="utf-8")
@@ -5420,6 +5421,8 @@ class WeaponsSweep(unittest.TestCase):
                     return f"data: {ammo[0] if 'Hotbar' not in command else ammo[0]}"
                 if command.startswith("data get entity hitbot Health"):
                     return "hitbot has the following entity data: 20.0f"
+                if command == "data get entity hitbot Pos":
+                    return f"hitbot has the following entity data: {player_pos}"
                 if command == "kill hitbot":
                     return "Killed hitbot"
                 if command.startswith("execute if items"):
@@ -5548,8 +5551,29 @@ class WeaponsSweep(unittest.TestCase):
         rcon, _, _ = self.make_pair()
         self.assertFalse(weapons_sweep.require_target(rcon, "hitbot"))
 
-    def test_victim_is_the_range_husk_target(self):
-        # Summoned zombies are deleted by the range within a second, so the
+    def test_sweep_takes_firing_position(self):
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 20.0))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertEqual(detail.get("victim_lane"), [-18.5, 65.0, 2.5])
+
+    def test_unreachable_lane_fails_loudly(self):
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0),
+            player_pos="[0.0d, 65.0d, 0.0d]",
+        )
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "victim-lane-unreachable")
+
+    def test_victim_is_the_range_husk_target(
+        self,
+    ):  # Summoned zombies are deleted by the range within a second, so the
         # leg must use the range's own husk targets, never a summon.
         self.assertEqual(
             weapons_sweep.VICTIM_SELECTOR,

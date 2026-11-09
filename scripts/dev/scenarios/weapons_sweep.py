@@ -42,6 +42,11 @@ VICTIM_TAG = "bf_range_target"
 # foreign mobs about a second after summoning, so only its own targets work.
 # Plain tag (no per-target id: this server rejects colons in selectors).
 VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1,sort=nearest]"
+# Firing position for the victim leg: 8 m north of the A10a husk with a clear
+# lane. The spawn booths are glassed in, so shots from spawn never reach any
+# target. Teleported per weapon; the die-phase respawn returns the bot.
+VICTIM_LANE_POS = (-18.5, 65.0, 2.5)
+VICTIM_LANE_YAW = 0.0
 # Unfired-control window: the target's HP must be static over this long with no
 # shot, matching the post-shot observation window below. An HP drop without a
 # shot must never count as fired evidence (server#365 sweep).
@@ -221,6 +226,22 @@ def require_target(rcon, player):
     return victim_health(rcon, player) is not None
 
 
+def take_firing_position(rcon, player, detail):
+    """Teleport onto the A10a lane for a clear 8 m shot at the husk.
+
+    Returns True when the player lands on the lane; False (loud
+    victim-lane-unreachable, never a silent miss) otherwise.
+    """
+    x, y, z = VICTIM_LANE_POS
+    rcon.cmd(f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+    detail["victim_lane"] = [x, y, z]
+    try:
+        pos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return pos is not None and abs(pos[0] - x) < 2 and abs(pos[2] - z) < 2
+
+
 def clear_victims(rcon):
     try:
         rcon.cmd(f"kill {VICTIM_SELECTOR}")
@@ -362,6 +383,8 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     bot("hold key.forward 0")
     if not alive(rcon, player):
         return "server-dead-after-moving", log_pos
+    if not take_firing_position(rcon, player, detail):
+        return "victim-lane-unreachable", log_pos
     ok, hp_ref = stable_baseline(rcon, player, detail)
     if not ok:
         return "victim-died-unfired", log_pos
@@ -460,6 +483,8 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         detail["moving_single"] = True
         if not alive(rcon, player):
             return "server-dead-after-moving", detail, log_pos
+        if not take_firing_position(rcon, player, detail):
+            return "victim-lane-unreachable", detail, log_pos
         ok, hp_ref = stable_baseline(rcon, player, detail)
         if not ok:
             return "victim-died-unfired", detail, log_pos

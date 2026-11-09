@@ -5,11 +5,15 @@ For each weapon id (TaCZ gun packs from the stand mods plus SuperbWarfare gun
 definitions): give to the bot, select, single fire, hold fire, reload, aim,
 cycle fire modes (single + burst hold in AUTO), moving fire, switch away/back,
 drop, pick up, die holding it. Every shot goes into the blocks ahead so
-explosive rounds detonate against the world; then a NoAI zombie victim is
-summoned ahead of the player and shot at with `lookat` aim so bullets hit an
-entity (BodyPart/headshot paths), explosive rounds included. After every step
-the server must answer RCON, and no new server-log exception may appear for
-that weapon.
+explosive rounds detonate against the world; then the range's own husk target
+is shot at with `lookat` aim so bullets hit an entity (BodyPart/headshot
+paths), explosive rounds included. After every step the server must answer
+RCON, and no new server-log exception may appear for that weapon.
+
+The victim is the range's A10a husk (NoAI, 20 HP, death cancelled by the
+range): summoned zombies never survive here, the range deletes foreign mobs
+about a second after summoning, so a summon-based leg can never show a real
+unfired control.
 
 Fail-before for server#365: an explosive round whose bullet hits a block used
 to kill the server (blockfield ProjectileExplosionMixin shadow miss).
@@ -32,13 +36,12 @@ SCENARIO = {
 KIT_GUN = "tacz:modern_kinetic_gun"
 FIRE_MODES = ("SEMI", "BURST", "AUTO")
 LOG_WATCH = re.compile(r"ERROR|Exception|Ticking (entity|server)|field_9190|FATAL")
-VICTIM_TYPE = "minecraft:zombie"
-VICTIM_TAG = "sweep_victim"
-VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1,sort=nearest]"
-# Unfired-control window: the victim's HP must be static over this long with no
-# shot, matching the post-shot observation window below. Zombie daylight burn
-# used to kill the victim on its own, so HP drops without a shot once counted
-# as fired evidence (server#365 sweep).
+VICTIM_TYPE = "minecraft:husk"
+VICTIM_TAG = "bf_range_target:A10a"
+VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1]"
+# Unfired-control window: the target's HP must be static over this long with no
+# shot, matching the post-shot observation window below. An HP drop without a
+# shot must never count as fired evidence (server#365 sweep).
 UNFIRED_CONTROL_SLEEP = 2.2
 
 SKIP_ITEMS = (
@@ -176,23 +179,13 @@ def victim_pos(rcon, player):
         return None
 
 
-def secure_victim_environment(rcon):
-    """Midnight + frozen clock so the NoAI zombie victim cannot burn on its own.
-
-    Called once per sweep run; the per-weapon unfired control below stays as
-    the asserting guard.
-    """
-    rcon.cmd("time set midnight")
-    rcon.cmd("gamerule doDaylightCycle false")
-
-
 def victim_baseline(rcon, player, detail):
-    """Unfired control: victim HP must be static over the window with no shot.
+    """Unfired control: target HP must be static over the window with no shot.
 
     Returns (stable, baseline): baseline is the freshest pre-shot reading for
-    the fired comparison. A victim that loses HP unfired (daylight burn) fails
-    loudly via stable=False; a missing victim stays stable with a None baseline
-    so the shot path still reports inconclusive-no-shot, never PASS.
+    the fired comparison. A target that loses HP unfired fails loudly via
+    stable=False; a missing target stays stable with a None baseline so the
+    shot path still reports inconclusive-no-shot, never PASS.
     """
     before = victim_health(rcon, player)
     pos_before = victim_pos(rcon, player)
@@ -206,61 +199,23 @@ def victim_baseline(rcon, player, detail):
     return baseline is not None and baseline == before, baseline
 
 
-def player_state(rcon, player):
-    """(pos, rot) of the player; (None, None) when unreadable."""
-    try:
-        pos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
-    except (ValueError, OSError, RuntimeError):
-        pos = None
-    try:
-        match = re.search(
-            r"\[(-?\d+(?:\.\d+)?)f, (-?\d+(?:\.\d+)?)f\]",
-            rcon.cmd(f"data get entity {player} Rotation") or "",
-        )
-        rot = (float(match.group(1)), float(match.group(2))) if match else None
-    except (OSError, RuntimeError):
-        rot = None
-    return pos, rot
-
-
-def ensure_victim(rcon, player, detail=None):
-    """One NoAI zombie ahead of the player so bullets hit an entity, not blocks.
-
-    Caret summon is facing-relative, so it lands ahead whatever the yaw is;
-    the shooter then aims with absolute `lookat` coordinates, never `look`.
-    The iron helmet stops daylight burn on its own (belt and braces with the
-    midnight clock from secure_victim_environment).
-    """
-    if victim_health(rcon, player) is None:
-        if detail is not None:
-            detail["summon_ref"] = player_state(rcon, player)
-        # Level the pitch first: the pre-fire phases leave the player looking
-        # down, and caret summon inherits that rotation, landing the zombie in
-        # the ground where it dies within a second (every unfired "victim_hp
-        # [20.0, None]" row). Keep position and yaw (down-lane), zero pitch.
-        rcon.cmd(f"execute at {player} run tp {player} ~ ~ ~ ~ 0")
-        rcon.cmd(
-            f"execute at {player} run summon {VICTIM_TYPE} ^ ^ ^8"
-            f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{VICTIM_TAG}"],'
-            'ArmorItems:[{},{},{},{id:"minecraft:iron_helmet",Count:1b}]}'
-        )
-
-
-def ensure_stable_victim(rcon, player, detail):
-    """Summon + unfired control, with one re-summon if the first victim dies
-    on its own: a delayed blast from the pre-fire-into-blocks phases can catch
-    the summon spot. The passing control is the shot baseline, so a re-summon
-    cannot bias the fired evidence. Returns (ok, baseline)."""
-    ensure_victim(rcon, player, detail)
+def stable_baseline(rcon, player, detail):
+    """Unfired control with one retry: the range restores a killed target 2 s
+    after cancelling its death, so a control landing in that window retries
+    once. The passing control is the shot baseline, so a retry cannot bias the
+    fired evidence. Returns (ok, baseline)."""
     stable, baseline = victim_baseline(rcon, player, detail)
     if stable:
         return True, baseline
-    detail["victim_resummoned"] = True
-    clear_victims(rcon)
+    detail["victim_rechecked"] = True
     time.sleep(UNFIRED_CONTROL_SLEEP)
-    ensure_victim(rcon, player, detail)
     stable, baseline = victim_baseline(rcon, player, detail)
     return stable, baseline
+
+
+def require_target(rcon, player):
+    """True when the range's husk target exists for the victim leg."""
+    return victim_health(rcon, player) is not None
 
 
 def clear_victims(rcon):
@@ -404,18 +359,21 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     bot("hold key.forward 0")
     if not alive(rcon, player):
         return "server-dead-after-moving", log_pos
-    ok, hp_ref = ensure_stable_victim(rcon, player, detail)
+    ok, hp_ref = stable_baseline(rcon, player, detail)
     if not ok:
         return "victim-died-unfired", log_pos
     if aim_at_victim(bot, rcon, player):
         tacz_shoot(bot, attempts=2)
         time.sleep(0.8)
+        hp_mid = victim_health(rcon, player)
+    else:
+        hp_mid = None
     hp_after = victim_health(rcon, player)
-    detail["victim_hp"] = [hp_ref, hp_after]
-    # A dead/missing victim after the shot means a round connected. hp_ref is
-    # the post-control baseline, so a daylight-burn drop can never count here.
-    detail["victim_hit"] = hp_ref is not None and (
-        hp_after is None or hp_after < hp_ref
+    detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
+    # Range targets cancel death and restore HP 2 s later, so the mid-shot
+    # reading is the primary evidence; either depressed reading proves a hit.
+    detail["victim_hit"] = hp_ref is not None and any(
+        h is not None and h < hp_ref for h in (hp_mid, hp_after)
     )
     if not alive(rcon, player):
         return "server-dead-after-victim", log_pos
@@ -499,21 +457,26 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         detail["moving_single"] = True
         if not alive(rcon, player):
             return "server-dead-after-moving", detail, log_pos
-        ok, hp_ref = ensure_stable_victim(rcon, player, detail)
+        ok, hp_ref = stable_baseline(rcon, player, detail)
         if not ok:
             return "victim-died-unfired", detail, log_pos
         if aim_at_victim(bot, rcon, player):
             bot("attack")
             time.sleep(0.8)
+            hp_mid = victim_health(rcon, player)
             bot("hold key.attack 20")
             time.sleep(1.4)
+        else:
+            hp_mid = None
         hp_after = victim_health(rcon, player)
-        detail["victim_hp"] = [hp_ref, hp_after]
-        # SBW guns expose no ammo counter: a wounded or killed victim confirms
-        # a shot (a dead victim reads None, which is a hit, not a miss).
-        # hp_ref is the post-control baseline, so a daylight-burn drop can
-        # never count as fired evidence.
-        detail["fired"] = hp_ref is not None and (hp_after is None or hp_after < hp_ref)
+        detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
+        # SBW guns expose no ammo counter: a wounded target confirms a shot.
+        # Range targets cancel death and restore HP 2 s later, so the mid-shot
+        # reading is the primary evidence; either depressed reading proves a
+        # hit. A missing target (None) is never evidence, only a failed leg.
+        detail["fired"] = hp_ref is not None and any(
+            h is not None and h < hp_ref for h in (hp_mid, hp_after)
+        )
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos
         bot("slot 1")
@@ -619,7 +582,9 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         player = bot("state")["name"]
         assert re.fullmatch(r"[A-Za-z0-9_]{1,16}", player), player
         clear_victims(rcon)
-        secure_victim_environment(rcon)
+        if not require_target(rcon, player):
+            print(f"no range target {VICTIM_SELECTOR}; aborting", flush=True)
+            return 1
         wanted = set(args.weapons.split(",")) if args.weapons else None
         inventory = []
         if args.kind in ("tacz", "all"):

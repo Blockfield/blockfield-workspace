@@ -5405,16 +5405,17 @@ class WeaponsSweep(unittest.TestCase):
             def cmd(self, command):
                 if command == "list":
                     return "players: hitbot"
-                if "sweep_victim" in command and "Health" in command:
-                    hp_calls["n"] += 1
-                    if victim_hp:
-                        hp = victim_hp[min(hp_calls["n"], len(victim_hp)) - 1]
-                        if hp is None:
-                            return "ok"
-                        return f"hitbot has Health: {hp}f"
-                    return "ok"
-                if "sweep_victim" in command and "Pos" in command:
-                    return "[10.0d, 64.0d, 10.0d]" if victim_hp else "ok"
+                if "sweep_victim" in command or "bf_range_target" in command:
+                    if "Health" in command:
+                        hp_calls["n"] += 1
+                        if victim_hp:
+                            hp = victim_hp[min(hp_calls["n"], len(victim_hp)) - 1]
+                            if hp is None:
+                                return "ok"
+                            return f"hitbot has Health: {hp}f"
+                        return "ok"
+                    if "Pos" in command:
+                        return "[10.0d, 64.0d, 10.0d]" if victim_hp else "ok"
                 if "GunCurrentAmmoCount" in command:
                     return f"data: {ammo[0] if 'Hotbar' not in command else ammo[0]}"
                 if command.startswith("data get entity hitbot Health"):
@@ -5460,7 +5461,20 @@ class WeaponsSweep(unittest.TestCase):
         self.assertEqual(stop, "inconclusive-no-shot")
         self.assertFalse(detail.get("fired"))
 
-    def test_sbw_victim_hp_drop_confirms_shot(self):
+    def test_sbw_midshot_drop_confirms_shot(self):
+        # The mid-shot reading catches the wound before the range restores it.
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 15.0, 20.0))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, 15.0, 20.0])
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
+
+    def test_sbw_after_drop_confirms_shot(self):
+        # The hold-fire wounds after a mid-shot miss: either reading counts.
         rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 10.0))
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
@@ -5468,107 +5482,79 @@ class WeaponsSweep(unittest.TestCase):
             )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
-        self.assertEqual(detail.get("victim_hp"), [20.0, 10.0])
-        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
+        self.assertEqual(detail.get("victim_hp"), [20.0, 20.0, 10.0])
 
-    def test_victim_killed_counts_as_fired(self):
-        # A dead victim reads None, which is a hit, not a miss: the round
-        # connected. ensure_victim resummons the zombie for the next weapon.
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, None))
+    def test_sbw_missing_target_is_not_evidence(self):
+        # Range targets cancel death, so a None reading means a broken leg,
+        # never a hit: strict, no PASS.
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, None, None))
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
-        self.assertIsNone(stop)
-        self.assertTrue(detail.get("fired"))
-        self.assertEqual(detail.get("victim_hp"), [20.0, None])
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertFalse(detail.get("fired"))
 
-    def test_sbw_resummon_recovers_from_blast(self):
-        # A delayed blast from the pre-fire phases catches the first summon
-        # spot; one re-summon re-establishes a stable baseline and the shot
-        # evidence still counts.
-        rcon, bot, log_path = self.make_pair(
-            victim_hp=(20.0, 20.0, 10.0, 20.0, 20.0, 20.0, 15.0)
-        )
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
-            stop, detail, _ = weapons_sweep.sweep_weapon(
-                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-            )
-        self.assertIsNone(stop)
-        self.assertTrue(detail.get("victim_resummoned"))
-        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
-        self.assertTrue(detail.get("fired"))
-        self.assertEqual(detail.get("victim_hp"), [20.0, 15.0])
-
-    def test_sbw_unfired_hp_drop_fails_loudly(self):
-        # Daylight-burn control: the victim loses HP with no shot on both the
-        # first summon and the re-summon, so the weapon must fail, never PASS
-        # on the burn as fired evidence.
-        rcon, bot, log_path = self.make_pair(
-            victim_hp=(20.0, 20.0, 10.0, 20.0, 20.0, 10.0)
-        )
+    def test_sbw_unfired_drop_fails_loudly(self):
+        # The target loses HP with no shot on both control passes: fail, never
+        # PASS on someone else's damage as fired evidence.
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 10.0, 20.0, 10.0))
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
         self.assertEqual(stop, "victim-died-unfired")
-        self.assertTrue(detail.get("victim_resummoned"))
+        self.assertTrue(detail.get("victim_rechecked"))
         self.assertFalse(detail.get("fired"))
         self.assertEqual(detail.get("victim_control"), [20.0, 10.0])
 
-    def test_sbw_unfired_death_fails_loudly(self):
-        # Victim gone before any shot on both summons: fail, not PASS.
+    def test_sbw_recheck_recovers_from_restore_race(self):
+        # First control lands in the range's 2 s restore window; the retry
+        # passes and the shot evidence still counts.
         rcon, bot, log_path = self.make_pair(
-            victim_hp=(20.0, 20.0, None, 20.0, 20.0, None)
+            victim_hp=(20.0, 10.0, 20.0, 20.0, 15.0, 20.0)
         )
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
-        self.assertEqual(stop, "victim-died-unfired")
-        self.assertFalse(detail.get("fired"))
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("victim_rechecked"))
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, 15.0, 20.0])
 
-    def test_tacz_unfired_hp_drop_fails_loudly(self):
-        rcon, bot, log_path = self.make_pair(
-            victim_hp=(20.0, 20.0, 10.0, 20.0, 20.0, 10.0)
-        )
+    def test_tacz_midshot_drop_confirms_hit(self):
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 15.0))
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("victim_hit"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, 15.0, 15.0])
+
+    def test_tacz_unfired_drop_fails_loudly(self):
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 10.0, 20.0, 10.0))
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
         self.assertEqual(stop, "victim-died-unfired")
 
-    def test_ensure_victim_summons_helmeted(self):
-        seen = []
+    def test_require_target(self):
+        rcon, _, _ = self.make_pair(victim_hp=(20.0,))
+        self.assertTrue(weapons_sweep.require_target(rcon, "hitbot"))
+        rcon, _, _ = self.make_pair()
+        self.assertFalse(weapons_sweep.require_target(rcon, "hitbot"))
 
-        class HelmetRcon:
-            def cmd(self, command):
-                seen.append(command)
-                return "ok"  # no victim present
-
-        weapons_sweep.ensure_victim(HelmetRcon(), "hitbot")
-        summon = next(c for c in seen if "summon" in c)
-        self.assertIn("iron_helmet", summon)
-        # The view must be leveled before a caret summon: it inherits the
-        # player's pitched-down rotation and lands in the ground otherwise.
-        level = next(c for c in seen if c.startswith("execute at") and " tp " in c)
-        self.assertIn("~ ~ ~ ~ 0", level)
-        self.assertLess(seen.index(level), seen.index(summon))
-        # The NBT must be balanced: an extra closing brace (f-string `}}`
-        # in a plain string) silently fails the summon, leaving no victim.
-        self.assertNotIn("]}}", summon)
-        self.assertTrue(summon.count("{") == summon.count("}"))
-
-    def test_secure_victim_environment_freezes_clock(self):
-        seen = []
-
-        class ClockRcon:
-            def cmd(self, command):
-                seen.append(command)
-                return "ok"
-
-        weapons_sweep.secure_victim_environment(ClockRcon())
-        self.assertEqual(seen, ["time set midnight", "gamerule doDaylightCycle false"])
+    def test_victim_is_the_range_husk_target(self):
+        # Summoned zombies are deleted by the range within a second, so the
+        # leg must use the range's own husk target, never a summon.
+        self.assertEqual(
+            weapons_sweep.VICTIM_SELECTOR,
+            "@e[type=minecraft:husk,tag=bf_range_target:A10a,limit=1]",
+        )
 
     def test_resume_skips_only_passed_weapons(self):
         prev = [

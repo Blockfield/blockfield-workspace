@@ -139,6 +139,11 @@ play *args:
     sys.argv = ["bf.py", *["play", *sys.argv[1:]]]
     runpy.run_path("bf.py", run_name="__main__")
 
+stand *args:
+    import runpy, sys
+    sys.argv = ["bf.py", *["stand", *sys.argv[1:]]]
+    runpy.run_path("bf.py", run_name="__main__")
+
 proxy *args:
     import runpy, sys
     sys.argv = ["bf.py", *["proxy", *sys.argv[1:]]]

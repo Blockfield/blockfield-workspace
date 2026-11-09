@@ -306,6 +306,11 @@ just server start
 just play --server 127.0.0.1:25599
 ```
 
+Одна команда вместо трёх последних (`setup`, затем запуск сервера и клиента
+до готовности рендера): `just stand --testbot --server-jar <jar> [--clients 2]`.
+Серверный JAR собирается отдельно (`:server:remapJar` на Boat VM) и передаётся
+как в `setup`; флаги `--force`, `--testbot`/`--no-testbot` и `--game-dir` те же.
+
 `just setup` готовит весь остановленный стенд: закреплённый JDK 21, сервер с миром и эталонами карт,
 клиентский пак, Minecraft assets/libraries/natives и venv с portablemc. Нужны сеть и доступ gh.
 Carpet `1.4.147+v240613` с закреплённым SHA256 устанавливается автоматически

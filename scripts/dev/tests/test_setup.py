@@ -579,5 +579,57 @@ class Setup(unittest.TestCase):
                 self.assertFalse(devstack.server_jar_current(jar))
 
 
+class Stand(unittest.TestCase):
+    def stand_args(self, **overrides):
+        base = dict(
+            modpack=None,
+            client_modpack=None,
+            game_dir=None,
+            force=False,
+            testbot=True,
+            no_testbot=False,
+            server_jar="server.jar",
+            clients=1,
+            name=None,
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_chains_setup_server_and_one_client_in_order(self):
+        calls = []
+        with (
+            patch.object(
+                devstack, "setup", side_effect=lambda a: calls.append("setup")
+            ),
+            patch.object(
+                devstack, "server_start", side_effect=lambda a: calls.append("server")
+            ),
+            patch.object(
+                devstack, "play", side_effect=lambda a: calls.append(("play", a.client))
+            ),
+        ):
+            devstack.stand(self.stand_args())
+        self.assertEqual(calls, ["setup", "server", ("play", 1)])
+
+    def test_two_clients_boot_sequentially_on_one_server(self):
+        seen = []
+        with (
+            patch.object(devstack, "setup", return_value=None),
+            patch.object(devstack, "server_start", return_value=None),
+            patch.object(devstack, "play", side_effect=lambda a: seen.append(a.client)),
+        ):
+            devstack.stand(self.stand_args(clients=2))
+        self.assertEqual(seen, [1, 2])
+
+    def test_explicit_game_dir_rejects_second_client(self):
+        with (
+            patch.object(devstack, "setup", return_value=None),
+            patch.object(devstack, "server_start", return_value=None),
+            patch.object(devstack, "play", return_value=None),
+        ):
+            with self.assertRaises(SystemExit):
+                devstack.stand(self.stand_args(game_dir="custom", clients=2))
+
+
 if __name__ == "__main__":
     unittest.main()

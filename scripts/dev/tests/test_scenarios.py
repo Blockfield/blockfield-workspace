@@ -5483,21 +5483,44 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(detail.get("fired"))
         self.assertEqual(detail.get("victim_hp"), [20.0, None])
 
+    def test_sbw_resummon_recovers_from_blast(self):
+        # A delayed blast from the pre-fire phases catches the first summon
+        # spot; one re-summon re-establishes a stable baseline and the shot
+        # evidence still counts.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 10.0, 20.0, 20.0, 20.0, 15.0)
+        )
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("victim_resummoned"))
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, 15.0])
+
     def test_sbw_unfired_hp_drop_fails_loudly(self):
-        # Daylight-burn control: the victim loses HP with no shot, so the
-        # weapon must fail, never PASS on the burn as fired evidence.
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0, 10.0))
+        # Daylight-burn control: the victim loses HP with no shot on both the
+        # first summon and the re-summon, so the weapon must fail, never PASS
+        # on the burn as fired evidence.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 10.0, 20.0, 20.0, 10.0)
+        )
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
         self.assertEqual(stop, "victim-died-unfired")
+        self.assertTrue(detail.get("victim_resummoned"))
         self.assertFalse(detail.get("fired"))
         self.assertEqual(detail.get("victim_control"), [20.0, 10.0])
 
     def test_sbw_unfired_death_fails_loudly(self):
-        # Victim gone before any shot (burned on its own): fail, not PASS.
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, None, None))
+        # Victim gone before any shot on both summons: fail, not PASS.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, None, 20.0, 20.0, None)
+        )
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
@@ -5506,7 +5529,9 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
 
     def test_tacz_unfired_hp_drop_fails_loudly(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0, 10.0))
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 10.0, 20.0, 20.0, 10.0)
+        )
         with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0

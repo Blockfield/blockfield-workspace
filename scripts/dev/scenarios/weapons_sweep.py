@@ -219,6 +219,23 @@ def ensure_victim(rcon, player):
         )
 
 
+def ensure_stable_victim(rcon, player, detail):
+    """Summon + unfired control, with one re-summon if the first victim dies
+    on its own: a delayed blast from the pre-fire-into-blocks phases can catch
+    the summon spot. The passing control is the shot baseline, so a re-summon
+    cannot bias the fired evidence. Returns (ok, baseline)."""
+    ensure_victim(rcon, player)
+    stable, baseline = victim_baseline(rcon, player, detail)
+    if stable:
+        return True, baseline
+    detail["victim_resummoned"] = True
+    clear_victims(rcon)
+    time.sleep(UNFIRED_CONTROL_SLEEP)
+    ensure_victim(rcon, player)
+    stable, baseline = victim_baseline(rcon, player, detail)
+    return stable, baseline
+
+
 def clear_victims(rcon):
     try:
         rcon.cmd(f"kill {VICTIM_SELECTOR}")
@@ -360,9 +377,8 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     bot("hold key.forward 0")
     if not alive(rcon, player):
         return "server-dead-after-moving", log_pos
-    ensure_victim(rcon, player)
-    stable, hp_ref = victim_baseline(rcon, player, detail)
-    if not stable:
+    ok, hp_ref = ensure_stable_victim(rcon, player, detail)
+    if not ok:
         return "victim-died-unfired", log_pos
     if aim_at_victim(bot, rcon, player):
         tacz_shoot(bot, attempts=2)
@@ -456,9 +472,8 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         detail["moving_single"] = True
         if not alive(rcon, player):
             return "server-dead-after-moving", detail, log_pos
-        ensure_victim(rcon, player)
-        stable, hp_ref = victim_baseline(rcon, player, detail)
-        if not stable:
+        ok, hp_ref = ensure_stable_victim(rcon, player, detail)
+        if not ok:
             return "victim-died-unfired", detail, log_pos
         if aim_at_victim(bot, rcon, player):
             bot("attack")

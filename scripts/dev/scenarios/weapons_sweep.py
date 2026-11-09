@@ -215,7 +215,7 @@ def ensure_victim(rcon, player):
         rcon.cmd(
             f"execute at {player} run summon {VICTIM_TYPE} ^ ^ ^8"
             f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{VICTIM_TAG}"],'
-            'ArmorItems:[{},{},{},{id:"minecraft:iron_helmet",Count:1b}]}}'
+            'ArmorItems:[{},{},{},{id:"minecraft:iron_helmet",Count:1b}]}'
         )
 
 

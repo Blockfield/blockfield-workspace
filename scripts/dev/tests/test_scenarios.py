@@ -5524,6 +5524,10 @@ class WeaponsSweep(unittest.TestCase):
         weapons_sweep.ensure_victim(HelmetRcon(), "hitbot")
         summon = next(c for c in seen if "summon" in c)
         self.assertIn("iron_helmet", summon)
+        # The NBT must be balanced: an extra closing brace (f-string `}}`
+        # in a plain string) silently fails the summon, leaving no victim.
+        self.assertNotIn("]}}", summon)
+        self.assertTrue(summon.count("{") == summon.count("}"))
 
     def test_secure_victim_environment_freezes_clock(self):
         seen = []

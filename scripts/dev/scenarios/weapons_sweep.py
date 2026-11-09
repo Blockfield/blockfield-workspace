@@ -271,12 +271,13 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     bot("look 0 55")
     single = tacz_shoot(bot)
     detail["single"] = single.get("result")
+    if not alive(rcon, player):
+        return "server-dead-after-single", log_pos
     if single.get("result") == "ID_NOT_EXIST" and detail["gave"]:
         # The server hands out a gun id the stand client never loaded
         # (elitex:ak47x class): the sweep missed that weapon, it did not pass.
+        # Checked after liveness so a crash is reported as the crash.
         return "client-gun-data-missing", log_pos
-    if not alive(rcon, player):
-        return "server-dead-after-single", log_pos
     bot("hold key.attack 20")
     time.sleep(1.4)
     after = ammo_count(rcon, player)

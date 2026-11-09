@@ -582,6 +582,7 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         player = bot("state")["name"]
         assert re.fullmatch(r"[A-Za-z0-9_]{1,16}", player), player
         clear_victims(rcon)
+        ensure_in_range(rcon, bot, player)
         if not require_target(rcon, player):
             print(f"no range target {VICTIM_SELECTOR}; aborting", flush=True)
             return 1

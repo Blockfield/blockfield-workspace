@@ -75,6 +75,15 @@ SBW_CONTROL_SLEEP = 2.2
 # Run-level persistence proof: the overworld must keep a summoned husk alive
 # and still for this long before any SBW weapon fires.
 SBW_PERSISTENCE_SLEEP = 30
+# SBW ammo: a bare give never fires (GunData has no Ammo). The creative box
+# feeds every SBW gun; the stand rig vacuums it, and SBW reloads read the rig
+# too, so the box only has to exist, not stay in the vanilla inventory.
+SBW_CREATIVE_BOX = "superbwarfare:creative_ammo_box"
+# Reload wait: SBW fills the mag ~2 s after the R press; the sweep polls the
+# gun's Ammo NBT this long before firing anyway (a miss never aborts the leg,
+# the victim verdict still decides).
+SBW_RELOAD_TIMEOUT = 8.0
+SBW_RELOAD_POLL = 1.0
 
 SKIP_ITEMS = (
     "ammo",
@@ -104,14 +113,17 @@ SKIP_ITEMS = (
 )
 
 
-def tacz_gun_ids(mods_dir):
-    """GunId set from every TaCZ gun-data file in the stand mods jars.
+def tacz_gun_data(mods_dir):
+    """({gun_id: jar}, {gun_id: ammo_id}) from every TaCZ gun-data file.
 
     Packs embed their data tree (`.../custom/<pack>/data/<ns>/data/guns/`)
     and the data file carries no id: `<ns>:<stem>` minus the `_data` suffix.
+    ammo_id covers inventory-reload guns only (every shot reads the vanilla
+    inventory for a stack whose AmmoId matches); comments stripped (TaCZ data
+    json is lenient).
     """
     pattern = re.compile(r"data/([^/]+)/data/guns/([^/]+)_data\.json$")
-    found = {}
+    found, ammo = {}, {}
     root = Path(mods_dir) if mods_dir else None
     jars = sorted(root.glob("*.jar")) if root and root.is_dir() else []
     for jar in jars:
@@ -122,11 +134,35 @@ def tacz_gun_ids(mods_dir):
                     if not match:
                         continue
                     gun_id = f"{match.group(1)}:{match.group(2)}"
-                    if re.fullmatch(r"[a-z0-9_]+:[a-z0-9_/]+", gun_id):
-                        found.setdefault(gun_id, jar.name)
+                    if not re.fullmatch(r"[a-z0-9_]+:[a-z0-9_/]+", gun_id):
+                        continue
+                    found.setdefault(gun_id, jar.name)
+                    try:
+                        text = archive.read(entry).decode("utf-8", errors="replace")
+                    except KeyError:
+                        continue
+                    text = re.sub(r"//.*", "", text)
+                    ammo_id = re.search(r'"ammo"\s*:\s*"([a-z0-9_:]+)"', text)
+                    reload = re.search(
+                        r'"reload"\s*:\s*\{[^}]*?"type"\s*:\s*"([a-z]+)"',
+                        text,
+                        re.S,
+                    )
+                    if ammo_id and reload and reload.group(1) != "magazine":
+                        ammo.setdefault(gun_id, ammo_id.group(1))
         except zipfile.BadZipFile:
             continue
-    return found
+    return found, ammo
+
+
+def tacz_gun_ids(mods_dir):
+    """GunId set from every TaCZ gun-data file in the stand mods jars."""
+    return tacz_gun_data(mods_dir)[0]
+
+
+def tacz_inventory_ammo(mods_dir):
+    """{gun_id: ammo_id} for inventory-reload guns (see tacz_gun_data)."""
+    return tacz_gun_data(mods_dir)[1]
 
 
 def sbw_weapon_items(mods_dir):
@@ -177,11 +213,47 @@ def ammo_count(rcon, player, slot=0):
     return int(match.group(1)) if match else None
 
 
+def sbw_ammo(rcon, player):
+    """Rounds in the held SBW gun's mag (GunData.Ammo); None when unloaded."""
+    try:
+        reply = rcon.cmd(f"data get entity {player} Inventory[{{Slot:0b}}]") or ""
+    except (OSError, RuntimeError):
+        return None
+    match = re.search(r"Ammo:\s*(\d+)", reply)
+    return int(match.group(1)) if match else None
+
+
+def sbw_wait_ammo(rcon, bot, player, detail):
+    """Reload through the raw input SBW listens to, then poll the mag.
+
+    Never aborts the leg: a gun that stays unloaded still runs the fire and
+    victim steps, and the victim verdict decides. Returns True when loaded.
+    """
+    bot("rawinput key r")
+    deadline = time.monotonic() + SBW_RELOAD_TIMEOUT
+    loaded = sbw_ammo(rcon, player)
+    while (loaded or 0) <= 0 and time.monotonic() < deadline:
+        time.sleep(SBW_RELOAD_POLL)
+        loaded = sbw_ammo(rcon, player)
+    detail["reloaded_ammo"] = loaded
+    return (loaded or 0) > 0
+
+
 def alive(rcon, player):
     try:
         return player in (rcon.cmd("list") or "")
     except (OSError, RuntimeError):
         return False
+
+
+def restore_survival(rcon, player, detail):
+    """Leave creative mode (minigun leg) before the drop/pickup/die phases."""
+    if not detail.get("creative_for_minigun"):
+        return
+    try:
+        rcon.cmd(f"gamemode survival {player}")
+    except (OSError, RuntimeError):
+        pass
 
 
 def _rcon_read(rcon, command):
@@ -509,9 +581,25 @@ def wait_drawn(bot, timeout=12.0):
         time.sleep(0.5)
 
 
-def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
+def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail, inv_ammo=""):
+    ammo_id = inv_ammo or ""
+    if ammo_id:
+        # Inventory-reload gun (today only tacz:minigun): every shot needs a
+        # visible inventory stack whose AmmoId matches, but the stand rig
+        # vacuums all loose ammo in <0.3 s and TaCZ's per-shot scan sees only
+        # the vanilla inventory (only canReload is rig-aware). Creative skips
+        # that check; the victim leg still proves real projectiles. The ammo
+        # is still given (right id + AmmoId NBT) so the rig count is honest.
+        rcon.cmd(f"gamemode creative {player}")
+        detail["creative_for_minigun"] = True
     rcon.cmd(hud_checks.gun_replace_command(player, gun_id, ammo=300))
     time.sleep(0.4)
+    if ammo_id:
+        rcon.cmd(
+            f"item replace entity {player} inventory.1 with tacz:ammo"
+            f'[minecraft:custom_data={{AmmoId:"{ammo_id}"}}] 1'
+        )
+        time.sleep(0.5)
     detail["gave"] = items_count(rcon, player, KIT_GUN) >= 1
     if not detail["gave"]:
         return "server-give-failed", log_pos
@@ -530,6 +618,7 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
         # The server hands out a gun id the stand client never loaded
         # (elitex:ak47x class): the sweep missed that weapon, it did not pass.
         # Checked after liveness so a crash is reported as the crash.
+        restore_survival(rcon, player, detail)
         return "client-gun-data-missing", log_pos
     bot("hold key.attack 20")
     time.sleep(1.4)
@@ -606,6 +695,7 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     detail["reselected"] = bot("state").get("held") == KIT_GUN
     if not alive(rcon, player):
         return "server-dead-after-reselect", log_pos
+    restore_survival(rcon, player, detail)
     return None, log_pos
 
 
@@ -644,7 +734,7 @@ def sweep_drop_pickup_die(
     return None, log_pos
 
 
-def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
+def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos, inv_ammo=""):
     detail = {"kind": kind}
     if kind == "tacz":
         ensure_in_range(bot, rcon, player)
@@ -652,7 +742,7 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         ensure_overworld(bot, rcon, player)
     if kind == "tacz":
         stop, log_pos = sweep_tacz(
-            rcon, bot, player, weapon_id, log_path, log_pos, detail
+            rcon, bot, player, weapon_id, log_path, log_pos, detail, inv_ammo
         )
         if stop:
             return stop, detail, log_pos
@@ -665,18 +755,27 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
             return "server-give-failed", detail, log_pos
         if not alive(rcon, player):
             return "server-dead-after-give", detail, log_pos
+        # A bare SBW give never fires (empty mag). The creative box feeds
+        # every gun; the rig vacuum collects it and SBW reloads read the rig
+        # too. Reload through raw input: KeyMapping-only presses never reach
+        # SBW's ClickEventHandler (raw Key event) to dispatch ReloadMessage.
+        rcon.cmd(f"item replace entity {player} inventory.0 with {SBW_CREATIVE_BOX}")
+        time.sleep(0.5)
         bot("slot 0")
         wait_drawn(bot)
         detail["selected"] = bot("state").get("held") == weapon_id
         bot("look 0 55")
-        bot("attack")
+        sbw_wait_ammo(rcon, bot, player, detail)
+        # Fire through raw input too: SBW polls its own FIRE mapping (LMB) per
+        # tick and the press edge as a raw MouseButton event; testbot's
+        # KeyMapping-only holds never reach either.
+        bot("rawinput click 1")
         time.sleep(0.8)
         if not alive(rcon, player):
             return "server-dead-after-single", detail, log_pos
-        bot("hold key.attack 20")
+        bot("rawinput mouse_down 1")
         time.sleep(1.4)
-        bot("hold key.use 20")
-        time.sleep(1.2)
+        bot("rawinput mouse_up 1")
         if not alive(rcon, player):
             return "server-dead-after-hold", detail, log_pos
         # Aimed victim shots while the bot is still on the flat spot: the
@@ -693,13 +792,12 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         if not ok:
             return "victim-died-unfired", detail, log_pos
         if sbw_aim_at_victim(bot, rcon, player):
-            bot("attack")
+            bot("rawinput click 1")
             time.sleep(0.8)
             hp_mid = sbw_victim_health(rcon, player)
-            bot("hold key.attack 20")
+            bot("rawinput mouse_down 1")
             time.sleep(1.4)
-            bot("hold key.use 20")
-            time.sleep(1.2)
+            bot("rawinput mouse_up 1")
         else:
             hp_mid = None
         hp_after = sbw_victim_health(rcon, player)
@@ -720,11 +818,12 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         )
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos
-        bot("hold key.attack 20")
+        bot("rawinput mouse_down 1")
         time.sleep(1.4)
+        bot("rawinput mouse_up 1")
         bot("hold key.forward 20")
         time.sleep(0.5)
-        bot("attack")
+        bot("rawinput click 1")
         time.sleep(1.0)
         bot("hold key.forward 0")
         detail["moving_single"] = True
@@ -840,9 +939,12 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
                 return 1
         wanted = set(args.weapons.split(",")) if args.weapons else None
         inventory = []
+        inv_ammo = {}
         if args.kind in ("tacz", "all"):
             mods_dir = args.mods_dir or (server_dir / "mods")
-            for gun_id, jar in sorted(tacz_gun_ids(str(mods_dir)).items()):
+            guns = tacz_gun_data(str(mods_dir))
+            inv_ammo = guns[1]
+            for gun_id, jar in sorted(guns[0].items()):
                 if wanted and gun_id not in wanted:
                     continue
                 inventory.append(("tacz", gun_id))
@@ -891,7 +993,14 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         for kind, weapon_id in inventory:
             try:
                 stop, detail, log_pos = sweep_weapon(
-                    rcon, bot, player, kind, weapon_id, log_path, log_pos
+                    rcon,
+                    bot,
+                    player,
+                    kind,
+                    weapon_id,
+                    log_path,
+                    log_pos,
+                    inv_ammo.get(weapon_id, ""),
                 )
             except (
                 OSError,

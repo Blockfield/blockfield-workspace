@@ -5375,6 +5375,66 @@ class WeaponsSweep(unittest.TestCase):
                 },
             )
 
+    def test_tacz_inventory_ammo_reads_minigun(self):
+        # Only inventory-reload guns are mapped: minigun's shots each need a
+        # matching AmmoId stack, magazine guns never do.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_jar(
+                tmp,
+                "pack.jar",
+                {
+                    "assets/tacz/custom/tacz_default_gun/data/tacz/data/guns/minigun_data.json": (
+                        '{"ammo": "tacz:308",\n'
+                        "// magazine is elfeed, manual, fuel or inventory\n"
+                        '"reload": {"type": "inventory"}}'
+                    ),
+                    "assets/tacz/custom/tacz_default_gun/data/tacz/data/guns/glock_17_data.json": (
+                        '{"ammo": "tacz:9mm", "reload": {"type": "magazine"}}'
+                    ),
+                },
+            )
+            self.assertEqual(
+                weapons_sweep.tacz_inventory_ammo(tmp), {"tacz:minigun": "tacz:308"}
+            )
+            self.assertEqual(
+                set(weapons_sweep.tacz_gun_ids(tmp)),
+                {"tacz:minigun", "tacz:glock_17"},
+            )
+
+    def test_minigun_toggles_creative_and_restores(self):
+        # The rig vacuums all loose ammo and TaCZ's per-shot scan sees only
+        # the vanilla inventory: the minigun leg fires in creative (skips the
+        # check) with the right ammo id given, then restores survival.
+        rseen = []
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0), rseen=rseen
+        )
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon,
+                bot,
+                "hitbot",
+                "tacz",
+                "tacz:minigun",
+                log_path,
+                0,
+                inv_ammo="tacz:308",
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("creative_for_minigun"))
+        self.assertTrue(
+            any(cmd.startswith("gamemode creative") for cmd in rseen),
+            rseen,
+        )
+        self.assertTrue(
+            any(cmd.startswith("gamemode survival") for cmd in rseen),
+            rseen,
+        )
+        self.assertTrue(
+            any('AmmoId:"tacz:308"' in cmd for cmd in rseen),
+            rseen,
+        )
+
     def test_sbw_inventory_reads_gun_definitions(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.make_jar(
@@ -5401,6 +5461,8 @@ class WeaponsSweep(unittest.TestCase):
         player_pos="[-18.5d, 65.0d, 2.5d]",
         dimension="blockfield:range",
         seen=None,
+        gun_nbt="ok",
+        rseen=None,
     ):
         log_path = Path(tempfile.mkdtemp()) / "latest.log"
         log_path.write_text("".join(log_lines), encoding="utf-8")
@@ -5409,6 +5471,8 @@ class WeaponsSweep(unittest.TestCase):
 
         class Rcon:
             def cmd(self, command):
+                if rseen is not None:
+                    rseen.append(command)
                 if command == "list":
                     if dies_on_shoot and shot["done"]:
                         raise OSError("rcon closed: server gone")
@@ -5426,6 +5490,8 @@ class WeaponsSweep(unittest.TestCase):
                         return "[10.0d, 64.0d, 10.0d]" if victim_hp else "ok"
                 if "GunCurrentAmmoCount" in command:
                     return f"data: {ammo[0] if 'Hotbar' not in command else ammo[0]}"
+                if "Inventory[{Slot:0b}]" in command:
+                    return gun_nbt
                 if command.startswith("data get entity hitbot Health"):
                     return "hitbot has the following entity data: 20.0f"
                 if command == "data get entity hitbot Pos":
@@ -5505,9 +5571,13 @@ class WeaponsSweep(unittest.TestCase):
         # Fail-before for the review finding: the old code hard-coded
         # fired=True, so this returned None (PASS) with no shot evidence.
         rcon, bot, log_path = self.make_pair()
-        stop, detail, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertEqual(stop, "inconclusive-no-shot")
         self.assertFalse(detail.get("fired"))
 
@@ -5588,31 +5658,70 @@ class WeaponsSweep(unittest.TestCase):
         )
 
     def test_sbw_victim_hp_drop_confirms_shot(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0))
-        stop, detail, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
         )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 10.0, 10.0])
+        self.assertEqual(detail.get("reloaded_ammo"), 30)
 
     def test_victim_killed_counts_as_fired(self):
         # A husk gone after a stable unfired baseline was killed by the shot
         # (the run-level persistence proof rules out mob deletion).
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, None, None))
-        stop, detail, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, None, None),
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
         )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
         self.assertEqual(detail.get("victim_hp"), [20.0, None, None])
 
+    def test_sbw_fires_through_rawinput(self):
+        # SBW listens to raw press events (ClickEventHandler) and its own
+        # FIRE mapping: KeyMapping-only attack/hold never reaches it (c7).
+        seen = []
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
+            seen=seen,
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, _, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(any("rawinput" in cmd for cmd in seen))
+        self.assertFalse(any("hold key.attack" in cmd for cmd in seen))
+
     def test_sbw_unfired_hp_drop_is_fail(self):
         # HP loss with no shot must never count as fired evidence.
         rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0))
-        stop, detail, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertEqual(stop, "victim-died-unfired")
         self.assertFalse(detail.get("fired"))
 
@@ -5632,10 +5741,15 @@ class WeaponsSweep(unittest.TestCase):
             victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
             dimension="minecraft:overworld",
             seen=seen,
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
         )
-        stop, _, _ = weapons_sweep.sweep_weapon(
-            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, _, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
         self.assertIsNone(stop)
         self.assertFalse(any("range" in cmd for cmd in seen))
 

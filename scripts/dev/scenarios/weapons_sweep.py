@@ -5,15 +5,15 @@ For each weapon id (TaCZ gun packs from the stand mods plus SuperbWarfare gun
 definitions): give to the bot, select, single fire, hold fire, reload, aim,
 cycle fire modes (single + burst hold in AUTO), moving fire, switch away/back,
 drop, pick up, die holding it. Every shot goes into the blocks ahead so
-explosive rounds detonate against the world; then the range's own husk target
+explosive rounds detonate against the world; then the nearest range husk target
 is shot at with `lookat` aim so bullets hit an entity (BodyPart/headshot
 paths), explosive rounds included. After every step the server must answer
 RCON, and no new server-log exception may appear for that weapon.
 
-The victim is the range's A10a husk (NoAI, 20 HP, death cancelled by the
-range): summoned zombies never survive here, the range deletes foreign mobs
-about a second after summoning, so a summon-based leg can never show a real
-unfired control.
+The victim is the nearest range husk target (NoAI, 20 HP, death cancelled by
+the range): summoned zombies never survive here, the range deletes foreign
+mobs about a second after summoning, so a summon-based leg can never show a
+real unfired control.
 
 Fail-before for server#365: an explosive round whose bullet hits a block used
 to kill the server (blockfield ProjectileExplosionMixin shadow miss).
@@ -37,8 +37,11 @@ KIT_GUN = "tacz:modern_kinetic_gun"
 FIRE_MODES = ("SEMI", "BURST", "AUTO")
 LOG_WATCH = re.compile(r"ERROR|Exception|Ticking (entity|server)|field_9190|FATAL")
 VICTIM_TYPE = "minecraft:husk"
-VICTIM_TAG = "bf_range_target:A10a"
-VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1]"
+VICTIM_TAG = "bf_range_target"
+# Nearest range husk (the A10a target from the spawn): the range deletes
+# foreign mobs about a second after summoning, so only its own targets work.
+# Plain tag (no per-target id: this server rejects colons in selectors).
+VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1,sort=nearest]"
 # Unfired-control window: the target's HP must be static over this long with no
 # shot, matching the post-shot observation window below. An HP drop without a
 # shot must never count as fired evidence (server#365 sweep).

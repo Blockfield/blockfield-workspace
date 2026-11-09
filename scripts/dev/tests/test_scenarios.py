@@ -5550,10 +5550,10 @@ class WeaponsSweep(unittest.TestCase):
 
     def test_victim_is_the_range_husk_target(self):
         # Summoned zombies are deleted by the range within a second, so the
-        # leg must use the range's own husk target, never a summon.
+        # leg must use the range's own husk targets, never a summon.
         self.assertEqual(
             weapons_sweep.VICTIM_SELECTOR,
-            "@e[type=minecraft:husk,tag=bf_range_target:A10a,limit=1]",
+            "@e[type=minecraft:husk,tag=bf_range_target,limit=1,sort=nearest]",
         )
 
     def test_resume_skips_only_passed_weapons(self):

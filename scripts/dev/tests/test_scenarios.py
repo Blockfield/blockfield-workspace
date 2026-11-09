@@ -5398,6 +5398,8 @@ class WeaponsSweep(unittest.TestCase):
         have_item=True,
         shoot_result="SUCCESS",
         dies_on_shoot=False,
+        dimension="blockfield:range",
+        seen=None,
     ):
         log_path = Path(tempfile.mkdtemp()) / "latest.log"
         log_path.write_text("".join(log_lines), encoding="utf-8")
@@ -5424,6 +5426,8 @@ class WeaponsSweep(unittest.TestCase):
                     return f"data: {ammo[0] if 'Hotbar' not in command else ammo[0]}"
                 if command.startswith("data get entity hitbot Health"):
                     return "hitbot has the following entity data: 20.0f"
+                if command == "data get entity hitbot Pos":
+                    return "[1.0d, 64.0d, 2.0d]"
                 if command == "kill hitbot":
                     return "Killed hitbot"
                 if command.startswith("execute if items"):
@@ -5433,11 +5437,13 @@ class WeaponsSweep(unittest.TestCase):
                 return "ok"
 
         def bot(command):
+            if seen is not None:
+                seen.append(command)
             if command == "state":
                 return {
                     "name": "hitbot",
                     "held": "tacz:modern_kinetic_gun",
-                    "dimension": "blockfield:range",
+                    "dimension": dimension,
                 }
             if command == "tacz shoot":
                 if fail_shoot:
@@ -5504,24 +5510,72 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
 
     def test_sbw_victim_hp_drop_confirms_shot(self):
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0))
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, 10.0, 10.0])
+
+    def test_victim_killed_counts_as_fired(self):
+        # A husk gone after a stable unfired baseline was killed by the shot
+        # (the run-level persistence proof rules out mob deletion).
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, None, None))
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+        )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_hp"), [20.0, None, None])
+
+    def test_sbw_unfired_hp_drop_is_fail(self):
+        # HP loss with no shot must never count as fired evidence.
         rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 10.0))
         stop, detail, _ = weapons_sweep.sweep_weapon(
             rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
         )
-        self.assertIsNone(stop)
-        self.assertTrue(detail.get("fired"))
-        self.assertEqual(detail.get("victim_hp"), [20.0, 10.0])
+        self.assertEqual(stop, "victim-died-unfired")
+        self.assertFalse(detail.get("fired"))
 
-    def test_victim_killed_counts_as_fired(self):
-        # A dead victim reads None, which is a hit, not a miss: the round
-        # connected. ensure_victim resummons the zombie for the next weapon.
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, None))
-        stop, detail, _ = weapons_sweep.sweep_weapon(
+    def test_sbw_finds_flat_spot(self):
+        # First candidate is flat (HP 20, level): no teleport needed.
+        rcon, bot, _ = self.make_pair(
+            victim_hp=(20.0, 20.0), dimension="minecraft:overworld"
+        )
+        found, detail = weapons_sweep.find_flat_spot(bot, rcon, "hitbot")
+        self.assertTrue(found)
+        self.assertEqual(len(detail["tried"]), 1)
+
+    def test_sbw_stays_out_of_range(self):
+        # The SBW leg never enters the range: no lane teleport, no A10a leg.
+        seen = []
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
+            dimension="minecraft:overworld",
+            seen=seen,
+        )
+        stop, _, _ = weapons_sweep.sweep_weapon(
             rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
         )
         self.assertIsNone(stop)
-        self.assertTrue(detail.get("fired"))
-        self.assertEqual(detail.get("victim_hp"), [20.0, None])
+        self.assertFalse(any("range" in cmd for cmd in seen))
+
+    def test_sbw_persistence_proof_blocks_deleted_mobs(self):
+        # A dimension that deletes foreign mobs aborts the SBW leg loudly.
+        old, weapons_sweep.SBW_PERSISTENCE_SLEEP = (
+            weapons_sweep.SBW_PERSISTENCE_SLEEP,
+            0,
+        )
+        try:
+            rcon, bot, _ = self.make_pair(victim_hp=(20.0, None))
+            ok, _ = weapons_sweep.verify_sbw_persistence(rcon, "hitbot")
+            self.assertFalse(ok)
+            rcon, bot, _ = self.make_pair(victim_hp=(20.0, 20.0, 20.0))
+            ok, _ = weapons_sweep.verify_sbw_persistence(rcon, "hitbot")
+            self.assertTrue(ok)
+        finally:
+            weapons_sweep.SBW_PERSISTENCE_SLEEP = old
 
     def test_resume_skips_only_passed_weapons(self):
         prev = [

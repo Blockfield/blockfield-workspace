@@ -5552,7 +5552,7 @@ class WeaponsSweep(unittest.TestCase):
         # The view must be leveled before a caret summon: it inherits the
         # player's pitched-down rotation and lands in the ground otherwise.
         level = next(c for c in seen if c.startswith("execute at") and " tp " in c)
-        self.assertIn("~ ~ ~ 0 0", level)
+        self.assertIn("~ ~ ~ ~ 0", level)
         self.assertLess(seen.index(level), seen.index(summon))
         # The NBT must be balanced: an extra closing brace (f-string `}}`
         # in a plain string) silently fails the summon, leaving no victim.

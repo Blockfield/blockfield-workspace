@@ -516,6 +516,30 @@ def aim_at_victim(bot, rcon, player):
     return True
 
 
+def return_to_spot(rcon, bot, player, spot, detail):
+    """Teleport back onto the verified flat spot before a victim summon.
+
+    The moving-fire phase walks the bot away every weapon; without this each
+    victim is summoned at drifted terrain (holes, ledges) and the aim misses.
+    Loud failure, never a silent miss.
+    """
+    if not spot:
+        return True
+    x, y, z = spot
+    try:
+        rcon.cmd(f"tp {player} {x} {y} {z} 0 0")
+    except (OSError, RuntimeError):
+        return False
+    time.sleep(0.5)
+    try:
+        pos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
+    except (ValueError, OSError, RuntimeError):
+        return False
+    ok = pos is not None and abs(pos[0] - x) < 3 and abs(pos[2] - z) < 3
+    detail["recentered"] = ok
+    return ok
+
+
 def sbw_aim_at_victim(bot, rcon, player):
     """Aim at the husk's chest; False when its position is unreadable."""
     pos = sbw_victim_pos(rcon, player)
@@ -734,7 +758,9 @@ def sweep_drop_pickup_die(
     return None, log_pos
 
 
-def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos, inv_ammo=""):
+def sweep_weapon(
+    rcon, bot, player, kind, weapon_id, log_path, log_pos, inv_ammo="", spot=None
+):
     detail = {"kind": kind}
     if kind == "tacz":
         ensure_in_range(bot, rcon, player)
@@ -785,6 +811,8 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos, inv_ammo
         # would bury the victim underground (probe5: [16,11] at y=-48).
         bot("look 0 0")
         time.sleep(0.5)
+        if not return_to_spot(rcon, bot, player, spot, detail):
+            return "victim-spot-unreachable", detail, log_pos
         clear_sbw_victims(rcon)
         time.sleep(0.5)
         ensure_sbw_victim(rcon, player)
@@ -981,18 +1009,22 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         if any(kind == "sbw" for kind, _ in inventory):
             # The whole SBW leg stands or falls on flat overworld ground that
             # keeps a summoned husk: find it once, prove 30 s persistence,
-            # then never move the bot again.
+            # then recenter onto it before every victim summon (the moving
+            # phase walks the bot away every weapon).
             ensure_overworld(bot, rcon, player)
             found, spot = find_flat_spot(bot, rcon, player)
             print(f"sbw spot: {json.dumps(spot)[:500]}", flush=True)
             if not found:
                 print("SBW ABORTED: no flat spot", flush=True)
                 return 1
+            sbw_spot = spot.get("spot")
             ok, persist = verify_sbw_persistence(rcon, player)
             print(f"sbw persistence: {json.dumps(persist)[:300]}", flush=True)
             if not ok:
                 print("SBW ABORTED: overworld does not keep the husk", flush=True)
                 return 1
+        else:
+            sbw_spot = None
         out = []
         log_pos = log_path.stat().st_size if log_path.exists() else 0
         crashed = None
@@ -1007,6 +1039,7 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
                     log_path,
                     log_pos,
                     inv_ammo.get(weapon_id, ""),
+                    sbw_spot,
                 )
             except (
                 OSError,

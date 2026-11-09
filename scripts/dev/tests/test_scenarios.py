@@ -5734,6 +5734,32 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(found)
         self.assertEqual(len(detail["tried"]), 1)
 
+    def test_sbw_recenters_before_victim(self):
+        # The moving phase walks the bot away every weapon: the victim leg
+        # teleports back onto the verified flat spot first, loudly on failure.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
+            dimension="minecraft:overworld",
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon,
+                bot,
+                "hitbot",
+                "sbw",
+                "superbwarfare:ak_12",
+                log_path,
+                0,
+                "",
+                [-18.5, 65.0, 2.5],
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("recentered"))
+
     def test_sbw_stays_out_of_range(self):
         # The SBW leg never enters the range: no lane teleport, no A10a leg.
         seen = []

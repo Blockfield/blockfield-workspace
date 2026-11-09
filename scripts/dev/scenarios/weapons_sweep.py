@@ -212,6 +212,11 @@ def ensure_victim(rcon, player):
     midnight clock from secure_victim_environment).
     """
     if victim_health(rcon, player) is None:
+        # Level the view first: the pre-fire phases leave the player looking
+        # down, and caret summon inherits that rotation, landing the zombie in
+        # the ground where it dies within a second (every unfired "victim_hp
+        # [20.0, None]" row). tp to the same spot keeps position, zeroes pitch.
+        rcon.cmd(f"execute at {player} run tp {player} ~ ~ ~ 0 0")
         rcon.cmd(
             f"execute at {player} run summon {VICTIM_TYPE} ^ ^ ^8"
             f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{VICTIM_TAG}"],'

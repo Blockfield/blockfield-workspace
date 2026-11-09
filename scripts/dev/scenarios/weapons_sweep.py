@@ -788,6 +788,11 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos, inv_ammo
         clear_sbw_victims(rcon)
         time.sleep(0.5)
         ensure_sbw_victim(rcon, player)
+        # Top up after the pre-fire drain: a low-cap mag (bocek: 1) would
+        # otherwise reach the victim leg dry and every row would read
+        # unfired. The victim verdict still decides.
+        sbw_wait_ammo(rcon, bot, player, detail)
+        detail["ammo_before_victim"] = sbw_ammo(rcon, player)
         ok, hp_ref = sbw_baseline(rcon, player, detail)
         if not ok:
             return "victim-died-unfired", detail, log_pos
@@ -801,6 +806,7 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos, inv_ammo
         else:
             hp_mid = None
         hp_after = sbw_victim_health(rcon, player)
+        detail["ammo_after_victim"] = sbw_ammo(rcon, player)
         detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
         # SBW guns expose no ammo counter: a wounded target confirms a shot.
         # A target that is gone after a stable baseline was killed by the

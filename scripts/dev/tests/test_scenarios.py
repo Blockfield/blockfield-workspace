@@ -5545,6 +5545,28 @@ class WeaponsSweep(unittest.TestCase):
             )
         self.assertEqual(stop, "victim-died-unfired")
 
+    def test_rcon_read_retries_transient(self):
+        calls = {"n": 0}
+
+        class Flaky:
+            def cmd(self, command):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise OSError("lag spike")
+                return "ok"
+
+        with patch.object(weapons_sweep, "READ_RETRY_SLEEP", 0):
+            self.assertEqual(weapons_sweep._rcon_read(Flaky(), "x"), "ok")
+        self.assertEqual(calls["n"], 3)
+
+    def test_rcon_read_gives_up(self):
+        class Dead:
+            def cmd(self, command):
+                raise OSError("gone")
+
+        with patch.object(weapons_sweep, "READ_RETRY_SLEEP", 0):
+            self.assertRaises(OSError, weapons_sweep._rcon_read, Dead(), "x")
+
     def test_require_target(self):
         rcon, _, _ = self.make_pair(victim_hp=(20.0,))
         self.assertTrue(weapons_sweep.require_target(rcon, "hitbot"))

@@ -51,6 +51,10 @@ VICTIM_LANE_YAW = 0.0
 # shot, matching the post-shot observation window below. An HP drop without a
 # shot must never count as fired evidence (server#365 sweep).
 UNFIRED_CONTROL_SLEEP = 2.2
+# RCON read retries: full-auto pre-fire and teleports lag the server and a
+# single read times out; a timeout is not a missing entity.
+READ_RETRIES = 3
+READ_RETRY_SLEEP = 0.5
 
 SKIP_ITEMS = (
     "ammo",
@@ -160,6 +164,18 @@ def alive(rcon, player):
         return False
 
 
+def _rcon_read(rcon, command):
+    """One RCON reply, retrying transient failures; a timeout is not a miss."""
+    last = None
+    for _ in range(max(1, READ_RETRIES)):
+        try:
+            return rcon.cmd(command)
+        except (OSError, RuntimeError) as error:
+            last = error
+            time.sleep(READ_RETRY_SLEEP)
+    raise last
+
+
 def health(rcon, player):
     try:
         return hud_checks.parse_health(rcon.cmd(f"data get entity {player} Health"))
@@ -170,8 +186,9 @@ def health(rcon, player):
 def victim_health(rcon, player):
     try:
         return hud_checks.parse_health(
-            rcon.cmd(
-                f"execute at {player} run data get entity {VICTIM_SELECTOR} Health"
+            _rcon_read(
+                rcon,
+                f"execute at {player} run data get entity {VICTIM_SELECTOR} Health",
             )
         )
     except (ValueError, OSError, RuntimeError):
@@ -181,7 +198,9 @@ def victim_health(rcon, player):
 def victim_pos(rcon, player):
     try:
         return hud_checks.parse_pos(
-            rcon.cmd(f"execute at {player} run data get entity {VICTIM_SELECTOR} Pos")
+            _rcon_read(
+                rcon, f"execute at {player} run data get entity {VICTIM_SELECTOR} Pos"
+            )
         )
     except (ValueError, OSError, RuntimeError):
         return None
@@ -233,10 +252,13 @@ def take_firing_position(rcon, player, detail):
     victim-lane-unreachable, never a silent miss) otherwise.
     """
     x, y, z = VICTIM_LANE_POS
-    rcon.cmd(f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+    try:
+        _rcon_read(rcon, f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+    except (OSError, RuntimeError):
+        return False
     detail["victim_lane"] = [x, y, z]
     try:
-        pos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
+        pos = hud_checks.parse_pos(_rcon_read(rcon, f"data get entity {player} Pos"))
     except (ValueError, OSError, RuntimeError):
         return False
     return pos is not None and abs(pos[0] - x) < 2 and abs(pos[2] - z) < 2

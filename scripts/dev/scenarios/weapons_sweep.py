@@ -13,7 +13,8 @@ RCON, and no new server-log exception may appear for that weapon.
 The victim is the nearest range husk target (NoAI, 20 HP, death cancelled by
 the range): summoned zombies never survive here, the range deletes foreign
 mobs about a second after summoning, so a summon-based leg can never show a
-real unfired control.
+real unfired control. SBW guns run outside the range instead: a daylight-proof
+husk is summoned ahead of the stationary bot with its own unfired control.
 
 Fail-before for server#365: an explosive round whose bullet hits a block used
 to kill the server (blockfield ProjectileExplosionMixin shadow miss).
@@ -57,6 +58,23 @@ UNFIRED_CONTROL_SLEEP = 2.2
 # single read times out; a timeout is not a missing entity.
 READ_RETRIES = 3
 READ_RETRY_SLEEP = 0.5
+# Overworld SBW victim: the range deletes foreign mobs ~1 s after summoning
+# and its lane teleport ejects the bot (server#365 c4 PARTIAL), so the SBW leg
+# runs outside the range. A husk (daylight-proof, unlike a zombie) pinned with
+# NoAI + PersistenceRequired, summoned 10 m ahead of the stationary bot.
+SBW_VICTIM_TYPE = "minecraft:husk"
+SBW_VICTIM_TAG = "sbw_sweep_victim"
+SBW_VICTIM_SELECTOR = (
+    f"@e[type={SBW_VICTIM_TYPE},tag={SBW_VICTIM_TAG},limit=1,sort=nearest]"
+)
+SBW_VICTIM_AHEAD = 10
+# Unfired-control window: the target's HP must be static over this long with no
+# shot, matching the post-shot observation window. An HP drop without a shot
+# must never count as fired evidence.
+SBW_CONTROL_SLEEP = 2.2
+# Run-level persistence proof: the overworld must keep a summoned husk alive
+# and still for this long before any SBW weapon fires.
+SBW_PERSISTENCE_SLEEP = 30
 
 SKIP_ITEMS = (
     "ammo",
@@ -267,16 +285,168 @@ def take_firing_position(rcon, player, detail):
     return pos is not None and abs(pos[0] - x) < 2 and abs(pos[2] - z) < 2
 
 
-def clear_victims(rcon):
+def clear_sbw_victims(rcon):
     try:
-        rcon.cmd(f"kill {VICTIM_SELECTOR}")
+        rcon.cmd(f"kill {SBW_VICTIM_SELECTOR}")
     except (OSError, RuntimeError):
         pass
+
+
+def sbw_victim_health(rcon, player):
+    try:
+        return hud_checks.parse_health(
+            rcon.cmd(
+                f"execute at {player} run data get entity {SBW_VICTIM_SELECTOR} Health"
+            )
+        )
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+def sbw_victim_pos(rcon, player):
+    try:
+        return hud_checks.parse_pos(
+            rcon.cmd(
+                f"execute at {player} run data get entity {SBW_VICTIM_SELECTOR} Pos"
+            )
+        )
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+def ensure_sbw_victim(rcon, player):
+    """One pinned husk ahead of the stationary bot so SBW rounds hit an entity.
+
+    Caret summon is facing-relative, so it lands ahead whatever the yaw is;
+    the shooter then aims with absolute `lookat` coordinates, never `look`.
+    Husk (not zombie) so daylight cannot kill the unfired control.
+    """
+    if sbw_victim_health(rcon, player) is None:
+        rcon.cmd(
+            f"execute at {player} run summon {SBW_VICTIM_TYPE} ^ ^ ^{SBW_VICTIM_AHEAD}"
+            f' {{PersistenceRequired:1b,NoAI:1b,Silent:1b,Tags:["{SBW_VICTIM_TAG}"]}}'
+        )
+        # A caret summon lands at the shooter's height: ahead may be lower
+        # ground, and the landing costs HP. Settle before any HP read so
+        # fall damage can never pollute the unfired control.
+        time.sleep(2.0)
+
+
+def sbw_baseline(rcon, player, detail):
+    """Unfired control: target HP must be static over the window with no shot.
+
+    Returns (stable, baseline): the passing control doubles as the pre-shot
+    reading for the fired comparison. A target that loses HP unfired fails
+    loudly via stable=False.
+    """
+    before = sbw_victim_health(rcon, player)
+    pos_before = sbw_victim_pos(rcon, player)
+    time.sleep(SBW_CONTROL_SLEEP)
+    baseline = sbw_victim_health(rcon, player)
+    pos_after = sbw_victim_pos(rcon, player)
+    detail["victim_control"] = [before, baseline]
+    detail["victim_control_pos"] = [pos_before, pos_after]
+    if before is None:
+        return True, baseline
+    return baseline is not None and baseline == before, baseline
+
+
+def find_flat_spot(bot, rcon, player, tries=5, step=25.0):
+    """One-time relocation to ground flat enough for a landing husk.
+
+    The bot then never moves again: every per-weapon victim is summoned onto
+    the same flat ground, so landing damage can never pollute an HP reading.
+    Returns (found, detail).
+    """
+    detail = {"tried": []}
+    try:
+        ppos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
+    except (ValueError, OSError, RuntimeError):
+        return False, detail
+    x0, y0, z0 = ppos
+    for i in range(max(1, tries)):
+        x = x0 + i * step
+        try:
+            rcon.cmd(f"tp {player} {x} {y0} {z0} 0 0")
+        except (OSError, RuntimeError):
+            detail["tried"].append([x, "tp-failed"])
+            continue
+        time.sleep(1.0)
+        if (health(rcon, player) or 0) < 20:
+            detail["tried"].append([x, "player-hurt"])
+            continue
+        clear_sbw_victims(rcon)
+        ensure_sbw_victim(rcon, player)
+        hp = sbw_victim_health(rcon, player)
+        vpos = sbw_victim_pos(rcon, player)
+        try:
+            ppos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
+        except (ValueError, OSError, RuntimeError):
+            ppos = None
+        flat = (
+            hp == 20.0
+            and vpos is not None
+            and ppos is not None
+            and abs(vpos[1] - ppos[1]) <= 1.5
+        )
+        detail["tried"].append([x, hp, vpos, flat])
+        if flat:
+            detail["spot"] = [x, y0, z0]
+            return True, detail
+    return False, detail
+
+
+def verify_sbw_persistence(rcon, player):
+    """Run-level proof that the overworld keeps a summoned husk (30 s).
+
+    Returns (ok, detail): ok=False (loud, no weapon fires) when the husk
+    vanishes or loses HP unfired, i.e. this dimension deletes foreign mobs
+    like the range does.
+    """
+    detail = {}
+    clear_sbw_victims(rcon)
+    time.sleep(0.5)
+    ensure_sbw_victim(rcon, player)
+    time.sleep(1.0)
+    before = sbw_victim_health(rcon, player)
+    pos_before = sbw_victim_pos(rcon, player)
+    if before is None:
+        return False, {"persist": [None, None], "persist_pos": [pos_before, None]}
+    time.sleep(SBW_PERSISTENCE_SLEEP)
+    after = sbw_victim_health(rcon, player)
+    pos_after = sbw_victim_pos(rcon, player)
+    detail["persist"] = [before, after]
+    detail["persist_pos"] = [pos_before, pos_after]
+    return after is not None and after == before, detail
+
+
+def ensure_overworld(bot, rcon, player):
+    """SBW leg runs outside the range: leave it after a TaCZ weapon."""
+    try:
+        state = bot("state")
+    except (OSError, RuntimeError):
+        return
+    if dimension(state).endswith("range"):
+        bot("bfaction leave")
+        time.sleep(1.5)
+        bot("closescreen")
+        time.sleep(0.5)
 
 
 def aim_at_victim(bot, rcon, player):
     """Aim at the victim's chest; False when its position is unreadable."""
     pos = victim_pos(rcon, player)
+    if pos is None:
+        return False
+    x, y, z = pos
+    bot(f"lookat {x} {y + 1.0} {z}")
+    time.sleep(0.6)
+    return True
+
+
+def sbw_aim_at_victim(bot, rcon, player):
+    """Aim at the husk's chest; False when its position is unreadable."""
+    pos = sbw_victim_pos(rcon, player)
     if pos is None:
         return False
     x, y, z = pos
@@ -439,7 +609,9 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail):
     return None, log_pos
 
 
-def sweep_drop_pickup_die(rcon, bot, player, item, log_path, log_pos, detail):
+def sweep_drop_pickup_die(
+    rcon, bot, player, item, log_path, log_pos, detail, kind="tacz"
+):
     bot("press key.keyboard.q")
     time.sleep(0.6)
     detail["dropped"] = items_count(rcon, player, item) == 0
@@ -465,7 +637,8 @@ def sweep_drop_pickup_die(rcon, bot, player, item, log_path, log_pos, detail):
             break
         time.sleep(0.5)
     detail["respawned"] = back
-    ensure_in_range(bot, rcon, player)
+    if kind == "tacz":
+        ensure_in_range(bot, rcon, player)
     if not alive(rcon, player):
         return "server-dead-after-respawn", log_pos
     return None, log_pos
@@ -473,7 +646,10 @@ def sweep_drop_pickup_die(rcon, bot, player, item, log_path, log_pos, detail):
 
 def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
     detail = {"kind": kind}
-    ensure_in_range(bot, rcon, player)
+    if kind == "tacz":
+        ensure_in_range(bot, rcon, player)
+    else:
+        ensure_overworld(bot, rcon, player)
     if kind == "tacz":
         stop, log_pos = sweep_tacz(
             rcon, bot, player, weapon_id, log_path, log_pos, detail
@@ -503,6 +679,47 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         time.sleep(1.2)
         if not alive(rcon, player):
             return "server-dead-after-hold", detail, log_pos
+        # Aimed victim shots while the bot is still on the flat spot: the
+        # moving-fire step below walks the bot away, so the victim leg runs
+        # before it, never after. Level the view first: the pre-fire look
+        # pitches down 55 deg and a caret summon inherits that pitch, which
+        # would bury the victim underground (probe5: [16,11] at y=-48).
+        bot("look 0 0")
+        time.sleep(0.5)
+        clear_sbw_victims(rcon)
+        time.sleep(0.5)
+        ensure_sbw_victim(rcon, player)
+        ok, hp_ref = sbw_baseline(rcon, player, detail)
+        if not ok:
+            return "victim-died-unfired", detail, log_pos
+        if sbw_aim_at_victim(bot, rcon, player):
+            bot("attack")
+            time.sleep(0.8)
+            hp_mid = sbw_victim_health(rcon, player)
+            bot("hold key.attack 20")
+            time.sleep(1.4)
+            bot("hold key.use 20")
+            time.sleep(1.2)
+        else:
+            hp_mid = None
+        hp_after = sbw_victim_health(rcon, player)
+        detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
+        # SBW guns expose no ammo counter: a wounded target confirms a shot.
+        # A target that is gone after a stable baseline was killed by the
+        # shot (the run-level persistence proof rules out mob deletion); a
+        # confirm re-read separates a kill from one failed read.
+        if hp_ref is not None and hp_mid is None and hp_after is None:
+            if sbw_victim_health(rcon, player) is None:
+                detail["victim_killed"] = True
+            else:
+                hp_after = sbw_victim_health(rcon, player)
+                detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
+        detail["fired"] = hp_ref is not None and (
+            any(h is not None and h < hp_ref for h in (hp_mid, hp_after))
+            or detail.get("victim_killed") is True
+        )
+        if not alive(rcon, player):
+            return "server-dead-after-victim", detail, log_pos
         bot("hold key.attack 20")
         time.sleep(1.4)
         bot("hold key.forward 20")
@@ -513,30 +730,6 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
         detail["moving_single"] = True
         if not alive(rcon, player):
             return "server-dead-after-moving", detail, log_pos
-        if not take_firing_position(rcon, player, detail):
-            return "victim-lane-unreachable", detail, log_pos
-        ok, hp_ref = stable_baseline(rcon, player, detail)
-        if not ok:
-            return "victim-died-unfired", detail, log_pos
-        if aim_at_victim(bot, rcon, player):
-            bot("attack")
-            time.sleep(0.8)
-            hp_mid = victim_health(rcon, player)
-            bot("hold key.attack 20")
-            time.sleep(1.4)
-        else:
-            hp_mid = None
-        hp_after = victim_health(rcon, player)
-        detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
-        # SBW guns expose no ammo counter: a wounded target confirms a shot.
-        # Range targets cancel death and restore HP 2 s later, so the mid-shot
-        # reading is the primary evidence; either depressed reading proves a
-        # hit. A missing target (None) is never evidence, only a failed leg.
-        detail["fired"] = hp_ref is not None and any(
-            h is not None and h < hp_ref for h in (hp_mid, hp_after)
-        )
-        if not alive(rcon, player):
-            return "server-dead-after-victim", detail, log_pos
         bot("slot 1")
         time.sleep(0.2)
         bot("slot 0")
@@ -545,7 +738,7 @@ def sweep_weapon(rcon, bot, player, kind, weapon_id, log_path, log_pos):
             return "server-dead-after-reselect", detail, log_pos
         item = weapon_id
     stop, log_pos = sweep_drop_pickup_die(
-        rcon, bot, player, item, log_path, log_pos, detail
+        rcon, bot, player, item, log_path, log_pos, detail, kind
     )
     lines, log_pos = new_log_lines(log_path, log_pos)
     if lines is None:
@@ -639,11 +832,12 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
     try:
         player = bot("state")["name"]
         assert re.fullmatch(r"[A-Za-z0-9_]{1,16}", player), player
-        clear_victims(rcon)
-        ensure_in_range(bot, rcon, player)
-        if not require_target(rcon, player):
-            print(f"no range target {VICTIM_SELECTOR}; aborting", flush=True)
-            return 1
+        clear_sbw_victims(rcon)
+        if args.kind in ("tacz", "all"):
+            ensure_in_range(bot, rcon, player)
+            if not require_target(rcon, player):
+                print(f"no range target {VICTIM_SELECTOR}; aborting", flush=True)
+                return 1
         wanted = set(args.weapons.split(",")) if args.weapons else None
         inventory = []
         if args.kind in ("tacz", "all"):
@@ -676,6 +870,21 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             skipped = [w for _, w in inventory if w in skip]
             inventory = [(k, w) for k, w in inventory if w not in skip]
             print(f"resuming: skipping {len(skipped)} passed weapons", flush=True)
+        if any(kind == "sbw" for kind, _ in inventory):
+            # The whole SBW leg stands or falls on flat overworld ground that
+            # keeps a summoned husk: find it once, prove 30 s persistence,
+            # then never move the bot again.
+            ensure_overworld(bot, rcon, player)
+            found, spot = find_flat_spot(bot, rcon, player)
+            print(f"sbw spot: {json.dumps(spot)[:500]}", flush=True)
+            if not found:
+                print("SBW ABORTED: no flat spot", flush=True)
+                return 1
+            ok, persist = verify_sbw_persistence(rcon, player)
+            print(f"sbw persistence: {json.dumps(persist)[:300]}", flush=True)
+            if not ok:
+                print("SBW ABORTED: overworld does not keep the husk", flush=True)
+                return 1
         out = []
         log_pos = log_path.stat().st_size if log_path.exists() else 0
         crashed = None
@@ -730,7 +939,7 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         return 1 if failed else 0
     finally:
         try:
-            clear_victims(rcon)
+            clear_sbw_victims(rcon)
             bot("bfaction leave")
         except (OSError, RuntimeError):
             pass

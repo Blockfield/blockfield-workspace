@@ -5345,7 +5345,7 @@ class HudChecks(unittest.TestCase):
 
 
 def _ammo_script(first, rest):
-    """sbw_ammo stub: `first` for the top-up/before reads, `rest` after.
+    """sbw_ammo stub: `first` for the top-up/settle reads, `rest` after.
 
     The victim leg polls the mag on its own clock, so a step list would be
     timing-fragile; a two-level script is not.
@@ -5354,7 +5354,7 @@ def _ammo_script(first, rest):
 
     def fake_ammo(rcon, player):
         seen["n"] += 1
-        return first if seen["n"] <= 3 else rest
+        return first if seen["n"] <= 4 else rest
 
     return fake_ammo
 
@@ -5713,6 +5713,15 @@ class WeaponsSweep(unittest.TestCase):
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
         self.assertTrue(detail.get("ammo_emptied"))
+
+    def test_sbw_settle_waits_for_full_mag(self):
+        # The top-up keeps filling after the first round lands; the
+        # pre-shot snapshot must wait for two agreeing reads.
+        reads = iter([15, 20, 25, 30, 30])
+        with patch.object(weapons_sweep, "sbw_ammo", lambda *a: next(reads)):
+            detail = {}
+            self.assertEqual(weapons_sweep.sbw_settle_ammo(None, "hitbot", detail), 30)
+            self.assertEqual(detail.get("settled_ammo"), 30)
 
     def test_sbw_mag_drain_confirms_shot(self):
         # Coordinator decision (server#365 c9): the magazine drain is the

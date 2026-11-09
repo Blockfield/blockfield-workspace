@@ -239,6 +239,26 @@ def sbw_wait_ammo(rcon, bot, player, detail):
     return (loaded or 0) > 0
 
 
+def sbw_settle_ammo(rcon, player, detail, timeout=6.0):
+    """Poll the mag until two consecutive reads agree (top-up complete).
+
+    sbw_wait_ammo returns on the first round in the mag while the top-up
+    keeps filling through the victim baseline; a pre-shot snapshot then
+    sits mid-fill and masks the dip. Returns the settled count or None.
+    """
+    last = sbw_ammo(rcon, player)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        current = sbw_ammo(rcon, player)
+        if current is not None and current == last:
+            detail["settled_ammo"] = current
+            return current
+        last = current
+    detail["settled_ammo"] = last
+    return last
+
+
 def alive(rcon, player):
     try:
         return player in (rcon.cmd("list") or "")
@@ -818,9 +838,11 @@ def sweep_weapon(
         ensure_sbw_victim(rcon, player)
         # Top up after the pre-fire drain: a low-cap mag (bocek: 1) would
         # otherwise reach the victim leg dry and every row would read
-        # unfired. The drain verdict still decides.
+        # unfired. The drain verdict still decides. Settle first: the
+        # top-up keeps filling after the first round lands, and a pre-shot
+        # snapshot mid-fill masks the dip.
         sbw_wait_ammo(rcon, bot, player, detail)
-        detail["ammo_before_victim"] = sbw_ammo(rcon, player)
+        detail["ammo_before_victim"] = sbw_settle_ammo(rcon, player, detail)
         ok, hp_ref = sbw_baseline(rcon, player, detail)
         if not ok:
             return "victim-died-unfired", detail, log_pos
@@ -847,7 +869,14 @@ def sweep_weapon(
             ammo_mid = None
             ammo_low = None
         hp_after = sbw_victim_health(rcon, player)
-        detail["ammo_after_victim"] = sbw_ammo(rcon, player)
+        before = detail.get("ammo_before_victim")
+        after = sbw_ammo(rcon, player)
+        if after is None and before is not None:
+            # An emptied mag reads no Ammo; a failed read reads the same.
+            # One confirm separates the two before calling it drained.
+            time.sleep(0.5)
+            after = sbw_ammo(rcon, player)
+        detail["ammo_after_victim"] = after
         detail["ammo_mid_victim"] = ammo_mid
         detail["ammo_low_victim"] = ammo_low
         detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
@@ -864,8 +893,6 @@ def sweep_weapon(
         detail["victim_hit"] = hp_ref is not None and any(
             h is not None and h < hp_ref for h in (hp_mid, hp_after)
         )
-        before = detail.get("ammo_before_victim")
-        after = detail.get("ammo_after_victim")
         seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
         drained = before is not None and any(a < before for a in seen)
         if not drained and before is not None and not seen:

@@ -5396,14 +5396,19 @@ class WeaponsSweep(unittest.TestCase):
         ammo=(300, 299),
         victim_hp=(),
         have_item=True,
+        shoot_result="SUCCESS",
+        dies_on_shoot=False,
     ):
         log_path = Path(tempfile.mkdtemp()) / "latest.log"
         log_path.write_text("".join(log_lines), encoding="utf-8")
         hp_calls = {"n": 0}
+        shot = {"done": False}
 
         class Rcon:
             def cmd(self, command):
                 if command == "list":
+                    if dies_on_shoot and shot["done"]:
+                        raise OSError("rcon closed: server gone")
                     return "players: hitbot"
                 if "sweep_victim" in command and "Health" in command:
                     hp_calls["n"] += 1
@@ -5437,10 +5442,48 @@ class WeaponsSweep(unittest.TestCase):
             if command == "tacz shoot":
                 if fail_shoot:
                     raise OSError("bot lost: server gone")
-                return {"result": "SUCCESS"}
+                shot["done"] = True
+                return {"result": shoot_result}
             return {"ok": True}
 
         return Rcon(), bot, log_path
+
+    def test_tacz_missing_client_gun_data_is_fail(self):
+        # Fail-before for server#365 c5: the server gives a gun id the stand
+        # client never loaded (elitex:ak47x class) - that row must FAIL, so a
+        # sweep can never report it as inconclusive and move on.
+        rcon, bot, log_path = self.make_pair(
+            ammo=(300, 300), shoot_result="ID_NOT_EXIST"
+        )
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:ak47x", log_path, 0
+        )
+        self.assertEqual(stop, "client-gun-data-missing")
+        self.assertTrue(detail.get("gave"))
+        self.assertFalse(detail.get("fired"))
+
+    def test_tacz_missing_client_gun_data_reports_server_crash_first(self):
+        # elitex:ak47x on an unfixed server: the client reports ID_NOT_EXIST
+        # and the server dies; the crash must win over the data verdict.
+        rcon, bot, log_path = self.make_pair(
+            ammo=(300, 300), shoot_result="ID_NOT_EXIST", dies_on_shoot=True
+        )
+        stop, _, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:ak47x", log_path, 0
+        )
+        self.assertEqual(stop, "server-dead-after-single")
+
+    def test_tacz_transient_unknown_fail_stays_inconclusive(self):
+        # UNKNOWN_FAIL is client data lag, not a data mismatch: still
+        # inconclusive when no round ever leaves the magazine.
+        rcon, bot, log_path = self.make_pair(
+            ammo=(300, 300), shoot_result="UNKNOWN_FAIL"
+        )
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon, bot, "hitbot", "tacz", "elitex:ak47x", log_path, 0
+        )
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertFalse(detail.get("fired"))
 
     def test_tacz_happy_path_fires_and_survives(self):
         rcon, bot, log_path = self.make_pair()

@@ -37,11 +37,13 @@ KIT_GUN = "tacz:modern_kinetic_gun"
 FIRE_MODES = ("SEMI", "BURST", "AUTO")
 LOG_WATCH = re.compile(r"ERROR|Exception|Ticking (entity|server)|field_9190|FATAL")
 VICTIM_TYPE = "minecraft:husk"
-VICTIM_TAG = "bf_range_target"
-# Nearest range husk (the A10a target from the spawn): the range deletes
-# foreign mobs about a second after summoning, so only its own targets work.
-# Plain tag (no per-target id: this server rejects colons in selectors).
-VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},tag={VICTIM_TAG},limit=1,sort=nearest]"
+VICTIM_NAME = "A10a"
+VICTIM_DIM = "blockfield_shared:firing_range"
+# Pinned range husk (NoAI, 20 HP, death cancelled, always-forceloaded chunk):
+# summoned zombies are deleted by the range within a second, per-id tags carry
+# colons this server rejects in selectors, and `execute at` answers
+# unreliably, so read the named target dimension-wide instead.
+VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},name={VICTIM_NAME},limit=1]"
 # Firing position for the victim leg: 8 m north of the A10a husk with a clear
 # lane. The spawn booths are glassed in, so shots from spawn never reach any
 # target. Teleported per weapon; the die-phase respawn returns the bot.
@@ -188,7 +190,7 @@ def victim_health(rcon, player):
         return hud_checks.parse_health(
             _rcon_read(
                 rcon,
-                f"execute at {player} run data get entity {VICTIM_SELECTOR} Health",
+                f"execute in {VICTIM_DIM} run data get entity {VICTIM_SELECTOR} Health",
             )
         )
     except (ValueError, OSError, RuntimeError):
@@ -199,7 +201,8 @@ def victim_pos(rcon, player):
     try:
         return hud_checks.parse_pos(
             _rcon_read(
-                rcon, f"execute at {player} run data get entity {VICTIM_SELECTOR} Pos"
+                rcon,
+                f"execute in {VICTIM_DIM} run data get entity {VICTIM_SELECTOR} Pos",
             )
         )
     except (ValueError, OSError, RuntimeError):

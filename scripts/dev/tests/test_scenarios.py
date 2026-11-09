@@ -5406,7 +5406,7 @@ class WeaponsSweep(unittest.TestCase):
             def cmd(self, command):
                 if command == "list":
                     return "players: hitbot"
-                if "sweep_victim" in command or "bf_range_target" in command:
+                if "sweep_victim" in command or "name=A10a" in command:
                     if "Health" in command:
                         hp_calls["n"] += 1
                         if victim_hp:
@@ -5596,10 +5596,10 @@ class WeaponsSweep(unittest.TestCase):
     def test_victim_is_the_range_husk_target(
         self,
     ):  # Summoned zombies are deleted by the range within a second, so the
-        # leg must use the range's own husk targets, never a summon.
+        # leg must use the range's own husk target, never a summon.
         self.assertEqual(
             weapons_sweep.VICTIM_SELECTOR,
-            "@e[type=minecraft:husk,tag=bf_range_target,limit=1,sort=nearest]",
+            "@e[type=minecraft:husk,name=A10a,limit=1]",
         )
 
     def test_resume_skips_only_passed_weapons(self):

@@ -61,13 +61,13 @@ READ_RETRY_SLEEP = 0.5
 # Overworld SBW victim: the range deletes foreign mobs ~1 s after summoning
 # and its lane teleport ejects the bot (server#365 c4 PARTIAL), so the SBW leg
 # runs outside the range. A husk (daylight-proof, unlike a zombie) pinned with
-# NoAI + PersistenceRequired, summoned 10 m ahead of the stationary bot.
+# NoAI + PersistenceRequired, summoned 4 m ahead of the stationary bot.
 SBW_VICTIM_TYPE = "minecraft:husk"
 SBW_VICTIM_TAG = "sbw_sweep_victim"
 SBW_VICTIM_SELECTOR = (
     f"@e[type={SBW_VICTIM_TYPE},tag={SBW_VICTIM_TAG},limit=1,sort=nearest]"
 )
-SBW_VICTIM_AHEAD = 10
+SBW_VICTIM_AHEAD = 4
 # Unfired-control window: the target's HP must be static over this long with no
 # shot, matching the post-shot observation window. An HP drop without a shot
 # must never count as fired evidence.
@@ -81,7 +81,7 @@ SBW_PERSISTENCE_SLEEP = 30
 SBW_CREATIVE_BOX = "superbwarfare:creative_ammo_box"
 # Reload wait: SBW fills the mag ~2 s after the R press; the sweep polls the
 # gun's Ammo NBT this long before firing anyway (a miss never aborts the leg,
-# the victim verdict still decides).
+# the drain verdict still decides).
 SBW_RELOAD_TIMEOUT = 8.0
 SBW_RELOAD_POLL = 1.0
 
@@ -227,7 +227,7 @@ def sbw_wait_ammo(rcon, bot, player, detail):
     """Reload through the raw input SBW listens to, then poll the mag.
 
     Never aborts the leg: a gun that stays unloaded still runs the fire and
-    victim steps, and the victim verdict decides. Returns True when loaded.
+    victim steps, and the drain verdict decides. Returns True when loaded.
     """
     bot("rawinput key r")
     deadline = time.monotonic() + SBW_RELOAD_TIMEOUT
@@ -818,7 +818,7 @@ def sweep_weapon(
         ensure_sbw_victim(rcon, player)
         # Top up after the pre-fire drain: a low-cap mag (bocek: 1) would
         # otherwise reach the victim leg dry and every row would read
-        # unfired. The victim verdict still decides.
+        # unfired. The drain verdict still decides.
         sbw_wait_ammo(rcon, bot, player, detail)
         detail["ammo_before_victim"] = sbw_ammo(rcon, player)
         ok, hp_ref = sbw_baseline(rcon, player, detail)
@@ -836,20 +836,22 @@ def sweep_weapon(
         hp_after = sbw_victim_health(rcon, player)
         detail["ammo_after_victim"] = sbw_ammo(rcon, player)
         detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
-        # SBW guns expose no ammo counter: a wounded target confirms a shot.
-        # A target that is gone after a stable baseline was killed by the
-        # shot (the run-level persistence proof rules out mob deletion); a
-        # confirm re-read separates a kill from one failed read.
+        # Coordinator decision (server#365 c9): the fired verdict is the
+        # server-side magazine drain with the server alive; the victim HP is
+        # secondary evidence, never the verdict. A kill re-read still
+        # separates a dead victim from one failed read for the report.
         if hp_ref is not None and hp_mid is None and hp_after is None:
             if sbw_victim_health(rcon, player) is None:
                 detail["victim_killed"] = True
             else:
                 hp_after = sbw_victim_health(rcon, player)
                 detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
-        detail["fired"] = hp_ref is not None and (
-            any(h is not None and h < hp_ref for h in (hp_mid, hp_after))
-            or detail.get("victim_killed") is True
+        detail["victim_hit"] = hp_ref is not None and any(
+            h is not None and h < hp_ref for h in (hp_mid, hp_after)
         )
+        before = detail.get("ammo_before_victim")
+        after = detail.get("ammo_after_victim")
+        detail["fired"] = before is not None and after is not None and after < before
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos
         bot("rawinput mouse_down 1")

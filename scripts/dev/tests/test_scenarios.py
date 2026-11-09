@@ -5657,7 +5657,31 @@ class WeaponsSweep(unittest.TestCase):
             "@e[type=minecraft:husk,name=A10a,limit=1]",
         )
 
-    def test_sbw_victim_hp_drop_confirms_shot(self):
+    def test_sbw_hp_drop_without_drain_is_inconclusive(self):
+        # Coordinator decision (server#365 c9): the fired verdict is the
+        # server-side magazine drain with the server alive; a victim HP drop
+        # with no drain is secondary evidence, never a PASS.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 30]),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertFalse(detail.get("fired"))
+        self.assertTrue(detail.get("victim_hit"))
+        self.assertEqual(weapons_sweep.SBW_VICTIM_AHEAD, 4)
+
+    def test_sbw_mag_drain_confirms_shot(self):
+        # Coordinator decision (server#365 c9): the magazine drain is the
+        # fired verdict; the victim HP drop is recorded as secondary.
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, 10.0, 10.0),
             gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
@@ -5665,18 +5689,24 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
+        self.assertEqual(
+            [detail.get("ammo_before_victim"), detail.get("ammo_after_victim")],
+            [30, 25],
+        )
+        self.assertTrue(detail.get("victim_hit"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 10.0, 10.0])
         self.assertEqual(detail.get("reloaded_ammo"), 30)
 
-    def test_victim_killed_counts_as_fired(self):
-        # A husk gone after a stable unfired baseline was killed by the shot
-        # (the run-level persistence proof rules out mob deletion).
+    def test_victim_killed_without_drain_is_inconclusive(self):
+        # A dead victim with no magazine drain is secondary evidence only:
+        # the row is inconclusive, never a PASS.
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, None, None),
             gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
@@ -5684,12 +5714,14 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 30]),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
-        self.assertIsNone(stop)
-        self.assertTrue(detail.get("fired"))
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertFalse(detail.get("fired"))
+        self.assertTrue(detail.get("victim_killed"))
         self.assertEqual(detail.get("victim_hp"), [20.0, None, None])
 
     def test_sbw_fires_through_rawinput(self):
@@ -5704,6 +5736,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
         ):
             stop, _, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
@@ -5745,6 +5778,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon,
@@ -5772,6 +5806,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
         ):
             stop, _, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0

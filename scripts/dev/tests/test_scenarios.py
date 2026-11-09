@@ -5344,6 +5344,21 @@ class HudChecks(unittest.TestCase):
         self.assertRaises(ValueError, hud_checks.magenta_fraction_png, gray)
 
 
+def _ammo_script(first, rest):
+    """sbw_ammo stub: `first` for the top-up/before reads, `rest` after.
+
+    The victim leg polls the mag on its own clock, so a step list would be
+    timing-fragile; a two-level script is not.
+    """
+    seen = {"n": 0}
+
+    def fake_ammo(rcon, player):
+        seen["n"] += 1
+        return first if seen["n"] <= 3 else rest
+
+    return fake_ammo
+
+
 class WeaponsSweep(unittest.TestCase):
     def make_jar(self, directory, name, entries):
         import zipfile
@@ -5669,7 +5684,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 30]),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 30)),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
@@ -5678,6 +5693,26 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
         self.assertTrue(detail.get("victim_hit"))
         self.assertEqual(weapons_sweep.SBW_VICTIM_AHEAD, 4)
+
+    def test_sbw_emptied_mag_counts_as_drained(self):
+        # Fail-before: a 1-cap gun (bocek) fires its round and the mag reads
+        # empty the rest of the leg; endpoints alone see no drain.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 1}}",
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(1, None)),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:bocek", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertTrue(detail.get("ammo_emptied"))
 
     def test_sbw_mag_drain_confirms_shot(self):
         # Coordinator decision (server#365 c9): the magazine drain is the
@@ -5689,7 +5724,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 25)),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
@@ -5700,6 +5735,8 @@ class WeaponsSweep(unittest.TestCase):
             [detail.get("ammo_before_victim"), detail.get("ammo_after_victim")],
             [30, 25],
         )
+        self.assertEqual(detail.get("ammo_mid_victim"), 25)
+        self.assertEqual(detail.get("ammo_low_victim"), 25)
         self.assertTrue(detail.get("victim_hit"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 10.0, 10.0])
         self.assertEqual(detail.get("reloaded_ammo"), 30)
@@ -5714,7 +5751,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 30]),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 30)),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
@@ -5736,7 +5773,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 25)),
         ):
             stop, _, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
@@ -5778,7 +5815,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 25)),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon,
@@ -5806,7 +5843,7 @@ class WeaponsSweep(unittest.TestCase):
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
             patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", side_effect=[30, 30, 30, 25]),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 25)),
         ):
             stop, _, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0

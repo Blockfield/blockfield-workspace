@@ -828,13 +828,28 @@ def sweep_weapon(
             bot("rawinput click 1")
             time.sleep(0.8)
             hp_mid = sbw_victim_health(rcon, player)
+            ammo_mid = sbw_ammo(rcon, player)
             bot("rawinput mouse_down 1")
-            time.sleep(1.4)
+            # The mag refills mid-leg (top-up still filling, auto-reload):
+            # endpoints alone miss a dip, so track the lowest reading seen
+            # while the trigger is held. Firing only removes, reload only
+            # adds, so a dip below the pre-shot mag proves the shot.
+            ammo_low = ammo_mid
+            deadline = time.monotonic() + 1.4
+            while time.monotonic() < deadline:
+                time.sleep(0.3)
+                low = sbw_ammo(rcon, player)
+                if low is not None and (ammo_low is None or low < ammo_low):
+                    ammo_low = low
             bot("rawinput mouse_up 1")
         else:
             hp_mid = None
+            ammo_mid = None
+            ammo_low = None
         hp_after = sbw_victim_health(rcon, player)
         detail["ammo_after_victim"] = sbw_ammo(rcon, player)
+        detail["ammo_mid_victim"] = ammo_mid
+        detail["ammo_low_victim"] = ammo_low
         detail["victim_hp"] = [hp_ref, hp_mid, hp_after]
         # Coordinator decision (server#365 c9): the fired verdict is the
         # server-side magazine drain with the server alive; the victim HP is
@@ -851,7 +866,16 @@ def sweep_weapon(
         )
         before = detail.get("ammo_before_victim")
         after = detail.get("ammo_after_victim")
-        detail["fired"] = before is not None and after is not None and after < before
+        seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
+        drained = before is not None and any(a < before for a in seen)
+        if not drained and before is not None and not seen:
+            # A loaded mag went unreadable for the whole leg (fired to
+            # empty): confirm once, then count it drained. The server-alive
+            # checks around the leg rule out a dead RCON.
+            if sbw_ammo(rcon, player) is None:
+                detail["ammo_emptied"] = True
+                drained = True
+        detail["fired"] = drained
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos
         bot("rawinput mouse_down 1")

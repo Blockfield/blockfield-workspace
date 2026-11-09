@@ -195,9 +195,12 @@ def victim_baseline(rcon, player, detail):
     so the shot path still reports inconclusive-no-shot, never PASS.
     """
     before = victim_health(rcon, player)
+    pos_before = victim_pos(rcon, player)
     time.sleep(UNFIRED_CONTROL_SLEEP)
     baseline = victim_health(rcon, player)
+    pos_after = victim_pos(rcon, player)
     detail["victim_control"] = [before, baseline]
+    detail["victim_control_pos"] = [pos_before, pos_after]
     if before is None:
         return True, baseline
     return baseline is not None and baseline == before, baseline

@@ -206,7 +206,24 @@ def victim_baseline(rcon, player, detail):
     return baseline is not None and baseline == before, baseline
 
 
-def ensure_victim(rcon, player):
+def player_state(rcon, player):
+    """(pos, rot) of the player; (None, None) when unreadable."""
+    try:
+        pos = hud_checks.parse_pos(rcon.cmd(f"data get entity {player} Pos"))
+    except (ValueError, OSError, RuntimeError):
+        pos = None
+    try:
+        match = re.search(
+            r"\[(-?\d+(?:\.\d+)?)f, (-?\d+(?:\.\d+)?)f\]",
+            rcon.cmd(f"data get entity {player} Rotation") or "",
+        )
+        rot = (float(match.group(1)), float(match.group(2))) if match else None
+    except (OSError, RuntimeError):
+        rot = None
+    return pos, rot
+
+
+def ensure_victim(rcon, player, detail=None):
     """One NoAI zombie ahead of the player so bullets hit an entity, not blocks.
 
     Caret summon is facing-relative, so it lands ahead whatever the yaw is;
@@ -215,6 +232,8 @@ def ensure_victim(rcon, player):
     midnight clock from secure_victim_environment).
     """
     if victim_health(rcon, player) is None:
+        if detail is not None:
+            detail["summon_ref"] = player_state(rcon, player)
         # Level the pitch first: the pre-fire phases leave the player looking
         # down, and caret summon inherits that rotation, landing the zombie in
         # the ground where it dies within a second (every unfired "victim_hp
@@ -232,14 +251,14 @@ def ensure_stable_victim(rcon, player, detail):
     on its own: a delayed blast from the pre-fire-into-blocks phases can catch
     the summon spot. The passing control is the shot baseline, so a re-summon
     cannot bias the fired evidence. Returns (ok, baseline)."""
-    ensure_victim(rcon, player)
+    ensure_victim(rcon, player, detail)
     stable, baseline = victim_baseline(rcon, player, detail)
     if stable:
         return True, baseline
     detail["victim_resummoned"] = True
     clear_victims(rcon)
     time.sleep(UNFIRED_CONTROL_SLEEP)
-    ensure_victim(rcon, player)
+    ensure_victim(rcon, player, detail)
     stable, baseline = victim_baseline(rcon, player, detail)
     return stable, baseline
 

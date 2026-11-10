@@ -236,6 +236,24 @@ def sbw_ammo(rcon, player, weapon=None):
     return int(match.group(1)) if match else None
 
 
+def sbw_emptied_mag(rcon, player, weapon):
+    """True when slot 0 still holds `weapon` with gun data but no Ammo count.
+
+    Stand shape (server#365: one-round SBW gun m_79, fired once): the item
+    keeps its GunData (UUID, CloseStrike) while the Ammo number is gone. A
+    failed RCON read carries no item id at all, so it can never count here.
+    """
+    try:
+        reply = rcon.cmd(f"data get entity {player} Inventory[{{Slot:0b}}]") or ""
+    except (OSError, RuntimeError):
+        return False
+    return (
+        f'id: "{weapon}"' in reply
+        and "GunData:" in reply
+        and re.search(r"Ammo:\s*\d+", reply) is None
+    )
+
+
 def sbw_wait_ammo(rcon, bot, player, detail, weapon=None):
     """Reload through the raw input SBW listens to, then poll the mag.
 
@@ -917,7 +935,7 @@ def sweep_weapon(
         after = sbw_ammo(rcon, player, weapon_id)
         if after is None and before is not None:
             # An emptied mag reads no Ammo; a failed read reads the same.
-            # One confirm separates the two before calling it drained.
+            # One confirm, then the explicit emptied-mag shape decides.
             time.sleep(0.5)
             after = sbw_ammo(rcon, player, weapon_id)
         detail["ammo_after_victim"] = after
@@ -940,12 +958,17 @@ def sweep_weapon(
         seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
         drained = before is not None and any(a < before for a in seen)
         if not drained and before is not None and not seen:
-            # No leg read produced a number for this gun: failed reads, a
-            # replaced item, or gun data without Ammo. None of that is a
-            # drain. How SBW stores an emptied mag is not established from
-            # the game yet, so nothing is inferred from a missing number.
-            detail["ammo_unreadable"] = True
-            return "ammo-unreadable", detail, log_pos
+            # No leg read produced a number for this gun. A mag the leg
+            # emptied keeps the item with its GunData but drops the Ammo
+            # number (server#365 m_79 stand shape); failed reads and a
+            # swapped item never match that shape, so nothing is inferred
+            # from a missing number alone.
+            if sbw_emptied_mag(rcon, player, weapon_id):
+                detail["ammo_emptied"] = True
+                drained = True
+            else:
+                detail["ammo_unreadable"] = True
+                return "ammo-unreadable", detail, log_pos
         detail["fired"] = drained
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos

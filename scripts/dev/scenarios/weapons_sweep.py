@@ -218,8 +218,11 @@ def ammo_count(rcon, player, slot=0):
     return int(match.group(1)) if match else None
 
 
-def sbw_ammo_read(rcon, player):
+def sbw_ammo_read(rcon, player, weapon=None):
     """(read_ok, ammo): strict mag read for the fired verdict.
+
+    With `weapon`, slot 0 must still hold that item: another item without
+    an Ammo field is not an emptied gun, it is an unknown mag.
 
     read_ok False means the RCON read itself failed (timeout, parse) — the
     mag state is unknown. (True, None) means the read succeeded but the item
@@ -229,6 +232,8 @@ def sbw_ammo_read(rcon, player):
     try:
         reply = rcon.cmd(f"data get entity {player} Inventory[{{Slot:0b}}]") or ""
     except (OSError, RuntimeError):
+        return False, None
+    if weapon and f'id: "{weapon}"' not in reply:
         return False, None
     match = re.search(r"Ammo:\s*(\d+)", reply)
     if match:
@@ -953,7 +958,7 @@ def sweep_weapon(
             # fired dry (a successful read with no Ammo NBT) or the reads
             # failed. Only a positively read empty mag counts as drained;
             # unreadable is unknown, never evidence, so it fails loudly.
-            read_ok, confirmed = sbw_ammo_read(rcon, player)
+            read_ok, confirmed = sbw_ammo_read(rcon, player, weapon_id)
             if read_ok and confirmed is None:
                 detail["ammo_emptied"] = True
                 drained = True

@@ -5816,7 +5816,10 @@ class WeaponsSweep(unittest.TestCase):
         # data but no Ammo), which is what separates it from failed reads.
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
-            gun_nbt="hitbot has the following entity data: {GunData: {}}",
+            gun_nbt=(
+                'hitbot has the following entity data: {id: "superbwarfare:bocek", '
+                "GunData: {}}"
+            ),
             dimension="minecraft:overworld",
         )
         with (
@@ -5837,7 +5840,10 @@ class WeaponsSweep(unittest.TestCase):
         # read is evidence only for what it read: no drain, no PASS.
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
-            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
+            gun_nbt=(
+                'hitbot has the following entity data: {id: "superbwarfare:ak_12", '
+                "GunData: {Ammo: 30}}"
+            ),
             dimension="minecraft:overworld",
         )
         with (
@@ -5851,6 +5857,26 @@ class WeaponsSweep(unittest.TestCase):
         self.assertEqual(stop, "inconclusive-no-shot")
         self.assertFalse(detail.get("fired"))
         self.assertEqual(detail.get("ammo_confirmed"), 30)
+
+    def test_sbw_other_item_in_slot_is_not_an_emptied_mag(self):
+        # Review finding r4521698653: slot 0 holds something else without an
+        # Ammo field (the gun was replaced after the baseline). That is not
+        # an emptied gun: the mag is unknown, so the row fails loudly.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt='hitbot has the following entity data: {id: "minecraft:stick"}',
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(1, None)),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:bocek", log_path, 0
+            )
+        self.assertEqual(stop, "ammo-unreadable")
+        self.assertFalse(detail.get("fired"))
 
     def test_sbw_settle_waits_for_full_mag(self):
         # The top-up keeps filling after the first round lands; the

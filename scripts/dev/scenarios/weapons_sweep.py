@@ -218,39 +218,25 @@ def ammo_count(rcon, player, slot=0):
     return int(match.group(1)) if match else None
 
 
-def sbw_ammo_read(rcon, player, weapon=None):
-    """(read_ok, ammo): strict mag read for the fired verdict.
+def sbw_ammo(rcon, player, weapon=None):
+    """Rounds in the mag of the SBW gun in slot 0 (GunData.Ammo), else None.
 
-    With `weapon`, slot 0 must still hold that item: another item without
-    an Ammo field is not an emptied gun, it is an unknown mag.
-
-    read_ok False means the RCON read itself failed (timeout, parse) — the
-    mag state is unknown. (True, None) means the read succeeded but the item
-    carries no Ammo NBT: the mag genuinely reads empty. An unreadable value
-    is unknown, never evidence (server#365 sweep).
+    None means "no number was read": a failed read, another item in the slot,
+    or gun data without a numeric Ammo. It is unknown, never evidence. With
+    `weapon`, a number counts only while slot 0 still holds that item, so a
+    different gun's count can never be read as this gun's drain.
     """
     try:
         reply = rcon.cmd(f"data get entity {player} Inventory[{{Slot:0b}}]") or ""
     except (OSError, RuntimeError):
-        return False, None
+        return None
     if weapon and f'id: "{weapon}"' not in reply:
-        return False, None
+        return None
     match = re.search(r"Ammo:\s*(\d+)", reply)
-    if match:
-        return True, int(match.group(1))
-    # A `data get` success names the entity data; anything else (a bare
-    # "ok", an error line) is a failed read, not an empty mag.
-    if "entity data:" in reply:
-        return True, None
-    return False, None
+    return int(match.group(1)) if match else None
 
 
-def sbw_ammo(rcon, player):
-    """Rounds in the held SBW gun's mag (GunData.Ammo); None when unloaded."""
-    return sbw_ammo_read(rcon, player)[1]
-
-
-def sbw_wait_ammo(rcon, bot, player, detail):
+def sbw_wait_ammo(rcon, bot, player, detail, weapon=None):
     """Reload through the raw input SBW listens to, then poll the mag.
 
     Never aborts the leg: a gun that stays unloaded still runs the fire and
@@ -258,26 +244,26 @@ def sbw_wait_ammo(rcon, bot, player, detail):
     """
     bot("rawinput key r")
     deadline = time.monotonic() + SBW_RELOAD_TIMEOUT
-    loaded = sbw_ammo(rcon, player)
+    loaded = sbw_ammo(rcon, player, weapon)
     while (loaded or 0) <= 0 and time.monotonic() < deadline:
         time.sleep(SBW_RELOAD_POLL)
-        loaded = sbw_ammo(rcon, player)
+        loaded = sbw_ammo(rcon, player, weapon)
     detail["reloaded_ammo"] = loaded
     return (loaded or 0) > 0
 
 
-def sbw_settle_ammo(rcon, player, detail, timeout=6.0):
+def sbw_settle_ammo(rcon, player, detail, weapon=None, timeout=6.0):
     """Poll the mag until two consecutive reads agree (top-up complete).
 
     sbw_wait_ammo returns on the first round in the mag while the top-up
     keeps filling through the victim baseline; a pre-shot snapshot then
     sits mid-fill and masks the dip. Returns the settled count or None.
     """
-    last = sbw_ammo(rcon, player)
+    last = sbw_ammo(rcon, player, weapon)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(0.5)
-        current = sbw_ammo(rcon, player)
+        current = sbw_ammo(rcon, player, weapon)
         if current is not None and current == last:
             detail["settled_ammo"] = current
             return current
@@ -864,7 +850,7 @@ def sweep_weapon(
         wait_drawn(bot)
         detail["selected"] = bot("state").get("held") == weapon_id
         bot("look 0 55")
-        sbw_wait_ammo(rcon, bot, player, detail)
+        sbw_wait_ammo(rcon, bot, player, detail, weapon_id)
         # Fire through raw input too: SBW polls its own FIRE mapping (LMB) per
         # tick and the press edge as a raw MouseButton event; testbot's
         # KeyMapping-only holds never reach either.
@@ -894,8 +880,8 @@ def sweep_weapon(
         # unfired. The drain verdict still decides. Settle first: the
         # top-up keeps filling after the first round lands, and a pre-shot
         # snapshot mid-fill masks the dip.
-        sbw_wait_ammo(rcon, bot, player, detail)
-        detail["ammo_before_victim"] = sbw_settle_ammo(rcon, player, detail)
+        sbw_wait_ammo(rcon, bot, player, detail, weapon_id)
+        detail["ammo_before_victim"] = sbw_settle_ammo(rcon, player, detail, weapon_id)
         ok, hp_ref = sbw_baseline(rcon, player, detail)
         if not ok:
             stop = (
@@ -908,7 +894,7 @@ def sweep_weapon(
             bot("rawinput click 1")
             time.sleep(0.8)
             hp_mid = sbw_victim_health(rcon, player)
-            ammo_mid = sbw_ammo(rcon, player)
+            ammo_mid = sbw_ammo(rcon, player, weapon_id)
             bot("rawinput mouse_down 1")
             # The mag refills mid-leg (top-up still filling, auto-reload):
             # endpoints alone miss a dip, so track the lowest reading seen
@@ -918,7 +904,7 @@ def sweep_weapon(
             deadline = time.monotonic() + 1.4
             while time.monotonic() < deadline:
                 time.sleep(0.3)
-                low = sbw_ammo(rcon, player)
+                low = sbw_ammo(rcon, player, weapon_id)
                 if low is not None and (ammo_low is None or low < ammo_low):
                     ammo_low = low
             bot("rawinput mouse_up 1")
@@ -928,12 +914,12 @@ def sweep_weapon(
             ammo_low = None
         hp_after = sbw_victim_health(rcon, player)
         before = detail.get("ammo_before_victim")
-        after = sbw_ammo(rcon, player)
+        after = sbw_ammo(rcon, player, weapon_id)
         if after is None and before is not None:
             # An emptied mag reads no Ammo; a failed read reads the same.
             # One confirm separates the two before calling it drained.
             time.sleep(0.5)
-            after = sbw_ammo(rcon, player)
+            after = sbw_ammo(rcon, player, weapon_id)
         detail["ammo_after_victim"] = after
         detail["ammo_mid_victim"] = ammo_mid
         detail["ammo_low_victim"] = ammo_low
@@ -954,21 +940,12 @@ def sweep_weapon(
         seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
         drained = before is not None and any(a < before for a in seen)
         if not drained and before is not None and not seen:
-            # Every leg read came back with no Ammo number: either the mag
-            # fired dry (a successful read with no Ammo NBT) or the reads
-            # failed. Only a positively read empty mag counts as drained;
-            # unreadable is unknown, never evidence, so it fails loudly.
-            read_ok, confirmed = sbw_ammo_read(rcon, player, weapon_id)
-            if read_ok and confirmed is None:
-                detail["ammo_emptied"] = True
-                drained = True
-            elif read_ok:
-                # The confirmation read a number: judge it like any leg read.
-                detail["ammo_confirmed"] = confirmed
-                drained = confirmed < before
-            else:
-                detail["ammo_unreadable"] = True
-                return "ammo-unreadable", detail, log_pos
+            # No leg read produced a number for this gun: failed reads, a
+            # replaced item, or gun data without Ammo. None of that is a
+            # drain. How SBW stores an emptied mag is not established from
+            # the game yet, so nothing is inferred from a missing number.
+            detail["ammo_unreadable"] = True
+            return "ammo-unreadable", detail, log_pos
         detail["fired"] = drained
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos

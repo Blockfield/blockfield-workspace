@@ -5352,7 +5352,7 @@ def _ammo_script(first, rest):
     """
     seen = {"n": 0}
 
-    def fake_ammo(rcon, player):
+    def fake_ammo(rcon, player, weapon=None):
         seen["n"] += 1
         return first if seen["n"] <= 4 else rest
 
@@ -5809,11 +5809,10 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
         self.assertTrue(detail.get("ammo_unreadable"))
 
-    def test_sbw_emptied_mag_counts_as_drained(self):
-        # Fail-before: a 1-cap gun (bocek) fires its round and the mag reads
-        # empty the rest of the leg; endpoints alone see no drain. The empty
-        # mag is a successful read with no Ammo NBT (gun_nbt carries entity
-        # data but no Ammo), which is what separates it from failed reads.
+    def test_sbw_missing_ammo_number_is_never_a_drain(self):
+        # Review r4521765293: the right gun with gun data but no numeric
+        # Ammo used to count as "emptied". How SBW stores an emptied mag is
+        # not established from the game, so a missing number proves nothing.
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
             gun_nbt=(
@@ -5830,53 +5829,52 @@ class WeaponsSweep(unittest.TestCase):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:bocek", log_path, 0
             )
-        self.assertIsNone(stop)
-        self.assertTrue(detail.get("fired"))
-        self.assertTrue(detail.get("ammo_emptied"))
-
-    def test_sbw_full_mag_confirmation_is_not_drained(self):
-        # Review finding r4521674831: every leg read fails, then the
-        # confirmation succeeds and still reads the full mag. A successful
-        # read is evidence only for what it read: no drain, no PASS.
-        rcon, bot, log_path = self.make_pair(
-            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
-            gun_nbt=(
-                'hitbot has the following entity data: {id: "superbwarfare:ak_12", '
-                "GunData: {Ammo: 30}}"
-            ),
-            dimension="minecraft:overworld",
-        )
-        with (
-            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
-            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, None)),
-        ):
-            stop, detail, _ = weapons_sweep.sweep_weapon(
-                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
-            )
-        self.assertEqual(stop, "inconclusive-no-shot")
-        self.assertFalse(detail.get("fired"))
-        self.assertEqual(detail.get("ammo_confirmed"), 30)
-
-    def test_sbw_other_item_in_slot_is_not_an_emptied_mag(self):
-        # Review finding r4521698653: slot 0 holds something else without an
-        # Ammo field (the gun was replaced after the baseline). That is not
-        # an emptied gun: the mag is unknown, so the row fails loudly.
-        rcon, bot, log_path = self.make_pair(
-            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
-            gun_nbt='hitbot has the following entity data: {id: "minecraft:stick"}',
-            dimension="minecraft:overworld",
-        )
-        with (
-            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
-            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
-            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(1, None)),
-        ):
-            stop, detail, _ = weapons_sweep.sweep_weapon(
-                rcon, bot, "hitbot", "sbw", "superbwarfare:bocek", log_path, 0
-            )
         self.assertEqual(stop, "ammo-unreadable")
         self.assertFalse(detail.get("fired"))
+
+    def test_sbw_ammo_counts_only_the_weapon_under_test(self):
+        # Review r4521765286: every read used for the verdict checks the
+        # item id, so another gun's lower count is never this gun's drain.
+        class Reply:
+            def __init__(self, text):
+                self.text = text
+
+            def cmd(self, command):
+                return self.text
+
+        head = "hitbot has the following entity data: "
+        own = Reply(head + '{id: "superbwarfare:ak_12", GunData: {Ammo: 30}}')
+        other = Reply(head + '{id: "superbwarfare:glock_17", GunData: {Ammo: 3}}')
+        stick = Reply(head + '{id: "minecraft:stick"}')
+        ammo = weapons_sweep.sbw_ammo
+        self.assertEqual(ammo(own, "hitbot", "superbwarfare:ak_12"), 30)
+        self.assertIsNone(ammo(other, "hitbot", "superbwarfare:ak_12"))
+        self.assertIsNone(ammo(stick, "hitbot", "superbwarfare:ak_12"))
+        self.assertIsNone(ammo(Reply("ok"), "hitbot", "superbwarfare:ak_12"))
+
+    def test_sbw_verdict_reads_pass_the_weapon_id(self):
+        # The leg must hand the weapon id to every ammo read.
+        seen = []
+
+        def spy(rcon, player, weapon=None):
+            seen.append(weapon)
+            return 30
+
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt="ok",
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", spy),
+        ):
+            weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {"superbwarfare:ak_12"})
 
     def test_sbw_settle_waits_for_full_mag(self):
         # The top-up keeps filling after the first round lands; the

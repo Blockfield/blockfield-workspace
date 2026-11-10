@@ -472,9 +472,8 @@ def contract_checks(side, meta, prod):
                 )
             )
         else:
-            res.append(
-                ("FAIL", f"{gate}: auto-deploy would stop; repin client_candidate")
-            )
+            # Same contract: server deploys and rolls back alone, no client_tag.
+            res.append(("WARN", f"{gate}: same contract, deploys without client_tag"))
     return res
 
 

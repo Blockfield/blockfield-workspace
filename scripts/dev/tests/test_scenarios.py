@@ -5564,9 +5564,13 @@ class WeaponsSweep(unittest.TestCase):
 
     def test_tacz_transient_unknown_fail_stays_inconclusive(self):
         # UNKNOWN_FAIL is client data lag, not a data mismatch: still
-        # inconclusive when no round ever leaves the magazine.
+        # inconclusive when no round ever leaves the magazine. The stable
+        # victim keeps the test on the UNKNOWN_FAIL question: without a
+        # readable control the row now stops at control-unreadable.
         rcon, bot, log_path = self.make_pair(
-            ammo=(300, 300), shoot_result="UNKNOWN_FAIL"
+            ammo=(300, 300),
+            shoot_result="UNKNOWN_FAIL",
+            victim_hp=(20.0, 20.0, 20.0, 20.0),
         )
         stop, detail, _ = weapons_sweep.sweep_weapon(
             rcon, bot, "hitbot", "tacz", "elitex:ak47x", log_path, 0
@@ -5575,16 +5579,73 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
 
     def test_tacz_happy_path_fires_and_survives(self):
-        rcon, bot, log_path = self.make_pair()
+        # A PASS needs a positively read unfired control AND a positively
+        # read change, so the happy path sets up a stable range target.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0),
+        )
         stop, detail, _ = weapons_sweep.sweep_weapon(
             rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
         )
         self.assertIsNone(stop)
         self.assertTrue(detail.get("fired"))
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
 
-    def test_sbw_unconfirmed_shot_is_inconclusive(self):
+    def test_tacz_missing_control_never_passes(self):
+        # Same rule on the TaCZ leg: no readable unfired control, no PASS,
+        # even when the client reports a successful shot. The pre-fire drain
+        # stays in the detail as evidence, but the row cannot pass on it.
+        rcon, bot, log_path = self.make_pair()
+        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertEqual(stop, "control-unreadable")
+        self.assertTrue(detail.get("victim_control_unreadable"))
+
+    def test_minigun_early_failure_restores_survival(self):
+        # Review finding r4520378381: the creative leg must restore survival
+        # on every exit, including an early give failure.
+        rseen = []
+        rcon, bot, log_path = self.make_pair(have_item=False, rseen=rseen)
+        stop, detail, _ = weapons_sweep.sweep_weapon(
+            rcon,
+            bot,
+            "hitbot",
+            "tacz",
+            "tacz:minigun",
+            log_path,
+            0,
+            inv_ammo="tacz:308",
+        )
+        self.assertEqual(stop, "server-give-failed")
+        self.assertTrue(
+            any(cmd.startswith("gamemode survival") for cmd in rseen),
+            rseen,
+        )
+
+    def test_respawn_failure_is_fail(self):
+        # Audit: the kill landed but the bot never came back with HP must
+        # fail loudly, never fall through into a passing row.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0),
+        )
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "RESPAWN_TIMEOUT", 0),
+            patch.object(weapons_sweep, "health", lambda *a: 0.0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertEqual(stop, "respawn-failed")
+        self.assertFalse(detail.get("respawned"))
+
+    def test_sbw_unloaded_mag_missing_victim_is_control_unreadable(self):
         # Fail-before for the review finding: the old code hard-coded
         # fired=True, so this returned None (PASS) with no shot evidence.
+        # The mag never loads here and the victim is missing, so the
+        # unreadable control fails loudly instead of passing.
         rcon, bot, log_path = self.make_pair()
         with (
             patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
@@ -5593,7 +5654,28 @@ class WeaponsSweep(unittest.TestCase):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
             )
-        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertEqual(stop, "control-unreadable")
+        self.assertFalse(detail.get("fired"))
+
+    def test_sbw_missing_control_never_passes(self):
+        # Review finding r4520378377: the old baseline returned stable with
+        # a None victim, so a later magazine drain passed the row with no
+        # unfired control. A PASS needs a positively read control AND a
+        # positively read change.
+        rcon, bot, log_path = self.make_pair(
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "SBW_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, 25)),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "control-unreadable")
         self.assertFalse(detail.get("fired"))
 
     def test_tacz_midshot_drop_confirms_hit(self):
@@ -5705,12 +5787,36 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(detail.get("victim_hit"))
         self.assertEqual(weapons_sweep.SBW_VICTIM_AHEAD, 4)
 
-    def test_sbw_emptied_mag_counts_as_drained(self):
-        # Fail-before: a 1-cap gun (bocek) fires its round and the mag reads
-        # empty the rest of the leg; endpoints alone see no drain.
+    def test_sbw_unreadable_mag_is_not_drained(self):
+        # Review finding r4520378372: `data get` timing out through the whole
+        # victim leg while `list` still works must not read as "fired to
+        # empty". Every leg read fails (gun_nbt has no entity data), so the
+        # row fails loudly instead of passing.
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
-            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 1}}",
+            gun_nbt="ok",
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(1, None)),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:bocek", log_path, 0
+            )
+        self.assertEqual(stop, "ammo-unreadable")
+        self.assertFalse(detail.get("fired"))
+        self.assertTrue(detail.get("ammo_unreadable"))
+
+    def test_sbw_emptied_mag_counts_as_drained(self):
+        # Fail-before: a 1-cap gun (bocek) fires its round and the mag reads
+        # empty the rest of the leg; endpoints alone see no drain. The empty
+        # mag is a successful read with no Ammo NBT (gun_nbt carries entity
+        # data but no Ammo), which is what separates it from failed reads.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt="hitbot has the following entity data: {GunData: {}}",
             dimension="minecraft:overworld",
         )
         with (
@@ -5909,7 +6015,7 @@ class WeaponsSweep(unittest.TestCase):
 
     def test_unreadable_log_is_fail(self):
         log_path = Path(tempfile.mkdtemp()) / "missing" / "latest.log"
-        rcon, bot, _ = self.make_pair()
+        rcon, bot, _ = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 20.0))
         stop, detail, _ = weapons_sweep.sweep_weapon(
             rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
         )
@@ -5934,7 +6040,8 @@ class WeaponsSweep(unittest.TestCase):
 
     def test_server_log_exception_stops_the_weapon(self):
         rcon, bot, log_path = self.make_pair(
-            log_lines=["[Server thread/ERROR]: java.lang.RuntimeException: boom\n"]
+            log_lines=["[Server thread/ERROR]: java.lang.RuntimeException: boom\n"],
+            victim_hp=(20.0, 20.0, 20.0, 20.0),
         )
         stop, detail, _ = weapons_sweep.sweep_weapon(
             rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0

@@ -86,6 +86,9 @@ SBW_CREATIVE_BOX = "superbwarfare:creative_ammo_box"
 # the drain verdict still decides).
 SBW_RELOAD_TIMEOUT = 8.0
 SBW_RELOAD_POLL = 1.0
+# Die-phase respawn wait: the bot must come back with HP after the kill, or
+# the row fails loudly instead of falling through into a passing row.
+RESPAWN_TIMEOUT = 25.0
 
 SKIP_ITEMS = (
     "ammo",
@@ -215,14 +218,31 @@ def ammo_count(rcon, player, slot=0):
     return int(match.group(1)) if match else None
 
 
-def sbw_ammo(rcon, player):
-    """Rounds in the held SBW gun's mag (GunData.Ammo); None when unloaded."""
+def sbw_ammo_read(rcon, player):
+    """(read_ok, ammo): strict mag read for the fired verdict.
+
+    read_ok False means the RCON read itself failed (timeout, parse) — the
+    mag state is unknown. (True, None) means the read succeeded but the item
+    carries no Ammo NBT: the mag genuinely reads empty. An unreadable value
+    is unknown, never evidence (server#365 sweep).
+    """
     try:
         reply = rcon.cmd(f"data get entity {player} Inventory[{{Slot:0b}}]") or ""
     except (OSError, RuntimeError):
-        return None
+        return False, None
     match = re.search(r"Ammo:\s*(\d+)", reply)
-    return int(match.group(1)) if match else None
+    if match:
+        return True, int(match.group(1))
+    # A `data get` success names the entity data; anything else (a bare
+    # "ok", an error line) is a failed read, not an empty mag.
+    if "entity data:" in reply:
+        return True, None
+    return False, None
+
+
+def sbw_ammo(rcon, player):
+    """Rounds in the held SBW gun's mag (GunData.Ammo); None when unloaded."""
+    return sbw_ammo_read(rcon, player)[1]
 
 
 def sbw_wait_ammo(rcon, bot, player, detail):
@@ -325,9 +345,8 @@ def victim_baseline(rcon, player, detail):
     """Unfired control: target HP must be static over the window with no shot.
 
     Returns (stable, baseline): baseline is the freshest pre-shot reading for
-    the fired comparison. A target that loses HP unfired fails loudly via
-    stable=False; a missing target stays stable with a None baseline so the
-    shot path still reports inconclusive-no-shot, never PASS.
+    the fired comparison. A target that loses HP unfired, or any unreadable
+    control read, fails loudly via stable=False, never PASS.
     """
     before = victim_health(rcon, player)
     pos_before = victim_pos(rcon, player)
@@ -336,9 +355,13 @@ def victim_baseline(rcon, player, detail):
     pos_after = victim_pos(rcon, player)
     detail["victim_control"] = [before, baseline]
     detail["victim_control_pos"] = [pos_before, pos_after]
-    if before is None:
-        return True, baseline
-    return baseline is not None and baseline == before, baseline
+    # An unreadable value is unknown, never evidence: the control needs two
+    # valid, equal readings. A missing/unreadable target fails loudly via
+    # stable=False (the caller maps it to control-unreadable), never PASS.
+    detail["victim_control_unreadable"] = before is None or baseline is None
+    if before is None or baseline is None:
+        return False, baseline
+    return baseline == before, baseline
 
 
 def stable_baseline(rcon, player, detail):
@@ -430,8 +453,8 @@ def sbw_baseline(rcon, player, detail):
     """Unfired control: target HP must be static over the window with no shot.
 
     Returns (stable, baseline): the passing control doubles as the pre-shot
-    reading for the fired comparison. A target that loses HP unfired fails
-    loudly via stable=False.
+    reading for the fired comparison. A target that loses HP unfired, or any
+    unreadable control read, fails loudly via stable=False, never PASS.
     """
     before = sbw_victim_health(rcon, player)
     pos_before = sbw_victim_pos(rcon, player)
@@ -440,9 +463,13 @@ def sbw_baseline(rcon, player, detail):
     pos_after = sbw_victim_pos(rcon, player)
     detail["victim_control"] = [before, baseline]
     detail["victim_control_pos"] = [pos_before, pos_after]
-    if before is None:
-        return True, baseline
-    return baseline is not None and baseline == before, baseline
+    # An unreadable value is unknown, never evidence: the control needs two
+    # valid, equal readings. A missing/unreadable target fails loudly via
+    # stable=False (the caller maps it to control-unreadable), never PASS.
+    detail["victim_control_unreadable"] = before is None or baseline is None
+    if before is None or baseline is None:
+        return False, baseline
+    return baseline == before, baseline
 
 
 def find_flat_spot(bot, rcon, player, tries=5, step=25.0):
@@ -638,6 +665,17 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail, inv_ammo=""
         # is still given (right id + AmmoId NBT) so the rig count is honest.
         rcon.cmd(f"gamemode creative {player}")
         detail["creative_for_minigun"] = True
+    try:
+        return _sweep_tacz(
+            rcon, bot, player, gun_id, log_path, log_pos, detail, ammo_id
+        )
+    finally:
+        # One restore for every exit: an early return must never leak
+        # creative mode into the next weapon's checks.
+        restore_survival(rcon, player, detail)
+
+
+def _sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail, ammo_id):
     rcon.cmd(hud_checks.gun_replace_command(player, gun_id, ammo=300))
     time.sleep(0.4)
     if ammo_id:
@@ -664,7 +702,6 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail, inv_ammo=""
         # The server hands out a gun id the stand client never loaded
         # (elitex:ak47x class): the sweep missed that weapon, it did not pass.
         # Checked after liveness so a crash is reported as the crash.
-        restore_survival(rcon, player, detail)
         return "client-gun-data-missing", log_pos
     bot("hold key.attack 20")
     time.sleep(1.4)
@@ -722,7 +759,12 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail, inv_ammo=""
         return "victim-lane-unreachable", log_pos
     ok, hp_ref = stable_baseline(rcon, player, detail)
     if not ok:
-        return "victim-died-unfired", log_pos
+        stop = (
+            "control-unreadable"
+            if detail.get("victim_control_unreadable")
+            else "victim-died-unfired"
+        )
+        return stop, log_pos
     if aim_at_victim(bot, rcon, player):
         tacz_shoot(bot, attempts=2)
         time.sleep(0.8)
@@ -741,7 +783,6 @@ def sweep_tacz(rcon, bot, player, gun_id, log_path, log_pos, detail, inv_ammo=""
     detail["reselected"] = bot("state").get("held") == KIT_GUN
     if not alive(rcon, player):
         return "server-dead-after-reselect", log_pos
-    restore_survival(rcon, player, detail)
     return None, log_pos
 
 
@@ -763,7 +804,7 @@ def sweep_drop_pickup_die(
     detail["picked_up"] = picked
     bot("slot 0")
     rcon.cmd(f"kill {player}")
-    deadline = time.monotonic() + 25
+    deadline = time.monotonic() + RESPAWN_TIMEOUT
     back = False
     while time.monotonic() < deadline:
         if not alive(rcon, player):
@@ -773,6 +814,11 @@ def sweep_drop_pickup_die(
             break
         time.sleep(0.5)
     detail["respawned"] = back
+    if not back:
+        # The kill landed but the bot never came back with HP (dead or the
+        # health reads failed): loud, never a silent fall-through into a
+        # passing row.
+        return "respawn-failed", log_pos
     if kind == "tacz":
         ensure_in_range(bot, rcon, player)
     if not alive(rcon, player):
@@ -847,7 +893,12 @@ def sweep_weapon(
         detail["ammo_before_victim"] = sbw_settle_ammo(rcon, player, detail)
         ok, hp_ref = sbw_baseline(rcon, player, detail)
         if not ok:
-            return "victim-died-unfired", detail, log_pos
+            stop = (
+                "control-unreadable"
+                if detail.get("victim_control_unreadable")
+                else "victim-died-unfired"
+            )
+            return stop, detail, log_pos
         if sbw_aim_at_victim(bot, rcon, player):
             bot("rawinput click 1")
             time.sleep(0.8)
@@ -898,12 +949,17 @@ def sweep_weapon(
         seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
         drained = before is not None and any(a < before for a in seen)
         if not drained and before is not None and not seen:
-            # A loaded mag went unreadable for the whole leg (fired to
-            # empty): confirm once, then count it drained. The server-alive
-            # checks around the leg rule out a dead RCON.
-            if sbw_ammo(rcon, player) is None:
+            # Every leg read came back with no Ammo number: either the mag
+            # fired dry (a successful read with no Ammo NBT) or the reads
+            # failed. Only a positively read empty mag counts as drained;
+            # unreadable is unknown, never evidence, so it fails loudly.
+            read_ok, _ = sbw_ammo_read(rcon, player)
+            if read_ok:
                 detail["ammo_emptied"] = True
                 drained = True
+            else:
+                detail["ammo_unreadable"] = True
+                return "ammo-unreadable", detail, log_pos
         detail["fired"] = drained
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos

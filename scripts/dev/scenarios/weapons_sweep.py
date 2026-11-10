@@ -44,6 +44,8 @@ VICTIM_DIM = "blockfield_shared:firing_range"
 # summoned zombies are deleted by the range within a second, per-id tags carry
 # colons this server rejects in selectors, and `execute at` answers
 # unreliably, so read the named target dimension-wide instead.
+# Shared fixture: the sweep only ever reads it (`data get`), never kills it;
+# per-run kills are scoped to SBW_VICTIM_SELECTOR, the sweep's own summon tag.
 VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},name={VICTIM_NAME},limit=1]"
 # Firing position for the victim leg: 8 m north of the A10a husk with a clear
 # lane. The spawn booths are glassed in, so shots from spawn never reach any

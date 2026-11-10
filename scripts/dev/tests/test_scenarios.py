@@ -5672,6 +5672,17 @@ class WeaponsSweep(unittest.TestCase):
             "@e[type=minecraft:husk,name=A10a,limit=1]",
         )
 
+    def test_sweep_never_kills_pinned_range_target(self):
+        # PR #72 review: clear_victims() used to `kill` the shared A10a husk
+        # at run start/end. Only the per-run SBW victims (the sweep's own
+        # summon tag) may be killed; the pinned fixture must never be.
+        seen = []
+        rcon, _, _ = self.make_pair(rseen=seen)
+        weapons_sweep.clear_sbw_victims(rcon)
+        kills = [c for c in seen if c.startswith("kill ")]
+        self.assertEqual(kills, [f"kill {weapons_sweep.SBW_VICTIM_SELECTOR}"])
+        self.assertNotIn("A10a", " ".join(kills))
+
     def test_sbw_hp_drop_without_drain_is_inconclusive(self):
         # Coordinator decision (server#365 c9): the fired verdict is the
         # server-side magazine drain with the server alive; a victim HP drop

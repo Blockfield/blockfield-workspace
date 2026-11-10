@@ -5831,6 +5831,27 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(detail.get("fired"))
         self.assertTrue(detail.get("ammo_emptied"))
 
+    def test_sbw_full_mag_confirmation_is_not_drained(self):
+        # Review finding r4521674831: every leg read fails, then the
+        # confirmation succeeds and still reads the full mag. A successful
+        # read is evidence only for what it read: no drain, no PASS.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt="hitbot has the following entity data: {GunData: {Ammo: 30}}",
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(30, None)),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:ak_12", log_path, 0
+            )
+        self.assertEqual(stop, "inconclusive-no-shot")
+        self.assertFalse(detail.get("fired"))
+        self.assertEqual(detail.get("ammo_confirmed"), 30)
+
     def test_sbw_settle_waits_for_full_mag(self):
         # The top-up keeps filling after the first round lands; the
         # pre-shot snapshot must wait for two agreeing reads.

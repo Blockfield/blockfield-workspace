@@ -953,10 +953,14 @@ def sweep_weapon(
             # fired dry (a successful read with no Ammo NBT) or the reads
             # failed. Only a positively read empty mag counts as drained;
             # unreadable is unknown, never evidence, so it fails loudly.
-            read_ok, _ = sbw_ammo_read(rcon, player)
-            if read_ok:
+            read_ok, confirmed = sbw_ammo_read(rcon, player)
+            if read_ok and confirmed is None:
                 detail["ammo_emptied"] = True
                 drained = True
+            elif read_ok:
+                # The confirmation read a number: judge it like any leg read.
+                detail["ammo_confirmed"] = confirmed
+                drained = confirmed < before
             else:
                 detail["ammo_unreadable"] = True
                 return "ammo-unreadable", detail, log_pos

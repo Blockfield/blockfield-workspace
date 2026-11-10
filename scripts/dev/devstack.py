@@ -2476,6 +2476,57 @@ def play(args):
     raise SystemExit(code)
 
 
+def stand(args):
+    """One-command ready stand: setup, server start, then headless client(s).
+
+    Same work as `just setup` + `just server start` + `just play`, in one
+    process: no agent roundtrips between phases, one log stream per phase.
+    The server jar still comes from `--server-jar` (Boat/CI `:server:remapJar`
+    output) or the localmods/ build, exactly like `just setup`.
+    """
+    clients = int(getattr(args, "clients", 1) or 1)
+    if getattr(args, "game_dir", None) and clients != 1:
+        die(
+            "--game-dir fits one client: drop --clients 2 or prepare each game dir via setup+play"
+        )
+    setup(args)
+    # setup/server/play share one namespace shape: fill the server/client
+    # start defaults their own parsers use, keep the setup flags as passed.
+    base = dict(
+        modpack=getattr(args, "modpack", None),
+        client_modpack=getattr(args, "client_modpack", None),
+        game_dir=getattr(args, "game_dir", None),
+        force=getattr(args, "force", False),
+        testbot=getattr(args, "testbot", None),
+        no_testbot=getattr(args, "no_testbot", False),
+        server_jar=getattr(args, "server_jar", None),
+        xms="1G",
+        xmx="3G",
+        jvm_opt=[],
+        debug=False,
+        debug_port=5005,
+        gate=False,
+        via_proxy=False,
+        leak_paranoid=False,
+        pose_debug=False,
+        released_pack=False,
+        probe=False,
+        stop=False,
+        server=f"127.0.0.1:{PORT}",
+        name=getattr(args, "name", None),
+        mod_repo=None,
+        resolution="1280x720",
+        headless=False,
+        gpu=None,
+        testbot_port=None,
+        mod=False,
+    )
+    server_start(argparse.Namespace(**base))
+    for number in range(1, clients + 1):
+        play(argparse.Namespace(**base, client=number))
+    ok(f"stand ready: server 127.0.0.1:{PORT} + {clients} client(s)")
+
+
 def wait_client_ready(pid, log=None, number=1):
     log = HOME / "client.out" if log is None else log
     deadline = time.monotonic() + 360
@@ -2722,6 +2773,7 @@ COMMANDS = {
     "mod": "install a locally built blockfield-server jar",
     "watch": "rebuild + hotswap localmods/ sources into the running stack (server|client)",
     "server": "run the local server (start|stop|rcon|log)",
+    "stand": "prepare and boot a ready stand in one command (setup, server, client)",
     "proxy": "stand proxy: pinned Velocity + raknetify hop (start|stop|restart|log)",
     "client": "prepare the workspace client directory",
     "play": "launch the client directly, no launcher, random offline name",
@@ -2747,7 +2799,7 @@ def print_help():
     print("usage: just <recipe> [options]")
     groups = {
         "Prepare": ("setup", "build-mods", "build-testbot", "client", "mod"),
-        "Run": ("server", "proxy", "play", "watch"),
+        "Run": ("stand", "server", "proxy", "play", "watch"),
         "Inspect": ("status", "bot", "scenario"),
         "Quality": ("check", "lint", "format-check", "format", "test", "compile-check"),
         "Tools": ("dev", "mcp", "assets", "rclone"),
@@ -3069,6 +3121,45 @@ def main():
     )
     p.add_argument("--debug-port", default=None, help="JDWP port for --debug")
     p.set_defaults(func=play)
+
+    p = sub.add_parser(
+        "stand",
+        help="prepare and boot a ready stand in one command (setup, server start, client)",
+    )
+    p.add_argument("--modpack", help="server pack checkout (default server/)")
+    p.add_argument("--client-modpack", help="client pack checkout (default client/)")
+    p.add_argument("--game-dir", help="client game directory (default .dev/play)")
+    stand_testbot = p.add_mutually_exclusive_group()
+    stand_testbot.add_argument(
+        "--testbot",
+        nargs="?",
+        const=True,
+        metavar="JAR",
+        help="build and install testbot, or install the given JAR",
+    )
+    stand_testbot.add_argument(
+        "--no-testbot", action="store_true", help="run the client without testbot"
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="refresh runtime files, preserving worlds and client user data",
+    )
+    p.add_argument(
+        "--server-jar",
+        default=None,
+        metavar="JAR",
+        help="Boat/CI-built blockfield-server jar (:server:remapJar output) for the stand",
+    )
+    p.add_argument(
+        "--clients",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="how many stack clients to boot (2 shares this stack's server)",
+    )
+    p.add_argument("--name", default=None, help="offline nickname (default PlayerNNNN)")
+    p.set_defaults(func=stand)
 
     p = sub.add_parser(
         "watch", help="rebuild + hotswap localmods/ sources into the running stack"

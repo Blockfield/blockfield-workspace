@@ -5857,6 +5857,41 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
         self.assertTrue(detail.get("ammo_unreadable"))
 
+    def test_sbw_emptied_after_loaded_mid_counts_as_drained(self):
+        # Bot-review finding on PR #75: the emptied shape must also count
+        # when an earlier victim-leg read still caught the loaded count
+        # (mid sees the round, the shot lands after). Fail-before: the old
+        # guard required no numeric leg read at all, so this stayed
+        # inconclusive-no-shot.
+        emptied = (
+            "hitbot has the following entity data: {count: 1, Slot: 0b, "
+            'components: {"minecraft:custom_data": '
+            "{GunData: {UUID: [I; 1, 2, 3, 4], CloseStrike: 1b}}}, "
+            'id: "superbwarfare:m_79"}'
+        )
+        seen = {"n": 0}
+
+        def mag(rcon, player, weapon=None):
+            seen["n"] += 1
+            return 1 if seen["n"] <= 7 else None
+
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt=emptied,
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", mag),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:m_79", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertTrue(detail.get("ammo_emptied"))
+
     def test_sbw_ammo_counts_only_the_weapon_under_test(self):
         # Review r4521765286: every read used for the verdict checks the
         # item id, so another gun's lower count is never this gun's drain.

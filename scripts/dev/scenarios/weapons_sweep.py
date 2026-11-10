@@ -957,16 +957,16 @@ def sweep_weapon(
         )
         seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
         drained = before is not None and any(a < before for a in seen)
-        if not drained and before is not None and not seen:
-            # No leg read produced a number for this gun. A mag the leg
-            # emptied keeps the item with its GunData but drops the Ammo
-            # number (server#365 m_79 stand shape); failed reads and a
-            # swapped item never match that shape, so nothing is inferred
-            # from a missing number alone.
+        if not drained and before is not None and after is None:
+            # A mag the leg emptied keeps the item with its GunData but drops
+            # the Ammo number (server#365 m_79 stand shape) — also when an
+            # earlier leg read still caught the loaded count. Failed reads
+            # and a swapped item never match that shape, so nothing is
+            # inferred from a missing number alone.
             if sbw_emptied_mag(rcon, player, weapon_id):
                 detail["ammo_emptied"] = True
                 drained = True
-            else:
+            elif not seen:
                 detail["ammo_unreadable"] = True
                 return "ammo-unreadable", detail, log_pos
         detail["fired"] = drained

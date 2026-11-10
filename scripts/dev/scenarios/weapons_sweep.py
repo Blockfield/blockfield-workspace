@@ -1019,6 +1019,22 @@ def merged_verdict(prev_rows, new_rows):
     return rows, passed, inconclusive, len(rows) - passed - inconclusive
 
 
+def passed_without_hit(rows):
+    """Passed weapons whose shots never lowered the victim's health.
+
+    A PASS means the weapon was given, fired (magazine drain) and the server
+    stayed alive: the crash criterion of server#365. It does not mean the
+    entity-hit path ran; launchers and lock-on weapons cannot be made to hit
+    the husk. These rows are named in every summary so a PASS is never read
+    as hit coverage.
+    """
+    return sorted(
+        row["weapon"]
+        for row in rows
+        if row.get("stop") is None and not row.get("victim_hit")
+    )
+
+
 def record_result(results_path, row):
     with open(results_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
@@ -1035,6 +1051,7 @@ def write_progress(results_path, rows):
             "# weapons-sweep progress\n\n"
             f"- swept: {len(rows)}, pass {passed},"
             f" inconclusive {inconclusive}, fail {failed}\n"
+            f"- passed without a victim hit: {len(passed_without_hit(rows))}\n"
             f"- last: {last.get('weapon')} {last.get('stop')}\n"
             "- resume: rerun with the same --results path\n",
             encoding="utf-8",
@@ -1172,6 +1189,12 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         print(
             f"merged verdict over {len(merged)} weapons:"
             f" pass {passed}, inconclusive {inconclusive}, fail {failed}",
+            flush=True,
+        )
+        unhit = passed_without_hit(merged)
+        print(
+            f"hit path exercised on {passed - len(unhit)} of {passed} passed"
+            f" weapons; passed without a victim hit: {', '.join(unhit) or 'none'}",
             flush=True,
         )
         if crashed:

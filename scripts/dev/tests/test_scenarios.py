@@ -5876,6 +5876,17 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(seen)
         self.assertEqual(set(seen), {"superbwarfare:ak_12"})
 
+    def test_passed_without_hit_names_unexercised_hit_rows(self):
+        # Review r4521831498: a PASS proves give+fire with the server alive,
+        # not that a shot reached the victim; those rows are named.
+        rows = [
+            {"weapon": "b", "stop": None, "victim_hit": False},
+            {"weapon": "a", "stop": None},
+            {"weapon": "c", "stop": None, "victim_hit": True},
+            {"weapon": "d", "stop": "inconclusive-no-shot", "victim_hit": False},
+        ]
+        self.assertEqual(weapons_sweep.passed_without_hit(rows), ["a", "b"])
+
     def test_sbw_settle_waits_for_full_mag(self):
         # The top-up keeps filling after the first round lands; the
         # pre-shot snapshot must wait for two agreeing reads.

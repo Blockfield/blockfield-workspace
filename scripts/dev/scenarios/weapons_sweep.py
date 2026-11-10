@@ -374,10 +374,15 @@ def victim_baseline(rcon, player, detail):
 
 
 def stable_baseline(rcon, player, detail):
-    """Unfired control with one retry: the range restores a killed target 2 s
-    after cancelling its death, so a control landing in that window retries
-    once. The passing control is the shot baseline, so a retry cannot bias the
-    fired evidence. Returns (ok, baseline)."""
+    """Unfired control with settle + one retry: the settle waits out the
+    post-open target flicker first, and the range restores a killed target
+    2 s after cancelling its death, so a control landing in that window
+    retries once. The passing control is the shot baseline, so a retry
+    cannot bias the fired evidence. Returns (ok, baseline)."""
+    if wait_for_target(rcon, player, detail) is None:
+        # Never stabilised: unknown, never evidence (control-unreadable).
+        detail["victim_control_unreadable"] = True
+        return False, None
     stable, baseline = victim_baseline(rcon, player, detail)
     if stable:
         return True, baseline
@@ -390,6 +395,37 @@ def stable_baseline(rcon, player, detail):
 def require_target(rcon, player):
     """True when the range's husk target exists for the victim leg."""
     return victim_health(rcon, player) is not None
+
+
+# Range-target settle (server#365 stand365): right after the range opens the
+# A10a husk flickers present -> absent (open/occupancy/chunk load) while the
+# sweep reads it immediately, so TaCZ rows stopped control-unreadable with 0
+# crashes. The unfired control waits bounded for two equal consecutive HP
+# reads first; a `data get entity` hit already implies the chunk is loaded
+# (selectors never match entities in unloaded chunks).
+TARGET_SETTLE_TIMEOUT = 20.0
+TARGET_SETTLE_POLL = 0.5
+
+
+def wait_for_target(rcon, player, detail):
+    """Block until the range husk reads the same HP twice in a row.
+
+    Returns the settled HP, or None when the target never stabilises within
+    TARGET_SETTLE_TIMEOUT: the caller keeps control-unreadable (loud), never
+    a pass.
+    """
+    deadline = time.monotonic() + TARGET_SETTLE_TIMEOUT
+    prev = None
+    while True:
+        hp = victim_health(rcon, player)
+        if hp is not None and hp == prev:
+            detail["victim_target_settled"] = hp
+            return hp
+        prev = hp
+        if time.monotonic() >= deadline:
+            detail["victim_target_settled"] = None
+            return None
+        time.sleep(TARGET_SETTLE_POLL)
 
 
 def take_firing_position(rcon, player, detail):

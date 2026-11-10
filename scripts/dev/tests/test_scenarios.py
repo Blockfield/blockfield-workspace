@@ -5596,12 +5596,17 @@ class WeaponsSweep(unittest.TestCase):
         # even when the client reports a successful shot. The pre-fire drain
         # stays in the detail as evidence, but the row cannot pass on it.
         rcon, bot, log_path = self.make_pair()
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_TIMEOUT", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
         self.assertEqual(stop, "control-unreadable")
         self.assertTrue(detail.get("victim_control_unreadable"))
+        self.assertIsNone(detail.get("victim_target_settled"))
 
     def test_minigun_early_failure_restores_survival(self):
         # Review finding r4520378381: the creative leg must restore survival
@@ -5679,8 +5684,13 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
 
     def test_tacz_midshot_drop_confirms_hit(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 15.0))
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+        # The settle consumes the first two reads; the tuple leads with a
+        # stable target so the control still lands on [20, 20].
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 20.0, 15.0))
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
@@ -5688,9 +5698,52 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(detail.get("victim_hit"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 15.0, 15.0])
 
+    def test_tacz_flickering_target_settles_before_control(self):
+        # Fail-before for server#365 stand365: the A10a husk flickers
+        # present -> absent right after the range opens while the sweep reads
+        # it immediately, so 91 TaCZ rows stopped control-unreadable with 0
+        # crashes. The control now waits bounded for two equal reads first:
+        # a target that settles reads a normal control and the row can pass.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(None, None, None, None, 20.0),
+        )
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertEqual(detail.get("victim_target_settled"), 20.0)
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
+
+    def test_tacz_target_never_settling_is_control_unreadable(self):
+        # A target that never stabilises within the bound stays loud
+        # (control-unreadable), never a pass, even with a successful shot.
+        rcon, bot, log_path = self.make_pair()
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_TIMEOUT", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertEqual(stop, "control-unreadable")
+        self.assertTrue(detail.get("victim_control_unreadable"))
+        self.assertIsNone(detail.get("victim_target_settled"))
+
     def test_tacz_unfired_drop_fails_loudly(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 10.0, 20.0, 10.0))
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+        # The drop lands in the control window (after the settle): a target
+        # that loses HP unfired still fails loudly, never passes.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 20.0, 10.0)
+        )
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )

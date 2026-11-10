@@ -5596,12 +5596,17 @@ class WeaponsSweep(unittest.TestCase):
         # even when the client reports a successful shot. The pre-fire drain
         # stays in the detail as evidence, but the row cannot pass on it.
         rcon, bot, log_path = self.make_pair()
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_TIMEOUT", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
         self.assertEqual(stop, "control-unreadable")
         self.assertTrue(detail.get("victim_control_unreadable"))
+        self.assertIsNone(detail.get("victim_target_settled"))
 
     def test_minigun_early_failure_restores_survival(self):
         # Review finding r4520378381: the creative leg must restore survival
@@ -5679,8 +5684,13 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
 
     def test_tacz_midshot_drop_confirms_hit(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 15.0))
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+        # The settle consumes the first two reads; the tuple leads with a
+        # stable target so the control still lands on [20, 20].
+        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 20.0, 20.0, 20.0, 15.0))
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
@@ -5688,9 +5698,68 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(detail.get("victim_hit"))
         self.assertEqual(detail.get("victim_hp"), [20.0, 15.0, 15.0])
 
+    def test_tacz_flickering_target_settles_before_control(self):
+        # Fail-before for server#365 stand365: the A10a husk flickers
+        # present -> absent right after the range opens while the sweep reads
+        # it immediately, so 91 TaCZ rows stopped control-unreadable with 0
+        # crashes. The control now waits bounded for two equal reads first:
+        # a target that settles reads a normal control and the row can pass.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(None, None, None, None, 20.0),
+        )
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertEqual(detail.get("victim_target_settled"), 20.0)
+        self.assertEqual(detail.get("victim_control"), [20.0, 20.0])
+
+    def test_tacz_target_never_settling_is_control_unreadable(self):
+        # A target that never stabilises within the bound stays loud
+        # (control-unreadable), never a pass, even with a successful shot.
+        rcon, bot, log_path = self.make_pair()
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_TIMEOUT", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
+            )
+        self.assertEqual(stop, "control-unreadable")
+        self.assertTrue(detail.get("victim_control_unreadable"))
+        self.assertIsNone(detail.get("victim_target_settled"))
+
+    def test_run_start_target_check_waits_for_a_flickering_target(self):
+        # stand365: right after the range opens the husk reads absent a few
+        # times; the run-start check must settle, not abort the whole run.
+        reads = iter([None, None, 20.0, 20.0])
+        with (
+            patch.object(weapons_sweep, "victim_health", lambda *a: next(reads)),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            self.assertTrue(weapons_sweep.require_target(None, "hitbot"))
+        with (
+            patch.object(weapons_sweep, "victim_health", lambda *a: None),
+            patch.object(weapons_sweep, "TARGET_SETTLE_TIMEOUT", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            self.assertFalse(weapons_sweep.require_target(None, "hitbot"))
+
     def test_tacz_unfired_drop_fails_loudly(self):
-        rcon, bot, log_path = self.make_pair(victim_hp=(20.0, 10.0, 20.0, 10.0))
-        with patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0):
+        # The drop lands in the control window (after the settle): a target
+        # that loses HP unfired still fails loudly, never passes.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 10.0, 20.0, 10.0)
+        )
+        with (
+            patch.object(weapons_sweep, "UNFIRED_CONTROL_SLEEP", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
@@ -5809,16 +5878,19 @@ class WeaponsSweep(unittest.TestCase):
         self.assertFalse(detail.get("fired"))
         self.assertTrue(detail.get("ammo_unreadable"))
 
-    def test_sbw_missing_ammo_number_is_never_a_drain(self):
-        # Review r4521765293: the right gun with gun data but no numeric
-        # Ammo used to count as "emptied". How SBW stores an emptied mag is
-        # not established from the game, so a missing number proves nothing.
+    def test_sbw_emptied_mag_counts_as_drained(self):
+        # Stand shape (server#365 stand365, one-round SBW gun m_79 fired
+        # once): the item keeps its GunData but the Ammo number is gone.
+        # Fail-before: the old code read this as ammo-unreadable.
+        emptied = (
+            "hitbot has the following entity data: {count: 1, Slot: 0b, "
+            'components: {"minecraft:custom_data": '
+            "{GunData: {UUID: [I; 1, 2, 3, 4], CloseStrike: 1b}}}, "
+            'id: "superbwarfare:m_79"}'
+        )
         rcon, bot, log_path = self.make_pair(
             victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
-            gun_nbt=(
-                'hitbot has the following entity data: {id: "superbwarfare:bocek", '
-                "GunData: {}}"
-            ),
+            gun_nbt=emptied,
             dimension="minecraft:overworld",
         )
         with (
@@ -5827,10 +5899,67 @@ class WeaponsSweep(unittest.TestCase):
             patch.object(weapons_sweep, "sbw_ammo", _ammo_script(1, None)),
         ):
             stop, detail, _ = weapons_sweep.sweep_weapon(
-                rcon, bot, "hitbot", "sbw", "superbwarfare:bocek", log_path, 0
+                rcon, bot, "hitbot", "sbw", "superbwarfare:m_79", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertTrue(detail.get("ammo_emptied"))
+
+    def test_sbw_swapped_item_is_never_emptied(self):
+        # The emptied shape counts only for the weapon under test: a
+        # different item in the slot with no Ammo number is unknown, never
+        # this gun's drain.
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt='hitbot has the following entity data: {id: "minecraft:stick"}',
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", _ammo_script(1, None)),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:m_79", log_path, 0
             )
         self.assertEqual(stop, "ammo-unreadable")
         self.assertFalse(detail.get("fired"))
+        self.assertTrue(detail.get("ammo_unreadable"))
+
+    def test_sbw_emptied_after_loaded_mid_counts_as_drained(self):
+        # Bot-review finding on PR #75: the emptied shape must also count
+        # when an earlier victim-leg read still caught the loaded count
+        # (mid sees the round, the shot lands after). Fail-before: the old
+        # guard required no numeric leg read at all, so this stayed
+        # inconclusive-no-shot.
+        emptied = (
+            "hitbot has the following entity data: {count: 1, Slot: 0b, "
+            'components: {"minecraft:custom_data": '
+            "{GunData: {UUID: [I; 1, 2, 3, 4], CloseStrike: 1b}}}, "
+            'id: "superbwarfare:m_79"}'
+        )
+        seen = {"n": 0}
+
+        def mag(rcon, player, weapon=None):
+            seen["n"] += 1
+            return 1 if seen["n"] <= 7 else None
+
+        rcon, bot, log_path = self.make_pair(
+            victim_hp=(20.0, 20.0, 20.0, 20.0, 20.0),
+            gun_nbt=emptied,
+            dimension="minecraft:overworld",
+        )
+        with (
+            patch.object(weapons_sweep, "SBW_RELOAD_TIMEOUT", 0),
+            patch.object(weapons_sweep, "SBW_RELOAD_POLL", 0),
+            patch.object(weapons_sweep, "sbw_ammo", mag),
+        ):
+            stop, detail, _ = weapons_sweep.sweep_weapon(
+                rcon, bot, "hitbot", "sbw", "superbwarfare:m_79", log_path, 0
+            )
+        self.assertIsNone(stop)
+        self.assertTrue(detail.get("fired"))
+        self.assertTrue(detail.get("ammo_emptied"))
 
     def test_sbw_ammo_counts_only_the_weapon_under_test(self):
         # Review r4521765286: every read used for the verdict checks the

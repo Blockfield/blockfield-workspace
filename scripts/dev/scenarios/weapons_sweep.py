@@ -236,6 +236,24 @@ def sbw_ammo(rcon, player, weapon=None):
     return int(match.group(1)) if match else None
 
 
+def sbw_emptied_mag(rcon, player, weapon):
+    """True when slot 0 still holds `weapon` with gun data but no Ammo count.
+
+    Stand shape (server#365: one-round SBW gun m_79, fired once): the item
+    keeps its GunData (UUID, CloseStrike) while the Ammo number is gone. A
+    failed RCON read carries no item id at all, so it can never count here.
+    """
+    try:
+        reply = rcon.cmd(f"data get entity {player} Inventory[{{Slot:0b}}]") or ""
+    except (OSError, RuntimeError):
+        return False
+    return (
+        f'id: "{weapon}"' in reply
+        and "GunData:" in reply
+        and re.search(r"Ammo:\s*\d+", reply) is None
+    )
+
+
 def sbw_wait_ammo(rcon, bot, player, detail, weapon=None):
     """Reload through the raw input SBW listens to, then poll the mag.
 
@@ -356,10 +374,15 @@ def victim_baseline(rcon, player, detail):
 
 
 def stable_baseline(rcon, player, detail):
-    """Unfired control with one retry: the range restores a killed target 2 s
-    after cancelling its death, so a control landing in that window retries
-    once. The passing control is the shot baseline, so a retry cannot bias the
-    fired evidence. Returns (ok, baseline)."""
+    """Unfired control with settle + one retry: the settle waits out the
+    post-open target flicker first, and the range restores a killed target
+    2 s after cancelling its death, so a control landing in that window
+    retries once. The passing control is the shot baseline, so a retry
+    cannot bias the fired evidence. Returns (ok, baseline)."""
+    if wait_for_target(rcon, player, detail) is None:
+        # Never stabilised: unknown, never evidence (control-unreadable).
+        detail["victim_control_unreadable"] = True
+        return False, None
     stable, baseline = victim_baseline(rcon, player, detail)
     if stable:
         return True, baseline
@@ -370,8 +393,43 @@ def stable_baseline(rcon, player, detail):
 
 
 def require_target(rcon, player):
-    """True when the range's husk target exists for the victim leg."""
-    return victim_health(rcon, player) is not None
+    """True when the range's husk target settles for the victim leg.
+
+    Uses the same bounded settle as the unfired control: right after the range
+    opens the husk flickers, and a single read would abort the whole run.
+    """
+    return wait_for_target(rcon, player, {}) is not None
+
+
+# Range-target settle (server#365 stand365): right after the range opens the
+# A10a husk flickers present -> absent (open/occupancy/chunk load) while the
+# sweep reads it immediately, so TaCZ rows stopped control-unreadable with 0
+# crashes. The unfired control waits bounded for two equal consecutive HP
+# reads first; a `data get entity` hit already implies the chunk is loaded
+# (selectors never match entities in unloaded chunks).
+TARGET_SETTLE_TIMEOUT = 20.0
+TARGET_SETTLE_POLL = 0.5
+
+
+def wait_for_target(rcon, player, detail):
+    """Block until the range husk reads the same HP twice in a row.
+
+    Returns the settled HP, or None when the target never stabilises within
+    TARGET_SETTLE_TIMEOUT: the caller keeps control-unreadable (loud), never
+    a pass.
+    """
+    deadline = time.monotonic() + TARGET_SETTLE_TIMEOUT
+    prev = None
+    while True:
+        hp = victim_health(rcon, player)
+        if hp is not None and hp == prev:
+            detail["victim_target_settled"] = hp
+            return hp
+        prev = hp
+        if time.monotonic() >= deadline:
+            detail["victim_target_settled"] = None
+            return None
+        time.sleep(TARGET_SETTLE_POLL)
 
 
 def take_firing_position(rcon, player, detail):
@@ -917,7 +975,7 @@ def sweep_weapon(
         after = sbw_ammo(rcon, player, weapon_id)
         if after is None and before is not None:
             # An emptied mag reads no Ammo; a failed read reads the same.
-            # One confirm separates the two before calling it drained.
+            # One confirm, then the explicit emptied-mag shape decides.
             time.sleep(0.5)
             after = sbw_ammo(rcon, player, weapon_id)
         detail["ammo_after_victim"] = after
@@ -939,13 +997,18 @@ def sweep_weapon(
         )
         seen = [a for a in (ammo_mid, ammo_low, after) if a is not None]
         drained = before is not None and any(a < before for a in seen)
-        if not drained and before is not None and not seen:
-            # No leg read produced a number for this gun: failed reads, a
-            # replaced item, or gun data without Ammo. None of that is a
-            # drain. How SBW stores an emptied mag is not established from
-            # the game yet, so nothing is inferred from a missing number.
-            detail["ammo_unreadable"] = True
-            return "ammo-unreadable", detail, log_pos
+        if not drained and before is not None and after is None:
+            # A mag the leg emptied keeps the item with its GunData but drops
+            # the Ammo number (server#365 m_79 stand shape) — also when an
+            # earlier leg read still caught the loaded count. Failed reads
+            # and a swapped item never match that shape, so nothing is
+            # inferred from a missing number alone.
+            if sbw_emptied_mag(rcon, player, weapon_id):
+                detail["ammo_emptied"] = True
+                drained = True
+            elif not seen:
+                detail["ammo_unreadable"] = True
+                return "ammo-unreadable", detail, log_pos
         detail["fired"] = drained
         if not alive(rcon, player):
             return "server-dead-after-victim", detail, log_pos

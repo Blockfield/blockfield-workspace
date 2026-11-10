@@ -21,6 +21,7 @@ to kill the server (blockfield ProjectileExplosionMixin shadow miss).
 """
 
 import json
+import math
 import re
 import time
 import zipfile
@@ -446,8 +447,10 @@ def pad_ready(rcon, timeout=8.0):
         try:
             reply = _rcon_read(
                 rcon,
-                f"execute in {VICTIM_DIM} run execute if block {int(x)} 64"
-                f" {int(z)} minecraft:stone",
+                # Floor, never truncate: int(-18.5) is -18 but the block
+                # under the player is x=-19 (review r4524578844).
+                f"execute in {VICTIM_DIM} run execute if block {math.floor(x)} 64"
+                f" {math.floor(z)} minecraft:stone",
             )
         except (OSError, RuntimeError):
             time.sleep(0.5)
@@ -764,8 +767,8 @@ def ensure_in_range(bot, rcon, player):
             time.sleep(0.5)
         except (OSError, RuntimeError):
             time.sleep(2.0)
-    else:
-        return False
+    # The last attempt's enter already ran: verify server-side instead of
+    # failing in the for/else without reading its result (r4524578855).
     if not in_range(rcon, player):
         return False
     if (health(rcon, player) or 0) <= 0:

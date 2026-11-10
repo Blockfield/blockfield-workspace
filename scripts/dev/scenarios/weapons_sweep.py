@@ -393,8 +393,12 @@ def stable_baseline(rcon, player, detail):
 
 
 def require_target(rcon, player):
-    """True when the range's husk target exists for the victim leg."""
-    return victim_health(rcon, player) is not None
+    """True when the range's husk target settles for the victim leg.
+
+    Uses the same bounded settle as the unfired control: right after the range
+    opens the husk flickers, and a single read would abort the whole run.
+    """
+    return wait_for_target(rcon, player, {}) is not None
 
 
 # Range-target settle (server#365 stand365): right after the range opens the

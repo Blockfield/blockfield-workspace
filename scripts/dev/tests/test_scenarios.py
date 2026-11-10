@@ -5734,6 +5734,22 @@ class WeaponsSweep(unittest.TestCase):
         self.assertTrue(detail.get("victim_control_unreadable"))
         self.assertIsNone(detail.get("victim_target_settled"))
 
+    def test_run_start_target_check_waits_for_a_flickering_target(self):
+        # stand365: right after the range opens the husk reads absent a few
+        # times; the run-start check must settle, not abort the whole run.
+        reads = iter([None, None, 20.0, 20.0])
+        with (
+            patch.object(weapons_sweep, "victim_health", lambda *a: next(reads)),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            self.assertTrue(weapons_sweep.require_target(None, "hitbot"))
+        with (
+            patch.object(weapons_sweep, "victim_health", lambda *a: None),
+            patch.object(weapons_sweep, "TARGET_SETTLE_TIMEOUT", 0),
+            patch.object(weapons_sweep, "TARGET_SETTLE_POLL", 0),
+        ):
+            self.assertFalse(weapons_sweep.require_target(None, "hitbot"))
+
     def test_tacz_unfired_drop_fails_loudly(self):
         # The drop lands in the control window (after the settle): a target
         # that loses HP unfired still fails loudly, never passes.

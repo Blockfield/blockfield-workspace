@@ -5492,6 +5492,16 @@ class WeaponsSweep(unittest.TestCase):
                     if dies_on_shoot and shot["done"]:
                         raise OSError("rcon closed: server gone")
                     return "players: hitbot"
+                if command.startswith("data get entity hitbot Dimension"):
+                    # The server-side dimension agrees with the testbot
+                    # cache: the range-enter path verifies here, so a fake
+                    # stuck out of range would shadow every victim-leg
+                    # behaviour with range-enter-failed.
+                    return f'hitbot has the following entity data: "{dimension}"'
+                if "execute if block" in command:
+                    # The lane pad exists in a loaded chunk: the footing
+                    # check passes at once, no fill loop.
+                    return "Test passed"
                 if "sweep_victim" in command or "name=A10a" in command:
                     if "Health" in command:
                         hp_calls["n"] += 1
@@ -5813,6 +5823,61 @@ class WeaponsSweep(unittest.TestCase):
                 rcon, bot, "hitbot", "tacz", "elitex:benelli_super", log_path, 0
             )
         self.assertEqual(stop, "victim-lane-unreachable")
+
+    def test_pad_footing_uses_floor_coordinates_and_refills(self):
+        # Review r4524578844: int(-18.5) truncates to -18 but the block
+        # under the player is x=-19. The footing check must read the
+        # floored block and refill the pad when that block is missing.
+        seen = []
+        reads = {"n": 0}
+
+        class Rcon:
+            def cmd(self, command):
+                seen.append(command)
+                if "execute if block" in command:
+                    if "-19 64 2" not in command:
+                        return "Test failed"
+                    reads["n"] += 1
+                    return "Test failed" if reads["n"] == 1 else "Test passed"
+                return "ok"
+
+        with patch("time.sleep", return_value=None):
+            self.assertTrue(weapons_sweep.pad_ready(Rcon(), timeout=5.0))
+        self.assertTrue(any("-19 64 2" in cmd for cmd in seen))
+        self.assertFalse(any("-18 64 2" in cmd for cmd in seen))
+        self.assertTrue(any(" fill " in cmd for cmd in seen))
+
+    def test_range_enter_final_attempt_is_verified(self):
+        # Review r4524578855: the retry loop's for/else returned failure
+        # without reading the result of the last range:enter attempt.
+        enters = {"n": 0}
+
+        class Rcon:
+            def cmd(self, command):
+                if command.startswith("data get entity hitbot Dimension"):
+                    if enters["n"] >= 6:
+                        return (
+                            'hitbot has the following entity data: "blockfield:range"'
+                        )
+                    return 'hitbot has the following entity data: "minecraft:overworld"'
+                if command.startswith("data get entity hitbot Health"):
+                    return "hitbot has the following entity data: 20.0f"
+                return "ok"
+
+        def bot(command):
+            if command == "state":
+                return {
+                    "name": "hitbot",
+                    "held": "tacz:modern_kinetic_gun",
+                    "dimension": "minecraft:overworld",
+                }
+            if command == "bfaction range:enter":
+                enters["n"] += 1
+            return {"ok": True}
+
+        with patch("time.sleep", return_value=None):
+            self.assertTrue(weapons_sweep.ensure_in_range(bot, Rcon(), "hitbot"))
+        self.assertEqual(enters["n"], 6)
 
     def test_victim_is_the_range_husk_target(
         self,

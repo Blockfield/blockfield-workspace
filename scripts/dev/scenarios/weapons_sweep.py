@@ -21,6 +21,7 @@ to kill the server (blockfield ProjectileExplosionMixin shadow miss).
 """
 
 import json
+import math
 import re
 import time
 import zipfile
@@ -52,6 +53,12 @@ VICTIM_SELECTOR = f"@e[type={VICTIM_TYPE},name={VICTIM_NAME},limit=1]"
 # target. Teleported per weapon; the die-phase respawn returns the bot.
 VICTIM_LANE_POS = (-18.5, 65.0, 2.5)
 VICTIM_LANE_YAW = 0.0
+# The lane sits outside the range template's built floor (void world with a
+# finite template: the column under the lane is void_air down to the kill
+# plane). Lay a stone pad under it per weapon: explosive victim-leg shots may
+# crater it, and without footing the bot falls, dies, respawns out of range and
+# unloads the dimension, failing every subsequent `execute in` read.
+LANE_PLATFORM = (-21, 64, 0, -16, 64, 5)
 # Unfired-control window: the target's HP must be static over this long with no
 # shot, matching the post-shot observation window below. An HP drop without a
 # shot must never count as fired evidence (server#365 sweep).
@@ -432,15 +439,55 @@ def wait_for_target(rcon, player, detail):
         time.sleep(TARGET_SETTLE_POLL)
 
 
+def pad_ready(rcon, timeout=8.0):
+    """True once the lane pad exists in a loaded chunk (polls the fill)."""
+    x, _, z = VICTIM_LANE_POS
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            reply = _rcon_read(
+                rcon,
+                # Floor, never truncate: int(-18.5) is -18 but the block
+                # under the player is x=-19 (review r4524578844).
+                f"execute in {VICTIM_DIM} run execute if block {math.floor(x)} 64"
+                f" {math.floor(z)} minecraft:stone",
+            )
+        except (OSError, RuntimeError):
+            time.sleep(0.5)
+            continue
+        if "passed" in (reply or "").lower():
+            return True
+        try:
+            x0, y0, z0, x1, y1, z1 = LANE_PLATFORM
+            _rcon_read(
+                rcon,
+                f"execute in {VICTIM_DIM} run fill {x0} {y0} {z0} {x1} {y1} {z1}"
+                " minecraft:stone",
+            )
+        except (OSError, RuntimeError):
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def take_firing_position(rcon, player, detail):
     """Teleport onto the A10a lane for a clear 8 m shot at the husk.
 
-    Returns True when the player lands on the lane; False (loud
-    victim-lane-unreachable, never a silent miss) otherwise.
+    Lays the lane pad first (LANE_PLATFORM, idempotent fill) and waits for it
+    in a loaded chunk: a fill into an unloaded chunk fails silently, and a
+    footing read in the teleport tick still shows y=65 mid-fall, so the settle
+    read below is the real proof. Without footing the bot falls into the void,
+    dies out of range and unloads the dimension, failing every later
+    `execute in` read. Returns True when the player stands on the lane; False
+    (loud victim-lane-unreachable, never a silent miss) otherwise.
     """
     x, y, z = VICTIM_LANE_POS
     try:
         _rcon_read(rcon, f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+        if not pad_ready(rcon):
+            return False
+        _rcon_read(rcon, f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+        time.sleep(1.2)
     except (OSError, RuntimeError):
         return False
     detail["victim_lane"] = [x, y, z]
@@ -448,7 +495,12 @@ def take_firing_position(rcon, player, detail):
         pos = hud_checks.parse_pos(_rcon_read(rcon, f"data get entity {player} Pos"))
     except (ValueError, OSError, RuntimeError):
         return False
-    return pos is not None and abs(pos[0] - x) < 2 and abs(pos[2] - z) < 2
+    return (
+        pos is not None
+        and abs(pos[0] - x) < 2
+        and abs(pos[1] - y) < 1.5
+        and abs(pos[2] - z) < 2
+    )
 
 
 def clear_sbw_victims(rcon):
@@ -660,22 +712,80 @@ def new_log_lines(log_path, position):
         return None, position
 
 
+def server_dimension(rcon, player):
+    """Authoritative dimension from the server (never the testbot cache).
+
+    The client keeps reporting the range for seconds after a death respawns
+    the player to the overworld; trusting it teleports and reads into the
+    wrong dimension. Returns "" when unreadable.
+    """
+    try:
+        reply = _rcon_read(rcon, f"data get entity {player} Dimension")
+    except (OSError, RuntimeError):
+        return ""
+    match = re.search(r'"([^"]+)"', reply or "")
+    return match.group(1) if match else ""
+
+
+def in_range(rcon, player):
+    return server_dimension(rcon, player).endswith("range")
+
+
 def ensure_in_range(bot, rcon, player):
-    state = bot("state")
-    if not dimension(state).endswith("range"):
-        bot("bfaction range:enter")
+    """Hold the bot in the firing range; True when it is there with HP.
+
+    A refused range:enter (match room, post-death defeated window) used to
+    pass silently, so every later teleport and `execute in` read ran in the
+    wrong dimension: falls, void deaths and an unloaded range. Leave rooms
+    first, retry the enter, verify server-side, and fail loudly (False)
+    when still outside.
+    """
+    try:
+        state = bot("state")
+    except (OSError, RuntimeError):
+        return False
+    if not dimension(state).endswith("range") and not in_range(rcon, player):
+        # Match rooms refuse range:enter ("leave combat first"); the hub
+        # allows it. Harmless when already in the hub.
+        try:
+            bot("bfaction leave")
+        except (OSError, RuntimeError):
+            pass
         time.sleep(1.5)
-        bot("closescreen")
+        try:
+            bot("closescreen")
+        except (OSError, RuntimeError):
+            pass
         time.sleep(0.5)
+    for _ in range(6):
+        try:
+            if in_range(rcon, player):
+                break
+            bot("bfaction range:enter")
+            time.sleep(2.0)
+            bot("closescreen")
+            time.sleep(0.5)
+        except (OSError, RuntimeError):
+            time.sleep(2.0)
+    # The last attempt's enter already ran: verify server-side instead of
+    # failing in the for/else without reading its result (r4524578855).
+    if not in_range(rcon, player):
+        return False
     if (health(rcon, player) or 0) <= 0:
         bot("respawn")
         time.sleep(1.5)
         bot("closescreen")
-        if not dimension(bot("state")).endswith("range"):
-            bot("bfaction range:enter")
-            time.sleep(1.5)
-            bot("closescreen")
-            time.sleep(0.5)
+        if not in_range(rcon, player):
+            try:
+                bot("bfaction range:enter")
+                time.sleep(1.5)
+                bot("closescreen")
+                time.sleep(0.5)
+            except (OSError, RuntimeError):
+                pass
+            if not in_range(rcon, player):
+                return False
+    return True
 
 
 def tacz_shoot(bot, attempts=5):
@@ -869,7 +979,8 @@ def sweep_drop_pickup_die(
         # passing row.
         return "respawn-failed", log_pos
     if kind == "tacz":
-        ensure_in_range(bot, rcon, player)
+        if not ensure_in_range(bot, rcon, player):
+            return "range-enter-failed", log_pos
     if not alive(rcon, player):
         return "server-dead-after-respawn", log_pos
     return None, log_pos
@@ -880,7 +991,8 @@ def sweep_weapon(
 ):
     detail = {"kind": kind}
     if kind == "tacz":
-        ensure_in_range(bot, rcon, player)
+        if not ensure_in_range(bot, rcon, player):
+            return "range-enter-failed", detail, log_pos
     else:
         ensure_overworld(bot, rcon, player)
     if kind == "tacz":

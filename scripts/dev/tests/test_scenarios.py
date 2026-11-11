@@ -6064,9 +6064,15 @@ class HudChecks(unittest.TestCase):
                 return {"entries": []}
             raise AssertionError(text)
 
+        healed = {"ticks": 0}
+
         def victim(text):
             if text == "state":
-                return {"name": victim_name, "dimension": arena, "health": 20}
+                # The heal lands a tick after the command: first read is 1 HP.
+                if any("instant_health" in c for c in cmds):
+                    healed["ticks"] += 1
+                hp = 20 if healed["ticks"] > 1 else 1
+                return {"name": victim_name, "dimension": arena, "health": hp}
             if text == "killfeed":
                 return {"entries": []}
             raise AssertionError(text)
@@ -6080,15 +6086,19 @@ class HudChecks(unittest.TestCase):
             raise AssertionError(text)
 
         def fake_probe(rcon_arg, arena_arg, victim_arg, shooter_arg, timeout=0):
-            # The victim must be healed before the 1-HP probe hit.
-            assert any("instant_health" in c for c in cmds), cmds
+            # The heal must have landed (HP > 1) before the 1-HP probe hit.
+            assert victim("state")["health"] > 1, "probe before heal landed"
             probes.append((arena_arg, victim_arg, shooter_arg))
             return True
 
         with (
             patch("time.sleep"),
             patch.object(hud_checks, "probe_vulnerable", side_effect=fake_probe),
-            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a: fn()),
+            patch.object(
+                hud_checks,
+                "wait_for",
+                side_effect=lambda fn, *a, **k: fn() or fn() or fn(),
+            ),
         ):
             # Victim never dies in this fake, so only the gate + lethal-hit
             # checks run; what matters is the probe came first.

@@ -590,6 +590,9 @@ def rcon_kill(rcon, killer, victim):
         f"execute in {dim} run effect give {offline_uuid(victim_name)}"
         " minecraft:instant_health 1 10 true"
     )
+    # The heal lands on the victim's next tick: wait for it, or the probe's
+    # 1-HP hit can still arrive first.
+    wait_for(lambda: victim("state").get("health", 0) > 1, 5)
     if not probe_vulnerable(
         rcon, dim, offline_uuid(victim_name), offline_uuid(killer_name), timeout=60
     ):

@@ -24,7 +24,7 @@ from .common import rcon_args, tally
 from .dm import arena_bounds
 from .duo import clamp_inside, rendered
 from .rc import deploy, open_room
-from .readiness import probe_vulnerable
+from .readiness import probe_vulnerable, server_health
 
 SCENARIO = {
     "name": "hud-checks",
@@ -592,7 +592,10 @@ def rcon_kill(rcon, killer, victim):
     )
     # The heal lands on the victim's next tick: wait for it, or the probe's
     # 1-HP hit can still arrive first.
-    if not wait_for(lambda: victim("state").get("health", 0) > 1, 5):
+    # Server-side Health: the client copy can lag and still show HP > 1.
+    if not wait_for(
+        lambda: (server_health(rcon, dim, offline_uuid(victim_name)) or 0) > 1, 5
+    ):
         return [
             check(
                 "victim healed before the fallback probe",

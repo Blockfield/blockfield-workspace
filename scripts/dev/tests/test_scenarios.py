@@ -6042,6 +6042,7 @@ class HudChecks(unittest.TestCase):
         rcon = SimpleNamespace(cmd=cmds.append)
         with (
             patch("time.sleep"),
+            patch.object(hud_checks, "server_health", return_value=20.0),
             patch.object(hud_checks, "probe_vulnerable", return_value=False),
         ):
             out, entry = hud_checks.rcon_kill(rcon, killer, victim)
@@ -6068,6 +6069,7 @@ class HudChecks(unittest.TestCase):
             return "Applied effect"
 
         with (
+            patch.object(hud_checks, "server_health", return_value=1.0),
             patch.object(hud_checks, "wait_for", return_value=False),
             patch.object(
                 hud_checks, "probe_vulnerable", side_effect=AssertionError("probed")
@@ -6097,11 +6099,8 @@ class HudChecks(unittest.TestCase):
 
         def victim(text):
             if text == "state":
-                # The heal lands a tick after the command: first read is 1 HP.
-                if any("instant_health" in c for c in cmds):
-                    healed["ticks"] += 1
-                hp = 20 if healed["ticks"] > 1 else 1
-                return {"name": victim_name, "dimension": arena, "health": hp}
+                # Client copy is stale: always shows full HP.
+                return {"name": victim_name, "dimension": arena, "health": 20}
             if text == "killfeed":
                 return {"entries": []}
             raise AssertionError(text)
@@ -6112,11 +6111,16 @@ class HudChecks(unittest.TestCase):
                 return "Applied 100.0 damage to Victim"
             if "instant_health" in text:
                 return "Applied effect"
+            if "data get entity" in text and "Health" in text:
+                # Server Health: 1 HP until a tick after the heal.
+                healed["ticks"] += 1
+                hp = 20.0 if healed["ticks"] > 1 else 1.0
+                return f"Victim has the following entity data: {hp}f"
             raise AssertionError(text)
 
         def fake_probe(rcon_arg, arena_arg, victim_arg, shooter_arg, timeout=0):
-            # The heal must have landed (HP > 1) before the 1-HP probe hit.
-            assert victim("state")["health"] > 1, "probe before heal landed"
+            # The heal must have landed server-side before the 1-HP probe.
+            assert healed["ticks"] > 1, "probe before the server heal landed"
             probes.append((arena_arg, victim_arg, shooter_arg))
             return True
 

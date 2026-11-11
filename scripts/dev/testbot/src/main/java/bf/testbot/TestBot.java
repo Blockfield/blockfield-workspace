@@ -471,30 +471,66 @@ public final class TestBot implements ClientModInitializer {
         }
     }
 
-    // True when the host resolves to a prod IP right now (never hardcoded).
-    private static boolean prodAddressesIntersect(String host) {
-        if (host.isEmpty()
-                || host.equals("localhost")
-                || host.startsWith("127.")
-                || host.equals("::1")) return false;
-        java.util.Set<String> candidate = resolveAll(host);
-        if (candidate.isEmpty()) return false;
-        for (String prod :
-                new String[] {"blockfield.pro", "play.blockfield.pro", "workshop.blockfield.pro"}) {
-            java.util.Set<String> prodIps = resolveAll(prod);
-            for (String ip : candidate) if (prodIps.contains(ip)) return true;
-        }
-        return false;
+    // Allow-list: localhost or loopback/private/link-local IP literal, no DNS.
+    private static String standHost(String server) {
+        String addr = server == null ? "" : server.trim();
+        boolean stripped;
+        do {
+            stripped = false;
+            for (String prefix : new String[] {"raknet;", "tcp;"}) {
+                if (addr.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                    addr = addr.substring(prefix.length()).trim();
+                    stripped = true;
+                    break;
+                }
+            }
+        } while (stripped);
+        String host;
+        if (addr.startsWith("[")) {
+            int end = addr.indexOf(']');
+            host = end == -1 ? addr.substring(1) : addr.substring(1, end);
+        } else if (addr.indexOf(':') != addr.lastIndexOf(':')) host = addr;
+        else if (addr.contains(":")) host = addr.substring(0, addr.lastIndexOf(':'));
+        else host = addr;
+        host = host.trim().toLowerCase(java.util.Locale.ROOT);
+        while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        return host;
     }
 
-    private static java.util.Set<String> resolveAll(String host) {
-        java.util.Set<String> out = new java.util.HashSet<>();
+    private static boolean isStandServer(String server) {
+        if (server == null || server.trim().isEmpty()) return true;
+        String host = standHost(server);
+        if (host.equals("localhost")) return true;
+        int pct = host.indexOf('%');
+        if (pct != -1) host = host.substring(0, pct);
+        if (host.regionMatches(true, 0, "::ffff:", 0, 7)) host = host.substring(7);
+        if (!host.contains(":")) return isStandIpv4(host);
+        if (!host.matches("[0-9a-f:.]+")) return false;
         try {
-            for (java.net.InetAddress addr : java.net.InetAddress.getAllByName(host))
-                out.add(addr.getHostAddress());
-        } catch (java.net.UnknownHostException ignored) {
+            java.net.InetAddress addr = java.net.InetAddress.getByName(host);
+            if (addr.isLoopbackAddress() || addr.isLinkLocalAddress() || addr.isSiteLocalAddress())
+                return true;
+            byte[] b = addr.getAddress(); // ULA fc00::/7, never a hostname here
+            return b.length == 16 && (b[0] & 0xfe) == (byte) 0xfc;
+        } catch (Exception e) {
+            return false;
         }
-        return out;
+    }
+
+    private static boolean isStandIpv4(String host) {
+        String[] p = host.split("\\.", -1);
+        if (p.length != 4) return false;
+        int[] o = new int[4];
+        for (int i = 0; i < 4; i++) {
+            if (!p[i].matches("\\d{1,3}")) return false;
+            o[i] = Integer.parseInt(p[i]);
+            if (o[i] > 255) return false;
+        }
+        return o[0] == 127
+                || o[0] == 10
+                || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254);
     }
 
     private static Object exec(String line) {
@@ -1055,38 +1091,7 @@ public final class TestBot implements ClientModInitializer {
                         mc.disconnect();
                     }
                     // Stale stand profiles once pointed the agent client at prod.
-                    String noPrefix = a[1] == null ? "" : a[1].trim();
-                    boolean stripped;
-                    do {
-                        stripped = false;
-                        for (String prefix : new String[] {"raknet;", "tcp;"}) {
-                            if (noPrefix.regionMatches(true, 0, prefix, 0, prefix.length())) {
-                                noPrefix = noPrefix.substring(prefix.length()).trim();
-                                stripped = true;
-                                break;
-                            }
-                        }
-                    } while (stripped);
-                    String host;
-                    if (noPrefix.startsWith("[")) {
-                        int end = noPrefix.indexOf(']');
-                        host = end == -1 ? noPrefix.substring(1) : noPrefix.substring(1, end);
-                    } else if (noPrefix.indexOf(':') != noPrefix.lastIndexOf(':')) {
-                        host = noPrefix; // bare IPv6 literal: no port to strip
-                    } else if (noPrefix.contains(":")) {
-                        host = noPrefix.substring(0, noPrefix.lastIndexOf(':'));
-                    } else {
-                        host = noPrefix;
-                    }
-                    host = host.trim().toLowerCase(java.util.Locale.ROOT);
-                    while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
-                    try {
-                        host = java.net.IDN.toASCII(host);
-                    } catch (IllegalArgumentException ignored) {
-                    }
-                    if (host.equals("blockfield.pro")
-                            || host.endsWith(".blockfield.pro")
-                            || prodAddressesIntersect(host))
+                    if (!isStandServer(a[1]))
                         throw new IllegalStateException("refusing prod connect " + a[1]);
                     ServerAddress addr = ServerAddress.parseString(a[1]);
                     ConnectScreen.startConnecting(

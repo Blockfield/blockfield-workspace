@@ -364,11 +364,11 @@ class WorldSeed(unittest.TestCase):
 
 class Bot(unittest.TestCase):
     def test_says_which_port_is_dead_instead_of_hanging(self):
-        devstack.BOT_PORTS[1] = 1  # nothing listens on port 1
-        args = type("Args", (), {"client": 1, "command": ["state"], "timeout": 1})
-        with self.assertRaises(SystemExit) as raised:
-            devstack.bot(args)
-        self.assertIn("127.0.0.1:1", str(raised.exception))
+        with patch.dict(devstack.BOT_PORTS, {1: 1}):  # nothing listens on port 1
+            args = type("Args", (), {"client": 1, "command": ["state"], "timeout": 1})
+            with self.assertRaises(SystemExit) as raised:
+                devstack.bot(args)
+            self.assertIn("127.0.0.1:1", str(raised.exception))
 
 
 class SecondClient(unittest.TestCase):

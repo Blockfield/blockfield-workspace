@@ -23,6 +23,7 @@ import argparse
 import errno
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 import random
@@ -347,6 +348,19 @@ def refresh_stale_testbot(jar):
     return build
 
 
+def _guarded_testbot_jar(jar):
+    """Current build when the jar predates the guard, else die with a rebuild hint."""
+    if testbot_guard_present(jar):
+        return jar
+    fresh = refresh_stale_testbot(jar)
+    if not testbot_guard_present(fresh):
+        die(
+            "stale bftestbot.jar without the prod-connect guard: "
+            "run `just build-testbot`, then re-run"
+        )
+    return fresh
+
+
 def install_testbot(args, game_dir):
     destination = game_dir / "mods/bftestbot.jar"
     if not testbot_enabled(args, game_dir):
@@ -382,12 +396,7 @@ def install_testbot(args, game_dir):
         # A retained install predating the prod-connect guard must not keep
         # running: swap in the current build when its content hash differs,
         # or refuse to start so the next `just build-testbot` rebuilds it.
-        jar = refresh_stale_testbot(jar)
-        if not testbot_guard_present(jar):
-            die(
-                "stale bftestbot.jar without the prod-connect guard: "
-                "run `just build-testbot`, then re-run"
-            )
+        jar = _guarded_testbot_jar(jar)
     if jar.resolve() != destination.resolve():
         materialize(jar, destination)
     return str(
@@ -1762,6 +1771,11 @@ def client_restart(game_dir):
         )
         check_agent_server(quick_play)
         cwd = Path(info.get("game_dir", str(game_dir)))
+        installed = cwd / "mods/bftestbot.jar"
+        if installed.is_file():
+            fresh = _guarded_testbot_jar(installed)
+            if Path(fresh).resolve() != installed.resolve():
+                materialize(fresh, installed)
         write_stand_servers_dat(cwd, quick_play or f"127.0.0.1:{PORT}")
         headless = info.get("headless", False) or not process_owner().startswith(
             "developer:"
@@ -2400,17 +2414,11 @@ def client_launch_command(args, game_dir, name, client_pack, testbot_port):
     return command
 
 
-_PROD_BASE_HOST = "blockfield.pro"
-_PROD_HOSTS = (_PROD_BASE_HOST, "play.blockfield.pro", "workshop.blockfield.pro")
 _TRANSPORT_PREFIXES = ("raknet;", "tcp;")
 
 
-def normalize_server_host(server):
-    """Bare host for prod checks: transport prefix, port, case, dot, IDN.
-
-    Suffix matching alone accidentally tolerates prefixes, but DNS resolution
-    needs the bare host, so strip everything before comparing or resolving.
-    """
+def _stand_host(server):
+    """Bare host for the stand allow-list: prefixes, brackets, port, case, dot."""
     addr = (server or "").strip()
     while True:
         lowered = addr.lower()
@@ -2427,42 +2435,28 @@ def normalize_server_host(server):
     elif host.count(":") == 1:
         host = host.rsplit(":", 1)[0]
     # A bare IPv6 literal (several colons) has no port to strip: keep it whole.
-    host = host.strip().lower().rstrip(".")
-    if host:
-        try:
-            host = host.encode("idna").decode("ascii")
-        except (UnicodeError, ValueError):
-            pass
-    return host
+    return host.strip().lower().rstrip(".")
 
 
-def _resolve_ips(host):
-    """IPs a host resolves to right now; empty when unresolvable."""
-    try:
-        infos = socket.getaddrinfo(
-            host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
-        )
-    except OSError:
-        return set()
-    return {info[4][0] for info in infos if info[4]}
-
-
-def is_prod_server(server):
-    """True when the address points at prod (coordination#44: stands never join prod)."""
-    host = normalize_server_host(server)
-    if not host:
-        return False
-    if host == _PROD_BASE_HOST or host.endswith("." + _PROD_BASE_HOST):
+def is_stand_server(server):
+    """True when the agent client may target it: menu-only, localhost or a
+    loopback/private/link-local IP literal. Hostnames and public IPs are
+    refused with no DNS lookups, so SRV/DNS-failure gaps cannot open."""
+    if not (server or "").strip():
         return True
-    if host == "localhost" or host.startswith("127.") or host == "::1":
+    host = _stand_host(server)
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
         return False
-    candidate = _resolve_ips(host)
-    if not candidate:
-        return False
-    prod = set()
-    for name in _PROD_HOSTS:
-        prod |= _resolve_ips(name)
-    return bool(candidate & prod)
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return (
+        ip.is_loopback or ip.is_private or ip.is_link_local
+    ) and not ip.is_unspecified
 
 
 def write_stand_servers_dat(game_dir, ip):
@@ -2500,8 +2494,8 @@ def write_stand_servers_dat(game_dir, ip):
 
 
 def check_agent_server(server):
-    if is_prod_server(server):
-        die(f"refusing prod server {server!r}: workspace stands use 127.0.0.1")
+    if not is_stand_server(server):
+        die(f"refusing non-stand server {server!r}: workspace stands use 127.0.0.1")
     # The stand proxy speaks RakNet on its own port; strip the transport prefix first.
     addr = server or ""
     if addr.startswith("raknet;"):
@@ -2901,8 +2895,12 @@ def scenario(args):
 
 def bot(args):
     parts = " ".join(args.command).split()
-    if len(parts) >= 2 and parts[0].lower() == "connect" and is_prod_server(parts[1]):
-        die(f"refusing prod connect {parts[1]!r}: the testbot stays on this stack")
+    if (
+        len(parts) >= 2
+        and parts[0].lower() == "connect"
+        and not is_stand_server(parts[1])
+    ):
+        die(f"refusing non-stand connect {parts[1]!r}: the testbot stays on this stack")
     port = BOT_PORTS[args.client]
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:

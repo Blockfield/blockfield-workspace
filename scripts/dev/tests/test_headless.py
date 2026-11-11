@@ -425,21 +425,40 @@ class Headless(unittest.TestCase):
 
 
 class ProdGuard(unittest.TestCase):
-    """coordination#44: the agent client must be unable to reach prod."""
+    """coordination#44: the agent client may only join stand addresses."""
 
-    PROD_SERVERS = (
+    REFUSED = (
         "play.blockfield.pro:25566",
-        "raknet;play.blockfield.pro:25566",
-        "tcp;play.blockfield.pro:25566",
-        "PLAY.BLOCKFIELD.PRO:25565",
-        "TCP;PLAY.BLOCKFIELD.PRO.:25565",
-        "play.blockfield.pro.",
-        "workshop.blockfield.pro:25567",
+        "8.8.8.8:25566",
+        "[::ffff:8.8.8.8]:25566",
+        "example.com:25566",
+    )
+    ALLOWED = (
+        "localhost:25565",
+        "127.0.0.1:25599",
+        "127.0.0.2:25566",
+        "10.0.0.5:25599",
+        "192.168.1.20:25599",
+        "[::1]:25565",
+        "[::ffff:127.0.0.1]:25565",
+        "raknet;localhost:25567",
+        "",
     )
 
-    def test_play_refuses_prod_server_for_agents_and_developers(self):
+    def test_allow_list_needs_no_dns(self):
+        def fail_dns(*args, **kwargs):
+            raise AssertionError("no DNS lookups for the allow-list")
+
+        with patch.object(socket, "getaddrinfo", side_effect=fail_dns):
+            for server in self.REFUSED:
+                self.assertFalse(devstack.is_stand_server(server))
+            for server in self.ALLOWED:
+                with self.subTest(server=server):
+                    self.assertTrue(devstack.is_stand_server(server))
+
+    def test_play_and_bot_refuse_non_stand(self):
         for owner in ("current", "developer:1"):
-            for server in self.PROD_SERVERS:
+            for server in self.REFUSED:
                 with self.subTest(owner=owner, server=server):
                     args = SimpleNamespace(
                         game_dir=None,
@@ -456,70 +475,54 @@ class ProdGuard(unittest.TestCase):
                         patch.object(devstack, "_total_memory_gib", return_value=16.0),
                         patch.object(devstack, "prepare_client") as prepare,
                         patch.object(devstack, "start_process") as start,
-                        self.assertRaisesRegex(SystemExit, "prod"),
+                        self.assertRaisesRegex(SystemExit, "non-stand"),
                     ):
                         devstack.play(args)
                     prepare.assert_not_called()
                     start.assert_not_called()
-
-    def test_bot_connect_refuses_prod(self):
-        for command in (
-            ["connect", "play.blockfield.pro:25566"],
-            ["connect", "raknet;play.blockfield.pro:25566"],
-            ["connect", "tcp;play.blockfield.pro:25566"],
-        ):
-            with self.subTest(command=command):
-                args = SimpleNamespace(client=1, command=command, timeout=1)
-                with self.assertRaisesRegex(SystemExit, "prod"):
+        for server in self.REFUSED:
+            with self.subTest(server=server):
+                args = SimpleNamespace(client=1, command=["connect", server], timeout=1)
+                with self.assertRaisesRegex(SystemExit, "non-stand"):
                     devstack.bot(args)
 
-    def test_prod_host_normalisation(self):
-        # u-noprod round 2: the bare host feeds both the suffix check and DNS,
-        # so prefixes/ports/case/dots/IDN must be stripped before either runs.
+    def test_stand_host_normalisation(self):
         cases = {
-            "raknet;Play.Blockfield.Pro:25566": "play.blockfield.pro",
-            "TCP;PLAY.BLOCKFIELD.PRO.:25565": "play.blockfield.pro",
-            "  play.blockfield.pro.  ": "play.blockfield.pro",
-            "play.blockfield.pro": "play.blockfield.pro",
-            "ｐlay.blockfield.pro:25566": "play.blockfield.pro",
-            "münchen.de:25565": "xn--mnchen-3ya.de",
-            "[::1]:25565": "::1",
-            "127.0.0.1:25599": "127.0.0.1",
+            "raknet;127.0.0.2:25566": "127.0.0.2",
+            "TCP;10.0.0.5.:25565": "10.0.0.5",
+            "  [::1]:25565  ": "::1",
+            "[::ffff:8.8.8.8]:25566": "::ffff:8.8.8.8",
+            "LOCALHOST:25565": "localhost",
             "": "",
-            None: "",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
-                self.assertEqual(devstack.normalize_server_host(raw), expected)
+                self.assertEqual(devstack._stand_host(raw), expected)
 
-    def test_prod_ip_intersection_refuses_addresses_resolving_to_prod(self):
-        # u-noprod round 2: raw IPs and aliases that resolve to prod IPs are
-        # refused; resolution happens at check time, never via hardcoded IPs.
-        # TEST-NET documentation addresses stand in for prod/foreign IPs.
-        prod_ip = "203.0.113.7"
-        foreign_ip = "198.51.100.9"
-
-        def fake_getaddrinfo(host, port, *args, **kwargs):
-            table = {
-                "blockfield.pro": prod_ip,
-                "play.blockfield.pro": prod_ip,
-                "workshop.blockfield.pro": prod_ip,
-                "stand-alias.example": prod_ip,
-                prod_ip: prod_ip,
-                foreign_ip: foreign_ip,
-            }
-            if host not in table:
-                raise socket.gaierror("mocked DNS: unknown host")
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (table[host], 0))]
-
-        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
-            self.assertTrue(devstack.is_prod_server("203.0.113.7:25566"))
-            self.assertTrue(devstack.is_prod_server("[203.0.113.7]:25566"))
-            self.assertTrue(devstack.is_prod_server("stand-alias.example:25566"))
-            self.assertTrue(devstack.is_prod_server("tcp;stand-alias.example:25566"))
-            self.assertFalse(devstack.is_prod_server("198.51.100.9:25566"))
-            self.assertFalse(devstack.is_prod_server("127.0.0.1:25599"))
-            self.assertFalse(devstack.is_prod_server("unresolvable.invalid:25566"))
+    def test_restart_refuses_stale_testbot_without_a_current_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp)
+            (game_dir / "mods").mkdir(parents=True)
+            (game_dir / "mods" / "bftestbot.jar").write_bytes(b"stale pre-guard jar")
+            receipt = Path(tmp) / "client.cmd"
+            receipt.write_text(
+                json.dumps(
+                    {"command": ["java", "--quickPlayMultiplayer=127.0.0.1:25599"]}
+                )
+            )
+            record = {"pid": 321, "live": True, "native": "linux", "owner": "current"}
+            with (
+                patch.object(devstack, "CLIENT_CMD_FILE", receipt),
+                patch.object(devstack, "ROOT", Path(tmp) / "root"),
+                patch.object(devstack, "process_owner", return_value="current"),
+                patch.object(devstack, "process_record", return_value=record),
+                patch.object(devstack, "listener_owned", return_value=True),
+                patch.object(devstack, "java_exe", return_value="java"),
+                patch.object(devstack, "start_process") as start,
+                self.assertRaisesRegex(SystemExit, "build-testbot"),
+            ):
+                devstack.client_restart(game_dir)
+            start.assert_not_called()
 
     def test_stale_servers_dat_is_rewritten_to_the_stand_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -535,7 +538,7 @@ class ProdGuard(unittest.TestCase):
             self.assertIn(b"127.0.0.1:25599", data)
             self.assertEqual(_servers_dat_ips(data), ["127.0.0.1:25599"])
 
-    def test_testbot_connect_refuses_prod(self):
+    def test_testbot_connect_refuses_non_stand(self):
         source = (
             devstack.ROOT
             / "scripts"
@@ -548,13 +551,13 @@ class ProdGuard(unittest.TestCase):
             / "testbot"
             / "TestBot.java"
         ).read_text(encoding="utf-8")
-        self.assertIn("blockfield.pro", source)
+        self.assertIn("isStandServer", source)
         self.assertRegex(source.lower(), "refus.*prod|prod.*refus")
-        # u-noprod round 2: same normalisation as the Python guard, plus a
-        # runtime resolved-IP check that must never hardcode an address.
-        self.assertIn('"tcp;"', source)
-        self.assertIn("getAllByName", source)
-        self.assertIn("IDN", source)
+        # Allow-list: no prod names, no DNS lookups in the guard.
+        self.assertNotIn("blockfield.pro", source)
+        self.assertNotIn("getAllByName", source)
+        self.assertNotIn("getaddrinfo", source)
+        self.assertNotIn("IDN", source)
 
 
 def _servers_dat_ips(data):

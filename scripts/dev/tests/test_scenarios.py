@@ -5411,6 +5411,12 @@ class HudChecks(unittest.TestCase):
             )
         )
 
+    def test_grenade_blast_near_fails_closed_on_query_error(self):
+        def raising(_):
+            raise RuntimeError("transient query failure")
+
+        self.assertTrue(hud_checks.blast_near(raising, [0.0, 65.0, 0.0]))
+
     def test_tag_exact_tricky_name(self):
         evil = "x_reset_x"
 

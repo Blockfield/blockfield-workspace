@@ -84,6 +84,19 @@ def blast_drop_present(entities, death_pos, radius=5):
     return False
 
 
+def blast_near(query, death_pos):
+    """True while a blast drop may still linger (query errors fail closed).
+
+    A transient ``entities`` failure must keep the 25 s resolution gate polling,
+    not read as exploded: the gate checks ``not blast_near(...)``.
+    """
+    try:
+        entities = query("entities 64").get("entities", [])
+    except RuntimeError:
+        return True
+    return blast_drop_present(entities, death_pos)
+
+
 def gun_replace_command(name, gun_id, ammo=30000):
     """Existing admin path to a specific weapon: RCON item replace with TACZ NBT."""
     if not re.fullmatch(r"[A-Za-z0-9_]{1,16}", name or ""):
@@ -272,13 +285,6 @@ def scenario_grenade(rcon, bot, witness):
             for entity in entities
         )
 
-    def blast_near(query):
-        try:
-            entities = query("entities 64").get("entities", [])
-        except RuntimeError:
-            return False
-        return blast_drop_present(entities, death_pos)
-
     dropped = wait_for(lambda: drop_near(witness) or drop_near(bot), 12)
     out.append(
         check(
@@ -290,7 +296,7 @@ def scenario_grenade(rcon, bot, witness):
     if not dropped:
         return out, False
     exploded = wait_for(
-        lambda: not blast_near(witness) and not blast_near(bot),
+        lambda: not blast_near(witness, death_pos) and not blast_near(bot, death_pos),
         25,
     )
     out.append(

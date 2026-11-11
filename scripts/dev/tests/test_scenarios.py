@@ -5136,6 +5136,129 @@ class DmHarness(unittest.TestCase):
         self.assertTrue(dead_ok, detail)
         self.assertEqual(fired["n"], 3)
 
+    def test_face_off_until_dead_finishes_hitting_lane_past_budget(self):
+        """stand324: 4 shots leave the victim at ~3 HP; a hitting lane must
+        keep shooting until the kill instead of abandoning it for blocked
+        lanes (DM kill check failed 4x identically with HP ~3 after 4 lanes).
+        TTK here is 5 hits with a 4-shot per-lane budget on one open lane."""
+
+        class Rcon(FakeRcon):
+            def __init__(self):
+                super().__init__()
+                self.ammo = 30
+
+            def cmd(self, command):
+                self.commands.append(command)
+                if "GunCurrentAmmoCount" in command and "data get" in command:
+                    return f"entity has the following entity data: {self.ammo}"
+                return "ok"
+
+        fired = {"n": 0}
+
+        def shooter(command, *args):
+            if command == "state":
+                return {
+                    "name": "Shooter",
+                    "slot": 0,
+                    "pos": [8.0, 65.0, 0.0],
+                    "dimension": self.ARENA,
+                }
+            if command == "slot 0":
+                return {}
+            if command.startswith("entities"):
+                return {"entities": [{"type": "player"}]}
+            assert command.startswith("aimshoot ")
+            fired["n"] += 1
+            rcon.ammo -= 1
+            return {"result": "SUCCESS"}
+
+        def victim(command, *args):
+            assert command == "state"
+            return {
+                "name": "Victim",
+                "pos": [0.0, 65.0, 0.0],
+                "dimension": self.ARENA,
+                "health": max(0.0, 20.0 - 4.25 * fired["n"]),
+            }
+
+        rcon = Rcon()
+        with patch("time.sleep"):
+            ok, detail = duo.face_off(
+                rcon,
+                shooter,
+                victim,
+                dead=lambda s: s.get("health", 20) <= 0,
+                until_dead=True,
+                lanes=((8, 0, -90),),
+                shots_per_lane=4,
+            )
+        self.assertTrue(ok, detail)
+        self.assertEqual(fired["n"], 5)
+
+    def test_face_off_extension_leaves_ammo_for_the_next_lane(self):
+        """A lane that hit once (spread/partial cover) then only misses must stop
+        after shots_per_lane misses and leave ammo for the next, open lane."""
+
+        class Rcon(FakeRcon):
+            def __init__(self):
+                super().__init__()
+                self.ammo = 30
+
+            def cmd(self, command):
+                self.commands.append(command)
+                if command.endswith(" 90 0") and "tp Shooter" in command:
+                    lane["open"] = True
+                if "GunCurrentAmmoCount" in command and "data get" in command:
+                    return f"entity has the following entity data: {self.ammo}"
+                return "ok"
+
+        fired = {"n": 0}
+        lane = {"open": False}
+        hits = {"n": 0}
+
+        def shooter(command, *args):
+            if command == "state":
+                return {
+                    "name": "Shooter",
+                    "slot": 0,
+                    "pos": [8.0, 65.0, 0.0],
+                    "dimension": self.ARENA,
+                }
+            if command == "slot 0":
+                return {}
+            if command.startswith("entities"):
+                return {"entities": [{"type": "player"}]}
+            assert command.startswith("aimshoot ")
+            fired["n"] += 1
+            rcon.ammo -= 1
+            # Lane 1 lands one hit then only misses; lane 2 always hits.
+            if lane["open"] or fired["n"] == 1:
+                hits["n"] += 1
+            return {"result": "SUCCESS"}
+
+        def victim(command, *args):
+            assert command == "state"
+            return {
+                "name": "Victim",
+                "pos": [0.0, 65.0, 0.0],
+                "dimension": self.ARENA,
+                "health": max(0.0, 20.0 - 4.25 * hits["n"]),
+            }
+
+        rcon = Rcon()
+        with patch("time.sleep"):
+            ok, detail = duo.face_off(
+                rcon,
+                shooter,
+                victim,
+                dead=lambda s: s.get("health", 20) <= 0,
+                until_dead=True,
+                lanes=((8, 0, -90), (-8, 0, 90)),
+                shots_per_lane=4,
+            )
+        self.assertTrue(ok, detail)
+        self.assertEqual(fired["n"], 12)
+
 
 class HudChecks(unittest.TestCase):
     def test_duel_corner_lanes_keep_kit_and_admin_shooters_in_bounds(self):

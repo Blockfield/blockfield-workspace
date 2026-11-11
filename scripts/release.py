@@ -263,10 +263,10 @@ def repo_dir(side):
 def fetch_main(repo):
     # A shallow submodule clone answers merge-base backwards (next behind
     # main looks unrelated), so deepen it before is_ancestor / merge-tree.
+    # Unshallow every branch at once, so next history beyond main is complete too.
     if git(repo, "rev-parse", "--is-shallow-repository").strip() == "true":
-        git(repo, "fetch", "--unshallow", "-q", "origin", "main")
-    else:
-        git(repo, "fetch", "-q", "origin", "main")
+        git(repo, "fetch", "--unshallow", "-q", "origin")
+    git(repo, "fetch", "-q", "origin", "main")
     git(repo, "fetch", "-q", "origin", "next", check=False)
 
 

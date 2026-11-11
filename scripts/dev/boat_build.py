@@ -1237,7 +1237,10 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             marker = f"{remote}/{BOAT_APPLIED_PATHS}"
             rc, out = vm_exec(
                 vm_id,
+                # core.quotePath=false: non-ASCII names are recorded verbatim,
+                # not C-quoted, so the reset can match them as literal paths.
                 f"cat {shlex.quote(guest)} | git -C {shlex.quote(remote)} "
+                "-c core.quotePath=false "
                 f"apply --numstat - | cut -f3- > {shlex.quote(marker)}",
             )
             if rc != 0:

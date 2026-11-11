@@ -675,6 +675,12 @@ class BranchSubmodules(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
+        # The server pin is git-ignored, not a submodule: every workspace
+        # commit carries it, so fixtures must too.
+        self.pin = "b" * 40
+        (self.super / "pins").mkdir()
+        (self.super / "pins" / "server.sha").write_text(self.pin + "\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.super, check=True)
         subprocess.run(["git", "commit", "-qm", "subs"], cwd=self.super, check=True)
         subprocess.run(["git", "branch", "task"], cwd=self.super, check=True)
 
@@ -840,6 +846,220 @@ class EnsureWorktree(unittest.TestCase):
         self.assertIn("reset --hard", self.cmds[0])
         self.assertIn("clean -fd", self.cmds[0])
         self.assertIn("apply --check", self.cmds[1])
+
+    def test_clean_local_server_resets_dirty_remote(self):
+        # Fail-before: a reused VM kept the previous run's applied server
+        # patch while remote_shas reported a matching HEAD, so the run
+        # tested stale server edits. A clean local server resets the
+        # remote tree to the pin even when no patch ships.
+        pin = "c" * 40
+
+        def dirty_vm(vm_id, script, timeout=120):
+            self.cmds.append(script)
+            if "status --short" in script:
+                return 0, " M s.txt\n"
+            return 0, ""
+
+        pushed = []
+        with (
+            patch.object(boat_build, "ROOT", self.repo),
+            patch.object(
+                boat_build, "run_boat", side_effect=lambda *a, **k: pushed.append(a)
+            ),
+            patch.object(boat_build, "vm_exec", side_effect=dirty_vm),
+        ):
+            n = boat_build.ensure_worktree(
+                "bx_x", "/vm/root", "/vm", {"": self.base, "server": pin}, self.stage
+            )
+        self.assertEqual(n, 0)
+        self.assertEqual(pushed, [], "no patch ships, so nothing is pushed")
+        resets = [c for c in self.cmds if "reset --hard" in c]
+        self.assertEqual(len(resets), 1, self.cmds)
+        self.assertIn(pin, resets[0])
+        self.assertIn("/vm/root/server", resets[0])
+
+    def test_clean_remote_server_needs_no_reset(self):
+        # A marker read plus one status probe, then silence: a clean remote
+        # tree with no recorded paths is left alone.
+        pin = "c" * 40
+        with (
+            patch.object(boat_build, "ROOT", self.repo),
+            patch.object(boat_build, "run_boat", return_value=None),
+            patch.object(boat_build, "vm_exec", side_effect=self.fake_vm()),
+        ):
+            n = boat_build.ensure_worktree(
+                "bx_x", "/vm/root", "/vm", {"": self.base, "server": pin}, self.stage
+            )
+        self.assertEqual(n, 0)
+        self.assertEqual(len(self.cmds), 2, self.cmds)
+        self.assertIn("boat-applied-paths", self.cmds[0])
+        self.assertIn("status --short", self.cmds[1])
+
+    def test_failed_status_probe_resets_like_a_dirty_tree(self):
+        cmds = []
+
+        def execute(vm_id, script, timeout=120):
+            cmds.append(script)
+            if "status --short" in script:
+                return 128, "fatal: index file corrupt"
+            return 0, ""
+
+        with patch.object(boat_build, "vm_exec", side_effect=execute):
+            state = boat_build.reset_stale_server("bx_x", "/vm/root", "d" * 40)
+        self.assertEqual(state, "reset")
+        self.assertTrue(any("reset --hard" in c for c in cmds), cmds)
+
+
+class StaleServerMarker(unittest.TestCase):
+    """A server patch can force-add an IGNORED file (bot thread 4541174578).
+
+    `git apply` leaves new files untracked, and `git status --short` hides
+    ignored ones, so the status-only stale-server reset left them on a reused
+    warm VM. ensure_worktree records every applied path in
+    remote .git/boat-applied-paths; reset_stale_server removes each recorded
+    path the pin does not track (plain `clean -fd` keeps ignored files, while
+    `-x` would wipe build caches).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        make_repo(self.root / "server")
+        self.remote = self.root / "server"
+        (self.remote / ".gitignore").write_text("*.log\nbuild/\n")
+        (self.remote / "tracked.txt").write_text("v1\n")
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=self.remote,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "commit", "-qm", "pin"], cwd=self.remote, check=True)
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.remote,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.pin = out.stdout.strip()
+        self.cmds = []
+
+    def real_vm(self):
+        def execute(vm_id, script, timeout=120):
+            self.cmds.append(script)
+            proc = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True
+            )
+            return proc.returncode, proc.stdout + proc.stderr
+
+        return execute
+
+    def test_ignored_file_from_patch_removed_on_next_clean_run(self):
+        # Fail-before: status is clean (the ignored file is invisible) but
+        # the marker lists it, so the next clean run must still reset and
+        # remove it — while unrecorded caches survive (no clean -x).
+        (self.remote / "build").mkdir()
+        (self.remote / "build" / "ignored.log").write_text("stale\n")
+        (self.remote / "build" / "cache.bin").write_text("cache\n")
+        (self.remote / ".dev").mkdir()
+        (self.remote / ".dev" / "task").write_text("state\n")
+        (self.remote / ".cache").mkdir()
+        (self.remote / ".cache" / "dep").write_text("dep\n")
+        (self.remote / ".git" / "boat-applied-paths").write_text("build/ignored.log\n")
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=self.remote,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotIn("ignored.log", status.stdout)
+        with patch.object(boat_build, "vm_exec", side_effect=self.real_vm()):
+            state = boat_build.reset_stale_server("bx_x", str(self.root), self.pin)
+        self.assertEqual(state, "reset")
+        self.assertFalse((self.remote / "build" / "ignored.log").exists())
+        self.assertTrue((self.remote / "build" / "cache.bin").exists())
+        self.assertTrue((self.remote / ".dev" / "task").exists())
+        self.assertTrue((self.remote / ".cache" / "dep").exists())
+        self.assertFalse((self.remote / ".git" / "boat-applied-paths").exists())
+        self.assertTrue(
+            any(
+                "clean -fd" in c and "clean -x" not in c and "-e .dev" in c
+                for c in self.cmds
+            ),
+            self.cmds,
+        )
+        self.assertTrue(any("ls-files" in c for c in self.cmds), self.cmds)
+
+    def test_no_marker_clean_tree_untouched(self):
+        # No marker and a clean tree: probes run, nothing is reset or removed.
+        (self.remote / "build").mkdir()
+        (self.remote / "build" / "cache.bin").write_text("cache\n")
+        with patch.object(boat_build, "vm_exec", side_effect=self.real_vm()):
+            state = boat_build.reset_stale_server("bx_x", str(self.root), self.pin)
+        self.assertEqual(state, "clean")
+        self.assertFalse(any("reset --hard" in c for c in self.cmds), self.cmds)
+        self.assertFalse(any("clean -fd" in c for c in self.cmds), self.cmds)
+        self.assertTrue((self.remote / "build" / "cache.bin").exists())
+
+    def test_server_patch_records_applied_paths(self):
+        # End to end on real repos: a force-added ignored file ships in the
+        # server patch, lands on the remote untracked (invisible to status),
+        # and its path is recorded for the next clean run.
+        make_repo(self.root / "ws" / "server")
+        server = self.root / "ws" / "server"
+        (server / ".gitignore").write_text("*.log\n")
+        (server / "s.txt").write_text("v1\n")
+        (server / "build").mkdir()
+        (server / "build" / "ignored.log").write_text("stale\n")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=server, check=True, capture_output=True
+        )
+        subprocess.run(["git", "commit", "-qm", "pin"], cwd=server, check=True)
+        subprocess.run(
+            ["git", "add", "-f", "build/ignored.log"],
+            cwd=server,
+            check=True,
+            capture_output=True,
+        )
+        pin = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=server,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        make_repo(self.root / "vmroot" / "server", origin=server)
+        stage = self.root / "stage"
+        stage.mkdir()
+        with (
+            patch.object(boat_build, "ROOT", self.root / "ws"),
+            patch.object(boat_build, "run_boat", return_value=None),
+            patch.object(boat_build, "vm_exec", side_effect=self.real_vm()),
+        ):
+            n = boat_build.ensure_worktree(
+                "bx_x",
+                str(self.root / "vmroot"),
+                str(self.root),
+                {"server": pin},
+                stage,
+            )
+        self.assertEqual(n, 1)
+        remote = self.root / "vmroot" / "server"
+        marker = remote / ".git" / "boat-applied-paths"
+        self.assertTrue(marker.is_file(), self.cmds)
+        self.assertEqual(marker.read_text().split(), ["build/ignored.log"])
+        self.assertTrue((remote / "build" / "ignored.log").is_file())
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=remote,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status.stdout.strip(), "")
 
 
 class LocalJarArgs(unittest.TestCase):
@@ -1514,6 +1734,13 @@ class UninitializedSubmodules(unittest.TestCase):
         commit_file(root / "origin", "f.txt", "a\n", "init")
         make_repo(root / "super", origin=root / "origin")
         self.super = root / "super"
+        # Fixture workspaces carry the server pin like the real checkout.
+        (self.super / "pins").mkdir()
+        (self.super / "pins" / "server.sha").write_text("b" * 40 + "\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.super, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "pin server"], cwd=self.super, check=True
+        )
 
     def test_remote_uninitialized_submodule_is_initialized(self):
         origin = self.super.parent / "origin"
@@ -1684,3 +1911,187 @@ class UninitializedSubmodules(unittest.TestCase):
                 )
         self.assertIn("gone", str(ctx.exception))
         self.assertIn("cannot initialize submodule", str(ctx.exception))
+
+
+class PinnedServer(unittest.TestCase):
+    """The remote build checks out exactly the pinned server SHA (ws#88).
+
+    The server is git-ignored, not a submodule, so ls-tree/submodule
+    status never list it: the old code left the golden's stale server
+    checkout on the VM while the task tested pinned server code.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        make_repo(root / "ws")
+        self.ws = root / "ws"
+        self.pin = "c" * 40
+        (self.ws / "pins").mkdir()
+        (self.ws / "pins" / "server.sha").write_text(self.pin + "\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.ws, check=True)
+        subprocess.run(["git", "commit", "-qm", "pin server"], cwd=self.ws, check=True)
+
+    def test_local_shas_includes_pin(self):
+        args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            self.assertEqual(boat_build.local_shas(args)["server"], self.pin)
+
+    def test_branch_reads_branch_pin(self):
+        new_pin = "d" * 40
+        subprocess.run(["git", "checkout", "-qb", "srv"], cwd=self.ws, check=True)
+        (self.ws / "pins" / "server.sha").write_text(new_pin + "\n")
+        subprocess.run(["git", "commit", "-qam", "bump pin"], cwd=self.ws, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
+        args = boat_build.parse_args(["--vm", "bx_x", "--branch", "srv", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            self.assertEqual(boat_build.local_shas(args)["server"], new_pin)
+
+    def test_missing_pin_fails_loudly(self):
+        (self.ws / "pins" / "server.sha").unlink()
+        subprocess.run(["git", "commit", "-qam", "drop pin"], cwd=self.ws, check=True)
+        args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            with self.assertRaises(SystemExit):
+                boat_build.local_shas(args)
+
+    def test_branch_missing_pin_fails_instead_of_worktree_fallback(self):
+        # Fail-before: --branch at a commit with no pin silently tested
+        # the current checkout's pin (an unrelated server revision).
+        subprocess.run(["git", "checkout", "-qb", "nopin"], cwd=self.ws, check=True)
+        (self.ws / "pins" / "server.sha").unlink()
+        subprocess.run(["git", "commit", "-qam", "drop pin"], cwd=self.ws, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
+        args = boat_build.parse_args(
+            ["--vm", "bx_x", "--branch", "nopin", "--", "true"]
+        )
+        with patch.object(boat_build, "ROOT", self.ws):
+            with self.assertRaises(SystemExit):
+                boat_build.local_shas(args)
+
+    def test_branch_empty_pin_fails_instead_of_worktree_fallback(self):
+        # Fail-before: --branch at a commit with an empty pin silently
+        # tested the current checkout's pin.
+        subprocess.run(["git", "checkout", "-qb", "emptypin"], cwd=self.ws, check=True)
+        (self.ws / "pins" / "server.sha").write_text("\n")
+        subprocess.run(["git", "commit", "-qam", "empty pin"], cwd=self.ws, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
+        args = boat_build.parse_args(
+            ["--vm", "bx_x", "--branch", "emptypin", "--", "true"]
+        )
+        with patch.object(boat_build, "ROOT", self.ws):
+            with self.assertRaises(SystemExit):
+                boat_build.local_shas(args)
+
+    def test_uncommitted_pin_wins_when_shipping_worktree(self):
+        # Fail-before: the committed pin was resolved before the workspace
+        # patch applied, so the VM tested the old server code with the new
+        # pin file.
+        new_pin = "d" * 40
+        (self.ws / "pins" / "server.sha").write_text(new_pin + "\n")
+        args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            self.assertEqual(boat_build.local_shas(args)["server"], new_pin)
+
+    def test_no_worktree_keeps_committed_pin(self):
+        # --no-worktree never ships the pin change, so the committed pin
+        # (the tree the VM actually checks out) still decides.
+        (self.ws / "pins" / "server.sha").write_text("d" * 40 + "\n")
+        args = boat_build.parse_args(["--vm", "bx_x", "--no-worktree", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            self.assertEqual(boat_build.local_shas(args)["server"], self.pin)
+
+    def test_server_override_without_checkout_names_server_checkout(self):
+        args = boat_build.parse_args(
+            ["--vm", "bx_x", "--submodule", f"server={'e' * 40}", "--", "true"]
+        )
+        with patch.object(boat_build, "ROOT", self.ws):
+            with self.assertRaises(SystemExit) as ctx:
+                boat_build.local_shas(args)
+        self.assertIn("server-checkout", str(ctx.exception))
+
+    def run_server_ensure(self, replies):
+        scripts = list(replies)
+
+        def fake_vm_exec(vm_id, script, timeout=120):
+            self.vm_scripts.append(script)
+            return scripts.pop(0)
+
+        self.vm_scripts = []
+        stage = Path(self.tmp.name) / "stage"
+        stage.mkdir(exist_ok=True)
+        with (
+            patch.object(boat_build, "ROOT", self.ws),
+            patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec),
+            patch.object(boat_build, "run_boat", return_value=FakeResult(0, "{}")),
+        ):
+            return boat_build.ensure_repo(
+                "bx_x",
+                "/srv/guest/blockfield-workspace",
+                "/srv/guest",
+                "server",
+                self.pin,
+                stage,
+            )
+
+    def test_stale_server_checked_out_exactly(self):
+        stale = "9" * 40
+        self.assertEqual(
+            self.run_server_ensure(
+                [
+                    (0, ""),  # server/.git exists: skip the clone
+                    (0, stale),  # rev-parse HEAD: stale golden checkout
+                    (0, self.pin),  # fetch origin <pin>: pushed
+                    (0, "checked out"),  # checkout --detach
+                    (0, self.pin),  # rev-parse HEAD: at the pin
+                ]
+            ),
+            "checked out",
+        )
+        self.assertIn("blockfield-server", self.vm_scripts[0])
+        checkout = next(s for s in self.vm_scripts if "checkout --detach" in s)
+        self.assertIn(self.pin, checkout)
+
+    def test_server_already_there_skips_transfer(self):
+        self.assertEqual(
+            self.run_server_ensure([(0, ""), (0, self.pin)]), "already there"
+        )
+        self.assertEqual(len(self.vm_scripts), 2)
+
+    def test_server_head_mismatch_fails_loudly(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.run_server_ensure(
+                [
+                    (0, ""),
+                    (0, "9" * 40),
+                    (0, self.pin),
+                    (0, "checked out"),
+                    (0, "deadbee"),  # checkout ok... but HEAD is elsewhere
+                ]
+            )
+        self.assertIn("server", str(ctx.exception))
+        self.assertIn("deadbee", str(ctx.exception))
+
+    def test_remote_shas_reports_server(self):
+        guest = Path(self.tmp.name) / "guest"
+        make_repo(guest)
+        commit_file(guest, "f.txt", "a\n", "init")
+        make_repo(guest / "server")
+        want = commit_file(guest / "server", "s.txt", "s\n", "srv")
+        guest_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=guest,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        def execute(_vm, script, timeout=120):
+            result = subprocess.run(script, shell=True, capture_output=True, text=True)
+            return result.returncode, result.stdout + result.stderr
+
+        with patch.object(boat_build, "vm_exec", side_effect=execute):
+            current = boat_build.remote_shas("vm", str(guest))
+        self.assertEqual(current[""], guest_head)
+        self.assertEqual(current["server"], want)

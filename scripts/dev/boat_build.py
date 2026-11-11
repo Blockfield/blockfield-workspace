@@ -195,6 +195,36 @@ def local_repo_present(rel):
     return (ROOT / rel / ".git").exists() if rel else True
 
 
+def pinned_server_sha(ws_commit=None):
+    """Pinned server SHA for the wanted workspace commit.
+
+    The private server is not a submodule (a public repo cannot track a
+    private one): its pin lives in pins/server.sha. Prefer the pin recorded
+    at the wanted workspace commit (so --branch/--workspace-sha transfer the
+    pin they point at). A missing or empty pin at the requested commit fails
+    loudly: falling back to the worktree file would silently test an
+    unrelated server revision. Without a commit, read the worktree file,
+    which fails loudly when missing or empty.
+    """
+    if ws_commit:
+        out = run_git("show", f"{ws_commit}:pins/server.sha", cwd=ROOT, check=False)
+        if out.returncode != 0:
+            raise SystemExit(
+                f"no pins/server.sha at {ws_commit}: refusing to fall back to "
+                "the worktree pin (it would test an unrelated server revision)"
+            )
+        if not out.stdout.strip():
+            raise SystemExit(
+                f"pins/server.sha at {ws_commit} is empty: refusing to fall "
+                "back to the worktree pin (it would test an unrelated revision)"
+            )
+        return out.stdout.strip()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import server_checkout
+
+    return server_checkout.pinned_sha(ROOT)
+
+
 def local_shas(args):
     """Resolve wanted SHAs: {repo_relpath: sha}, '' is the workspace itself."""
     if args.branch:
@@ -221,15 +251,34 @@ def local_shas(args):
             if line:
                 sha, name = line.split()[:2]
                 wanted[name] = sha
+    # The server is git-ignored, not a submodule, so neither ls-tree nor
+    # submodule status lists it: without this the VM keeps the golden's
+    # stale server checkout while the task tests pinned server code.
+    wanted["server"] = pinned_server_sha(wanted[""])
+    if args.with_worktree:
+        head = run_git("rev-parse", "HEAD", cwd=ROOT, check=False)
+        if head.returncode == 0 and head.stdout.strip() == wanted[""]:
+            # The workspace patch (if any) applies onto wanted[""], so the
+            # pin that lands on the VM is the worktree file: an uncommitted
+            # pins/server.sha change must win over the committed pin.
+            # (Otherwise the patch installs the new pin while the server
+            # stays at the old SHA.) Fails loudly when the worktree pin is
+            # missing or empty.
+            wanted["server"] = pinned_server_sha()
     for item in args.submodule:
         name, _, sha = item.partition("=")
         if not name or not sha:
             raise SystemExit(f"bad --submodule {item!r}, want PATH=SHA")
         repo = ROOT / name
         if not local_repo_present(name):
+            hint = (
+                "`just server-checkout` first (needs access to the private server repo)"
+                if name == "server"
+                else f"`git submodule update --init {name}` first"
+            )
             raise SystemExit(
                 f"bad --submodule {item!r}: no initialized checkout at {name}; "
-                f"run `git submodule update --init {name}` first"
+                f"run {hint}"
             )
         wanted[name] = run_git(
             "rev-parse", f"{sha}^{{commit}}", cwd=repo
@@ -525,7 +574,11 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
 def remote_shas(vm_id, remote_root):
     script = (
         f"cd {shlex.quote(remote_root)} && git rev-parse HEAD && "
-        "git submodule status | sed 's/^ *//'"
+        "git submodule status | sed 's/^ *//' && "
+        # The server is git-ignored, not a submodule: report its HEAD in the
+        # same "<sha> <name>" shape so a stale golden checkout is detected.
+        "{ test -d server/.git && git -C server rev-parse HEAD | "
+        "awk '{print $1\" server\"}'; true; }"
     )
     _, out = vm_exec(vm_id, script)
     lines = out.strip().splitlines()
@@ -736,7 +789,29 @@ GH_CREDENTIAL = "credential.https://github.com.helper=!gh auth git-credential"
 def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
     """Check out the exact commit on the VM, transferring objects if needed."""
     remote = f"{remote_root}/{rel}".rstrip("/")
-    if rel:
+    if rel == "server":
+        # Not a submodule (no .gitmodules entry): clone the private server
+        # repo directly. Boat puts the GitHub token only into its own clones
+        # and gh, not into git's global config.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import server_checkout
+
+        url = server_checkout.SERVER_URL
+        rc, out = vm_exec(
+            vm_id,
+            f"test -e {shlex.quote(remote + '/.git')} || {{ "
+            f"{{ git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)} || "
+            f"git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)}; }}; }} && "
+            # A fresh clone starts with hooks unwired: point it at the versioned
+            # hooks when they exist and no explicit choice was made (best-effort).
+            f"{{ test -d {shlex.quote(remote + '/.githooks')} && "
+            f"git -C {shlex.quote(remote)} config --get core.hooksPath >/dev/null 2>&1 || "
+            f"test ! -d {shlex.quote(remote + '/.githooks')} || "
+            f"git -C {shlex.quote(remote)} config core.hooksPath .githooks || true; }}",
+        )
+        if rc != 0:
+            raise RuntimeError(f"cannot initialize server checkout:\n{out}")
+    elif rel:
         rc, out = vm_exec(
             vm_id,
             # Clone the default branch rather than `submodule update`, which needs the gitlink commit
@@ -779,10 +854,14 @@ def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
     if not (rc == 0 and out.strip() == want):
         # Local-only commits: ship the delta as a bundle (never via origin).
         if not local_repo_present(rel):
+            hint = (
+                "`just server-checkout` first (needs access to the private server repo)"
+                if rel == "server"
+                else f"`git submodule update --init {rel}` first"
+            )
             raise RuntimeError(
                 f"want {want} in {rel or 'workspace'} is not on the VM and the "
-                f"local checkout of {rel} is not initialized; run "
-                f"`git submodule update --init {rel}` first"
+                f"local checkout of {rel} is not initialized; run {hint}"
             )
         if (
             run_git(
@@ -1035,6 +1114,51 @@ def wait_state(vm_id, want=("stopped",), timeout=240):
     return state
 
 
+# Marker (inside the remote server .git dir) listing every path the last
+# applied server patch touched. A patch can force-add an IGNORED file, which
+# `git status --short` hides, so the marker — not the status probe — drives
+# the removal of stale ignored leftovers on reused warm VMs.
+BOAT_APPLIED_PATHS = ".git/boat-applied-paths"
+
+
+def reset_stale_server(vm_id, remote_root, want):
+    """Reset a dirty remote server tree to the pin when no patch ships.
+
+    A reused warm VM still carries the previous run's applied server patch
+    while remote_shas reports a matching HEAD, so without this the run
+    tests stale server edits despite a clean local server. ensure_worktree
+    records every applied path in .git/boat-applied-paths; any recorded path
+    the pin does not track is removed explicitly (plain `clean -fd` keeps
+    ignored files, while `-x` would wipe build caches).
+    """
+    remote = f"{remote_root}/server"
+    marker = f"{remote}/{BOAT_APPLIED_PATHS}"
+    mrc, applied = vm_exec(vm_id, f"cat {shlex.quote(marker)} 2>/dev/null")
+    recorded = applied if mrc == 0 and applied.strip() else ""
+    if not recorded:
+        rc, out = vm_exec(vm_id, f"git -C {shlex.quote(remote)} status --short")
+        # A failed probe (corrupt index, half-applied patch) is not proof of a
+        # clean tree: reset it like a dirty one.
+        if rc == 0 and not out.strip():
+            return "clean"
+    rc, out = vm_exec(
+        vm_id,
+        f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(want)} "
+        f"&& if [ -f {shlex.quote(marker)} ]; then while IFS= read -r f "
+        f'|| [ -n "$f" ]; do [ -n "$f" ] || continue; git -C '
+        f"{shlex.quote(remote)} "
+        f'ls-files --error-unmatch -- "$f" >/dev/null 2>&1 '
+        f'|| rm -rf -- {shlex.quote(remote)}/"$f"; '
+        f"done < {shlex.quote(marker)}; fi "
+        "&& git -C "
+        f"{shlex.quote(remote)} clean -fd -e .dev -e .cache "
+        f"&& rm -f {shlex.quote(marker)}",
+    )
+    if rc != 0:
+        raise RuntimeError(f"stale server reset to {want[:12]} failed:\n{out}")
+    return "reset"
+
+
 def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
     """Ship `git diff HEAD` + untracked files of the touched repos as patches.
 
@@ -1061,25 +1185,34 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             name = f"{(rel or 'workspace').replace('/', '_')}.patch"
             (stage_dir / name).write_bytes(patch)
             patches[rel] = name
+    if "server" in wanted and "server" not in patches:
+        reset_stale_server(vm_id, remote_root, wanted["server"])
     if not patches:
         return 0
     run_boat("push", vm_id, str(stage_dir))
     for rel, name in patches.items():
         remote = f"{remote_root}/{rel}".rstrip("/")
         guest = f"{home}/{stage_dir.name}/{name}"
-        # A reused warm VM still carries the previous run's applied patch, so
-        # apply --check would fail on the leftovers: reset to want first
-        # (.dev/.cache hold task state and local caches, never patch output).
-        rc, out = vm_exec(
-            vm_id,
-            f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(wanted[rel])} "
-            "&& git -C "
-            f"{shlex.quote(remote)} clean -fd -e .dev -e .cache",
-        )
-        if rc != 0:
-            raise RuntimeError(
-                f"worktree reset to {wanted[rel][:12]} failed for {rel or 'workspace'}:\n{out}"
+        if rel == "server":
+            # A reused warm VM still carries the previous run's applied patch,
+            # including ignored files `git status` cannot see: the recorded
+            # applied paths drive their removal.
+            reset_stale_server(vm_id, remote_root, wanted[rel])
+        else:
+            # A reused warm VM still carries the previous run's applied patch,
+            # so apply --check would fail on the leftovers: reset to want
+            # first (.dev/.cache hold task state and local caches, never patch
+            # output).
+            rc, out = vm_exec(
+                vm_id,
+                f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(wanted[rel])} "
+                "&& git -C "
+                f"{shlex.quote(remote)} clean -fd -e .dev -e .cache",
             )
+            if rc != 0:
+                raise RuntimeError(
+                    f"worktree reset to {wanted[rel][:12]} failed for {rel or 'workspace'}:\n{out}"
+                )
         rc, out = vm_exec(
             vm_id,
             f"cat {shlex.quote(guest)} | git -C {shlex.quote(remote)} apply --check -",
@@ -1098,6 +1231,22 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             raise RuntimeError(
                 f"worktree patch apply failed for {rel or 'workspace'}:\n{out}"
             )
+        if rel == "server":
+            # Record every applied path so a later clean run can remove stale
+            # leftovers the status probe cannot see (e.g. ignored files).
+            marker = f"{remote}/{BOAT_APPLIED_PATHS}"
+            rc, out = vm_exec(
+                vm_id,
+                # core.quotePath=false: non-ASCII names are recorded verbatim,
+                # not C-quoted, so the reset can match them as literal paths.
+                f"cat {shlex.quote(guest)} | git -C {shlex.quote(remote)} "
+                "-c core.quotePath=false "
+                f"apply --numstat - | cut -f3- > {shlex.quote(marker)}",
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    f"worktree patch path record failed for {rel or 'workspace'}:\n{out}"
+                )
     return len(patches)
 
 
@@ -1393,6 +1542,10 @@ def main(argv=None):
             patched = ensure_worktree(vm_id, remote_root, home, wanted, stage_dir)
         else:
             patched = 0
+            if "server" in wanted:
+                # --no-worktree ships no patch, so a previous run's server
+                # patch must still be dropped.
+                reset_stale_server(vm_id, remote_root, wanted["server"])
         env_file = write_env(vm_id, remote_root, args.task)
         bf_home = f"{remote_root}/.dev/{args.task}"
         installed = []

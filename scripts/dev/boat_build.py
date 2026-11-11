@@ -1114,25 +1114,45 @@ def wait_state(vm_id, want=("stopped",), timeout=240):
     return state
 
 
+# Marker (inside the remote server .git dir) listing every path the last
+# applied server patch touched. A patch can force-add an IGNORED file, which
+# `git status --short` hides, so the marker — not the status probe — drives
+# the removal of stale ignored leftovers on reused warm VMs.
+BOAT_APPLIED_PATHS = ".git/boat-applied-paths"
+
+
 def reset_stale_server(vm_id, remote_root, want):
     """Reset a dirty remote server tree to the pin when no patch ships.
 
     A reused warm VM still carries the previous run's applied server patch
     while remote_shas reports a matching HEAD, so without this the run
-    tests stale server edits despite a clean local server. One status
-    probe; a clean or absent tree is left alone.
+    tests stale server edits despite a clean local server. ensure_worktree
+    records every applied path in .git/boat-applied-paths; any recorded path
+    the pin does not track is removed explicitly (plain `clean -fd` keeps
+    ignored files, while `-x` would wipe build caches).
     """
     remote = f"{remote_root}/server"
-    rc, out = vm_exec(vm_id, f"git -C {shlex.quote(remote)} status --short")
-    # A failed probe (corrupt index, half-applied patch) is not proof of a
-    # clean tree: reset it like a dirty one.
-    if rc == 0 and not out.strip():
-        return "clean"
+    marker = f"{remote}/{BOAT_APPLIED_PATHS}"
+    mrc, applied = vm_exec(vm_id, f"cat {shlex.quote(marker)} 2>/dev/null")
+    recorded = applied if mrc == 0 and applied.strip() else ""
+    if not recorded:
+        rc, out = vm_exec(vm_id, f"git -C {shlex.quote(remote)} status --short")
+        # A failed probe (corrupt index, half-applied patch) is not proof of a
+        # clean tree: reset it like a dirty one.
+        if rc == 0 and not out.strip():
+            return "clean"
     rc, out = vm_exec(
         vm_id,
         f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(want)} "
+        f"&& if [ -f {shlex.quote(marker)} ]; then while IFS= read -r f "
+        f'|| [ -n "$f" ]; do [ -n "$f" ] || continue; git -C '
+        f"{shlex.quote(remote)} "
+        f'ls-files --error-unmatch -- "$f" >/dev/null 2>&1 '
+        f'|| rm -rf -- {shlex.quote(remote)}/"$f"; '
+        f"done < {shlex.quote(marker)}; fi "
         "&& git -C "
-        f"{shlex.quote(remote)} clean -fd -e .dev -e .cache",
+        f"{shlex.quote(remote)} clean -fd -e .dev -e .cache "
+        f"&& rm -f {shlex.quote(marker)}",
     )
     if rc != 0:
         raise RuntimeError(f"stale server reset to {want[:12]} failed:\n{out}")
@@ -1173,19 +1193,26 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
     for rel, name in patches.items():
         remote = f"{remote_root}/{rel}".rstrip("/")
         guest = f"{home}/{stage_dir.name}/{name}"
-        # A reused warm VM still carries the previous run's applied patch, so
-        # apply --check would fail on the leftovers: reset to want first
-        # (.dev/.cache hold task state and local caches, never patch output).
-        rc, out = vm_exec(
-            vm_id,
-            f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(wanted[rel])} "
-            "&& git -C "
-            f"{shlex.quote(remote)} clean -fd -e .dev -e .cache",
-        )
-        if rc != 0:
-            raise RuntimeError(
-                f"worktree reset to {wanted[rel][:12]} failed for {rel or 'workspace'}:\n{out}"
+        if rel == "server":
+            # A reused warm VM still carries the previous run's applied patch,
+            # including ignored files `git status` cannot see: the recorded
+            # applied paths drive their removal.
+            reset_stale_server(vm_id, remote_root, wanted[rel])
+        else:
+            # A reused warm VM still carries the previous run's applied patch,
+            # so apply --check would fail on the leftovers: reset to want
+            # first (.dev/.cache hold task state and local caches, never patch
+            # output).
+            rc, out = vm_exec(
+                vm_id,
+                f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(wanted[rel])} "
+                "&& git -C "
+                f"{shlex.quote(remote)} clean -fd -e .dev -e .cache",
             )
+            if rc != 0:
+                raise RuntimeError(
+                    f"worktree reset to {wanted[rel][:12]} failed for {rel or 'workspace'}:\n{out}"
+                )
         rc, out = vm_exec(
             vm_id,
             f"cat {shlex.quote(guest)} | git -C {shlex.quote(remote)} apply --check -",
@@ -1204,6 +1231,19 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             raise RuntimeError(
                 f"worktree patch apply failed for {rel or 'workspace'}:\n{out}"
             )
+        if rel == "server":
+            # Record every applied path so a later clean run can remove stale
+            # leftovers the status probe cannot see (e.g. ignored files).
+            marker = f"{remote}/{BOAT_APPLIED_PATHS}"
+            rc, out = vm_exec(
+                vm_id,
+                f"cat {shlex.quote(guest)} | git -C {shlex.quote(remote)} "
+                f"apply --numstat - | cut -f3- > {shlex.quote(marker)}",
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    f"worktree patch path record failed for {rel or 'workspace'}:\n{out}"
+                )
     return len(patches)
 
 

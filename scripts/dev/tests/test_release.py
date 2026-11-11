@@ -2895,6 +2895,85 @@ class FfNextToMain(unittest.TestCase):
         self.assertEqual(self.remote(side, "refs/heads/next"), before)
         self.assertIn("diverged", "\n".join(said))
 
+    def test_shallow_clone_unshallows_before_ancestry(self):
+        # A shallow submodule clone must still answer the next/main sync
+        # check correctly: fetch_main unshallows before is_ancestor/merge-tree.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        origin = base / "origin.git"
+
+        def git(repo, *args):
+            return subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=t@invalid",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                    *args,
+                ],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            ).stdout.strip()
+
+        git(base, "init", "--bare", "-q", "origin.git")
+        git(base, "clone", "-q", f"file://{origin}", "seed")
+        seed = base / "seed"
+        (seed / "file.txt").write_text("one\n")
+        git(seed, "add", "file.txt")
+        git(seed, "commit", "-qm", "one")
+        git(seed, "push", "-q", "origin", "HEAD:main")
+        git(seed, "push", "-q", "origin", "HEAD:next")
+        (seed / "file.txt").write_text("two\n")
+        git(seed, "commit", "-qam", "two")
+        git(seed, "push", "-q", "origin", "HEAD:main")
+        git(
+            base,
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            "--no-single-branch",
+            f"file://{origin}",
+            "side",
+        )
+        side = base / "side"
+        shallow = subprocess.run(
+            ["git", "-C", str(side), "rev-parse", "--is-shallow-repository"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(shallow, "true")
+        release.fetch_main(side)
+        shallow = subprocess.run(
+            ["git", "-C", str(side), "rev-parse", "--is-shallow-repository"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(shallow, "false")
+        main = subprocess.run(
+            ["git", "-C", str(side), "rev-parse", "origin/main"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        nxt = subprocess.run(
+            ["git", "-C", str(side), "rev-parse", "origin/next"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertTrue(release.is_ancestor(side, nxt, main))
+        self.assertFalse(release.is_ancestor(side, main, nxt))
+
 
 if __name__ == "__main__":
     unittest.main()

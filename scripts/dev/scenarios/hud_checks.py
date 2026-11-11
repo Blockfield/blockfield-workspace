@@ -592,7 +592,14 @@ def rcon_kill(rcon, killer, victim):
     )
     # The heal lands on the victim's next tick: wait for it, or the probe's
     # 1-HP hit can still arrive first.
-    wait_for(lambda: victim("state").get("health", 0) > 1, 5)
+    if not wait_for(lambda: victim("state").get("health", 0) > 1, 5):
+        return [
+            check(
+                "victim healed before the fallback probe",
+                False,
+                f"{victim_name} health still <= 1 after the heal",
+            )
+        ], None
     if not probe_vulnerable(
         rcon, dim, offline_uuid(victim_name), offline_uuid(killer_name), timeout=60
     ):

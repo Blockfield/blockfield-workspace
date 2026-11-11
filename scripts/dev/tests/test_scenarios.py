@@ -6050,6 +6050,35 @@ class HudChecks(unittest.TestCase):
         # Only the pre-probe heal goes out; never the lethal hit.
         self.assertFalse(any(" run damage " in c for c in cmds), cmds)
 
+    def test_rcon_kill_stops_when_the_heal_never_lands(self):
+        cmds = []
+
+        def player(name, hp):
+            def call(text):
+                if text == "state":
+                    return {"name": name, "dimension": "a", "health": hp}
+                if text == "killfeed":
+                    return {"entries": []}
+                raise AssertionError(text)
+
+            return call
+
+        def command(text):
+            cmds.append(text)
+            return "Applied effect"
+
+        with (
+            patch.object(hud_checks, "wait_for", return_value=False),
+            patch.object(
+                hud_checks, "probe_vulnerable", side_effect=AssertionError("probed")
+            ),
+        ):
+            out, entry = hud_checks.rcon_kill(
+                SimpleNamespace(cmd=command), player("K", 20), player("V", 1)
+            )
+        self.assertIsNone(entry)
+        self.assertFalse(any(" run damage " in c for c in cmds), cmds)
+
     def test_rcon_kill_probes_before_lethal_hit(self):
         """Fail-before: the lethal RCON hit goes out only after the probe."""
         killer_name, victim_name = "Killer", "Victim"

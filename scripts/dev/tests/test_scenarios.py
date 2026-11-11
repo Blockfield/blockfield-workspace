@@ -6412,6 +6412,56 @@ class WeaponsSweep(unittest.TestCase):
             )
         self.assertEqual(stop, "victim-lane-unreachable")
 
+    def test_tacz_lane_teleport_stays_in_range(self):
+        # Fail-before for coordination#11: a bare RCON `tp` resolves the
+        # destination in the command SOURCE's dimension (the overworld for
+        # RCON), so it yanked the range player into the overworld at lane
+        # coords where the pad does not exist -> fall through ->
+        # victim-lane-unreachable on every TaCZ row. The lane tp must carry
+        # the range dimension, like every other scenario's tp does.
+        state = {"dim": weapons_sweep.VICTIM_DIM, "pos": [2.5, 65.0, -16.5]}
+        seen = []
+
+        class Rcon:
+            def cmd(self, command):
+                seen.append(command)
+                if command.startswith("execute in "):
+                    dim = command.split(" ", 2)[2].split(" run ", 1)[0]
+                    rest = command.split(" run ", 1)[1]
+                    if rest.startswith("tp hitbot "):
+                        coords = rest.split()[2:5]
+                        state["dim"] = dim
+                        state["pos"] = [float(c) for c in coords]
+                        return f"Teleported hitbot to {coords}"
+                    if "execute if block" in rest:
+                        return "Test passed"
+                    return "ok"
+                if command.startswith("tp hitbot "):
+                    # Vanilla semantics: no `execute in` means the RCON
+                    # source dimension (the overworld), and the lane pad
+                    # is not there, so every Pos read falls further.
+                    state["dim"] = "minecraft:overworld"
+                    state["pos"] = [float(c) for c in command.split()[2:5]]
+                    return "Teleported hitbot"
+                if command == "data get entity hitbot Pos":
+                    if state["dim"] != weapons_sweep.VICTIM_DIM:
+                        state["pos"][1] -= 3.0
+                    x, y, z = state["pos"]
+                    return f"hitbot has the following entity data: [{x}d, {y}d, {z}d]"
+                return "ok"
+
+        with patch("time.sleep", return_value=None):
+            self.assertTrue(weapons_sweep.take_firing_position(Rcon(), "hitbot", {}))
+        tps = [c for c in seen if "tp hitbot" in c]
+        self.assertTrue(tps, seen)
+        self.assertTrue(
+            all(
+                c.startswith(f"execute in {weapons_sweep.VICTIM_DIM} run tp ")
+                for c in tps
+            ),
+            tps,
+        )
+
     def test_pad_footing_uses_floor_coordinates_and_refills(self):
         # Review r4524578844: int(-18.5) truncates to -18 but the block
         # under the player is x=-19. The footing check must read the

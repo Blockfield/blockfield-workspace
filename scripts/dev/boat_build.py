@@ -201,13 +201,24 @@ def pinned_server_sha(ws_commit=None):
     The private server is not a submodule (a public repo cannot track a
     private one): its pin lives in pins/server.sha. Prefer the pin recorded
     at the wanted workspace commit (so --branch/--workspace-sha transfer the
-    pin they point at), falling back to the worktree file, which fails
-    loudly when missing or empty.
+    pin they point at). A missing or empty pin at the requested commit fails
+    loudly: falling back to the worktree file would silently test an
+    unrelated server revision. Without a commit, read the worktree file,
+    which fails loudly when missing or empty.
     """
     if ws_commit:
         out = run_git("show", f"{ws_commit}:pins/server.sha", cwd=ROOT, check=False)
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
+        if out.returncode != 0:
+            raise SystemExit(
+                f"no pins/server.sha at {ws_commit}: refusing to fall back to "
+                "the worktree pin (it would test an unrelated server revision)"
+            )
+        if not out.stdout.strip():
+            raise SystemExit(
+                f"pins/server.sha at {ws_commit} is empty: refusing to fall "
+                "back to the worktree pin (it would test an unrelated revision)"
+            )
+        return out.stdout.strip()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import server_checkout
 
@@ -244,6 +255,16 @@ def local_shas(args):
     # submodule status lists it: without this the VM keeps the golden's
     # stale server checkout while the task tests pinned server code.
     wanted["server"] = pinned_server_sha(wanted[""])
+    if args.with_worktree:
+        head = run_git("rev-parse", "HEAD", cwd=ROOT, check=False)
+        if head.returncode == 0 and head.stdout.strip() == wanted[""]:
+            # The workspace patch (if any) applies onto wanted[""], so the
+            # pin that lands on the VM is the worktree file: an uncommitted
+            # pins/server.sha change must win over the committed pin.
+            # (Otherwise the patch installs the new pin while the server
+            # stays at the old SHA.) Fails loudly when the worktree pin is
+            # missing or empty.
+            wanted["server"] = pinned_server_sha()
     for item in args.submodule:
         name, _, sha = item.partition("=")
         if not name or not sha:
@@ -1093,6 +1114,29 @@ def wait_state(vm_id, want=("stopped",), timeout=240):
     return state
 
 
+def reset_stale_server(vm_id, remote_root, want):
+    """Reset a dirty remote server tree to the pin when no patch ships.
+
+    A reused warm VM still carries the previous run's applied server patch
+    while remote_shas reports a matching HEAD, so without this the run
+    tests stale server edits despite a clean local server. One status
+    probe; a clean or absent tree is left alone.
+    """
+    remote = f"{remote_root}/server"
+    rc, out = vm_exec(vm_id, f"git -C {shlex.quote(remote)} status --short")
+    if rc != 0 or not out.strip():
+        return "clean"
+    rc, out = vm_exec(
+        vm_id,
+        f"git -C {shlex.quote(remote)} reset --hard {shlex.quote(want)} "
+        "&& git -C "
+        f"{shlex.quote(remote)} clean -fd -e .dev -e .cache",
+    )
+    if rc != 0:
+        raise RuntimeError(f"stale server reset to {want[:12]} failed:\n{out}")
+    return "reset"
+
+
 def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
     """Ship `git diff HEAD` + untracked files of the touched repos as patches.
 
@@ -1119,6 +1163,8 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             name = f"{(rel or 'workspace').replace('/', '_')}.patch"
             (stage_dir / name).write_bytes(patch)
             patches[rel] = name
+    if "server" in wanted and "server" not in patches:
+        reset_stale_server(vm_id, remote_root, wanted["server"])
     if not patches:
         return 0
     run_boat("push", vm_id, str(stage_dir))

@@ -847,6 +847,52 @@ class EnsureWorktree(unittest.TestCase):
         self.assertIn("clean -fd", self.cmds[0])
         self.assertIn("apply --check", self.cmds[1])
 
+    def test_clean_local_server_resets_dirty_remote(self):
+        # Fail-before: a reused VM kept the previous run's applied server
+        # patch while remote_shas reported a matching HEAD, so the run
+        # tested stale server edits. A clean local server resets the
+        # remote tree to the pin even when no patch ships.
+        pin = "c" * 40
+
+        def dirty_vm(vm_id, script, timeout=120):
+            self.cmds.append(script)
+            if "status --short" in script:
+                return 0, " M s.txt\n"
+            return 0, ""
+
+        pushed = []
+        with (
+            patch.object(boat_build, "ROOT", self.repo),
+            patch.object(
+                boat_build, "run_boat", side_effect=lambda *a, **k: pushed.append(a)
+            ),
+            patch.object(boat_build, "vm_exec", side_effect=dirty_vm),
+        ):
+            n = boat_build.ensure_worktree(
+                "bx_x", "/vm/root", "/vm", {"": self.base, "server": pin}, self.stage
+            )
+        self.assertEqual(n, 0)
+        self.assertEqual(pushed, [], "no patch ships, so nothing is pushed")
+        resets = [c for c in self.cmds if "reset --hard" in c]
+        self.assertEqual(len(resets), 1, self.cmds)
+        self.assertIn(pin, resets[0])
+        self.assertIn("/vm/root/server", resets[0])
+
+    def test_clean_remote_server_needs_no_reset(self):
+        # One status probe, then silence: a clean remote tree is left alone.
+        pin = "c" * 40
+        with (
+            patch.object(boat_build, "ROOT", self.repo),
+            patch.object(boat_build, "run_boat", return_value=None),
+            patch.object(boat_build, "vm_exec", side_effect=self.fake_vm()),
+        ):
+            n = boat_build.ensure_worktree(
+                "bx_x", "/vm/root", "/vm", {"": self.base, "server": pin}, self.stage
+            )
+        self.assertEqual(n, 0)
+        self.assertEqual(len(self.cmds), 1, self.cmds)
+        self.assertIn("status --short", self.cmds[0])
+
 
 class LocalJarArgs(unittest.TestCase):
     def test_bad_spec_rejected(self):
@@ -1741,6 +1787,52 @@ class PinnedServer(unittest.TestCase):
         with patch.object(boat_build, "ROOT", self.ws):
             with self.assertRaises(SystemExit):
                 boat_build.local_shas(args)
+
+    def test_branch_missing_pin_fails_instead_of_worktree_fallback(self):
+        # Fail-before: --branch at a commit with no pin silently tested
+        # the current checkout's pin (an unrelated server revision).
+        subprocess.run(["git", "checkout", "-qb", "nopin"], cwd=self.ws, check=True)
+        (self.ws / "pins" / "server.sha").unlink()
+        subprocess.run(["git", "commit", "-qam", "drop pin"], cwd=self.ws, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
+        args = boat_build.parse_args(
+            ["--vm", "bx_x", "--branch", "nopin", "--", "true"]
+        )
+        with patch.object(boat_build, "ROOT", self.ws):
+            with self.assertRaises(SystemExit):
+                boat_build.local_shas(args)
+
+    def test_branch_empty_pin_fails_instead_of_worktree_fallback(self):
+        # Fail-before: --branch at a commit with an empty pin silently
+        # tested the current checkout's pin.
+        subprocess.run(["git", "checkout", "-qb", "emptypin"], cwd=self.ws, check=True)
+        (self.ws / "pins" / "server.sha").write_text("\n")
+        subprocess.run(["git", "commit", "-qam", "empty pin"], cwd=self.ws, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
+        args = boat_build.parse_args(
+            ["--vm", "bx_x", "--branch", "emptypin", "--", "true"]
+        )
+        with patch.object(boat_build, "ROOT", self.ws):
+            with self.assertRaises(SystemExit):
+                boat_build.local_shas(args)
+
+    def test_uncommitted_pin_wins_when_shipping_worktree(self):
+        # Fail-before: the committed pin was resolved before the workspace
+        # patch applied, so the VM tested the old server code with the new
+        # pin file.
+        new_pin = "d" * 40
+        (self.ws / "pins" / "server.sha").write_text(new_pin + "\n")
+        args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            self.assertEqual(boat_build.local_shas(args)["server"], new_pin)
+
+    def test_no_worktree_keeps_committed_pin(self):
+        # --no-worktree never ships the pin change, so the committed pin
+        # (the tree the VM actually checks out) still decides.
+        (self.ws / "pins" / "server.sha").write_text("d" * 40 + "\n")
+        args = boat_build.parse_args(["--vm", "bx_x", "--no-worktree", "--", "true"])
+        with patch.object(boat_build, "ROOT", self.ws):
+            self.assertEqual(boat_build.local_shas(args)["server"], self.pin)
 
     def test_server_override_without_checkout_names_server_checkout(self):
         args = boat_build.parse_args(

@@ -423,5 +423,122 @@ class Headless(unittest.TestCase):
         process.close.assert_called_once_with()
 
 
+class ProdGuard(unittest.TestCase):
+    """coordination#44: the agent client must be unable to reach prod."""
+
+    PROD_SERVERS = (
+        "play.blockfield.pro:25566",
+        "raknet;play.blockfield.pro:25566",
+        "PLAY.BLOCKFIELD.PRO:25565",
+        "play.blockfield.pro.",
+        "workshop.blockfield.pro:25567",
+    )
+
+    def test_play_refuses_prod_server_for_agents_and_developers(self):
+        for owner in ("current", "developer:1"):
+            for server in self.PROD_SERVERS:
+                with self.subTest(owner=owner, server=server):
+                    args = SimpleNamespace(
+                        game_dir=None,
+                        testbot=None,
+                        testbot_port=None,
+                        debug=False,
+                        no_testbot=True,
+                        name="Fixture",
+                        server=server,
+                    )
+                    with (
+                        patch.object(devstack, "client_pid", return_value=None),
+                        patch.object(devstack, "process_owner", return_value=owner),
+                        patch.object(devstack, "_total_memory_gib", return_value=16.0),
+                        patch.object(devstack, "prepare_client") as prepare,
+                        patch.object(devstack, "start_process") as start,
+                        self.assertRaisesRegex(SystemExit, "prod"),
+                    ):
+                        devstack.play(args)
+                    prepare.assert_not_called()
+                    start.assert_not_called()
+
+    def test_bot_connect_refuses_prod(self):
+        for command in (
+            ["connect", "play.blockfield.pro:25566"],
+            ["connect", "raknet;play.blockfield.pro:25566"],
+        ):
+            with self.subTest(command=command):
+                args = SimpleNamespace(client=1, command=command, timeout=1)
+                with self.assertRaisesRegex(SystemExit, "prod"):
+                    devstack.bot(args)
+
+    def test_stale_servers_dat_is_rewritten_to_the_stand_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp)
+            (game_dir / "servers.dat").write_bytes(
+                b"\n\x00\x00\t\x00\x07servers\n\x00\x00\x00\x01"
+                b"\x08\x00\x02ip\x00\x1eplay.blockfield.pro:25566"
+                b"\x08\x00\x04name\x00\x04Prod\x00\x00"
+            )
+            devstack.write_stand_servers_dat(game_dir, "127.0.0.1:25599")
+            data = (game_dir / "servers.dat").read_bytes()
+            self.assertNotIn(b"blockfield.pro", data)
+            self.assertIn(b"127.0.0.1:25599", data)
+            self.assertEqual(_servers_dat_ips(data), ["127.0.0.1:25599"])
+
+    def test_testbot_connect_refuses_prod(self):
+        source = (
+            devstack.ROOT
+            / "scripts"
+            / "dev"
+            / "testbot"
+            / "src"
+            / "main"
+            / "java"
+            / "bf"
+            / "testbot"
+            / "TestBot.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("blockfield.pro", source)
+        self.assertRegex(source.lower(), "refus.*prod|prod.*refus")
+
+
+def _servers_dat_ips(data):
+    """Minimal NBT reader for the servers.dat shape the stand writes."""
+    import struct
+
+    def string_at(pos):
+        (length,) = struct.unpack_from(">H", data, pos)
+        pos += 2
+        return data[pos : pos + length].decode("utf-8"), pos + length
+
+    pos = 0
+    assert data[pos] == 0x0A, "root must be a compound"
+    pos += 1
+    _, pos = string_at(pos)
+    ips = []
+    while data[pos] != 0x00:
+        tag, pos = data[pos], pos + 1
+        name, pos = string_at(pos)
+        if tag == 0x09 and name == "servers":
+            element, pos = data[pos], pos + 1
+            assert element == 0x0A, "servers must list compounds"
+            (count,) = struct.unpack_from(">i", data, pos)
+            pos += 4
+            for _ in range(count):
+                while data[pos] != 0x00:
+                    field, pos = data[pos], pos + 1
+                    key, pos = string_at(pos)
+                    if field == 0x08:
+                        value, pos = string_at(pos)
+                        if key == "ip":
+                            ips.append(value)
+                    elif field == 0x01:
+                        pos += 1
+                    else:
+                        raise AssertionError(f"unexpected tag {field}")
+                pos += 1
+        else:
+            raise AssertionError(f"unexpected root tag {tag} {name!r}")
+    return ips
+
+
 if __name__ == "__main__":
     unittest.main()

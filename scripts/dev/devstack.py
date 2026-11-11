@@ -1701,17 +1701,17 @@ def client_restart(game_dir):
         info = json.loads(CLIENT_CMD_FILE.read_text(encoding="utf-8"))
         command = info["command"]
         command[0] = java_exe()
-        check_agent_server(
-            next(
-                (
-                    arg.split("=", 1)[1]
-                    for arg in command
-                    if arg.startswith("--quickPlayMultiplayer=")
-                ),
-                None,
-            )
+        quick_play = next(
+            (
+                arg.split("=", 1)[1]
+                for arg in command
+                if arg.startswith("--quickPlayMultiplayer=")
+            ),
+            None,
         )
+        check_agent_server(quick_play)
         cwd = Path(info.get("game_dir", str(game_dir)))
+        write_stand_servers_dat(cwd, quick_play or f"127.0.0.1:{PORT}")
         headless = info.get("headless", False) or not process_owner().startswith(
             "developer:"
         )
@@ -2031,6 +2031,7 @@ def client_prepare(args):
         install_tools(game_dir, remove=args.no_tools)
     install_client_localmods(game_dir, CLIENT_PACK)
     install_client_mod(game_dir, args.mod, args.mod_repo)
+    write_stand_servers_dat(game_dir, f"127.0.0.1:{PORT}")
     ok(f"workspace client ready: {game_dir}; start with `just play --game-dir <path>`")
 
 
@@ -2348,7 +2349,54 @@ def client_launch_command(args, game_dir, name, client_pack, testbot_port):
     return command
 
 
+def is_prod_server(server):
+    """True when the address points at prod (coordination#44: stands never join prod)."""
+    addr = (server or "").strip()
+    if addr[:7].lower() == "raknet;":
+        addr = addr[7:]
+    host = addr.rsplit(":", 1)[0].strip().lower().rstrip(".")
+    if host.startswith("["):
+        return False
+    return host == "blockfield.pro" or host.endswith(".blockfield.pro")
+
+
+def write_stand_servers_dat(game_dir, ip):
+    """Overwrite servers.dat with the single stand entry: the released pack ships
+    a prod entry, and a stale one once sent an agent client to prod."""
+    entry = ip or f"127.0.0.1:{PORT}"
+
+    def string(value):
+        data = value.encode("utf-8")
+        return struct.pack(">H", len(data)) + data
+
+    data = b"".join(
+        [
+            b"\x0a",
+            struct.pack(">H", 0),
+            b"\x09",
+            string("servers"),
+            b"\x0a",
+            struct.pack(">i", 1),
+            b"\x01",
+            string("hidden"),
+            b"\x00",
+            b"\x08",
+            string("ip"),
+            string(entry),
+            b"\x08",
+            string("name"),
+            string("Blockfield"),
+            b"\x00\x00",
+        ]
+    )
+    path = Path(game_dir) / "servers.dat"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 def check_agent_server(server):
+    if is_prod_server(server):
+        die(f"refusing prod server {server!r}: workspace stands use 127.0.0.1")
     # The stand proxy speaks RakNet on its own port; strip the transport prefix first.
     addr = server or ""
     if addr.startswith("raknet;"):
@@ -2431,6 +2479,7 @@ def play(args):
     local = addr.rsplit(":", 1)[0] in ("127.0.0.1", "localhost")
     check_agent_server(args.server)
     game_dir, command = prepare_client(args, sync_marker=local, name=name)
+    write_stand_servers_dat(game_dir, args.server or f"127.0.0.1:{PORT}")
     if headless:
         patch_headless_options(game_dir)
     gpu = getattr(args, "gpu", None)
@@ -2746,6 +2795,9 @@ def scenario(args):
 
 
 def bot(args):
+    parts = " ".join(args.command).split()
+    if len(parts) >= 2 and parts[0].lower() == "connect" and is_prod_server(parts[1]):
+        die(f"refusing prod connect {parts[1]!r}: the testbot stays on this stack")
     port = BOT_PORTS[args.client]
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:

@@ -1028,6 +1028,14 @@ public final class TestBot implements ClientModInitializer {
                         mc.level.disconnect();
                         mc.disconnect();
                     }
+                    // Stale stand profiles once pointed the agent client at prod.
+                    String host =
+                            a[1].regionMatches(true, 0, "raknet;", 0, 7) ? a[1].substring(7) : a[1];
+                    host = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
+                    host = host.trim().toLowerCase(java.util.Locale.ROOT);
+                    if (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+                    if (host.equals("blockfield.pro") || host.endsWith(".blockfield.pro"))
+                        throw new IllegalStateException("refusing prod connect " + a[1]);
                     ServerAddress addr = ServerAddress.parseString(a[1]);
                     ConnectScreen.startConnecting(
                             new TitleScreen(),

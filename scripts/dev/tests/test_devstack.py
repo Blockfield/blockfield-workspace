@@ -445,7 +445,9 @@ class SecondClient(unittest.TestCase):
                 libs.mkdir(parents=True)
 
                 def fake_build(args):
-                    (libs / "bftestbot-9.9.9.jar").write_bytes(b"fresh-build")
+                    (libs / "bftestbot-9.9.9.jar").write_bytes(
+                        _guarded_jar(b"fresh-build")
+                    )
 
                 args = SimpleNamespace(
                     client=2,
@@ -461,7 +463,8 @@ class SecondClient(unittest.TestCase):
                 ):
                     self.assertEqual(devstack.install_testbot(args, game2), "47778")
                     self.assertEqual(
-                        (game2 / "mods" / "bftestbot.jar").read_bytes(), b"fresh-build"
+                        (game2 / "mods" / "bftestbot.jar").read_bytes(),
+                        _guarded_jar(b"fresh-build"),
                     )
             args = SimpleNamespace(
                 client=2,
@@ -521,6 +524,27 @@ class SecondClient(unittest.TestCase):
                 patch.object(devstack, "ROOT", Path(tmp) / "root"),
                 patch.object(devstack, "HOME", home),
                 self.assertRaisesRegex(SystemExit, "build-testbot"),
+            ):
+                devstack.install_testbot(args, game_dir)
+
+    def test_explicit_unguarded_testbot_jar_is_refused(self):
+        # u-noprod round 4: `--testbot old.jar` must not bypass the guard.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "stack"
+            game_dir = home / "play"
+            (game_dir / "mods").mkdir(parents=True)
+            old = Path(tmp) / "old.jar"
+            old.write_bytes(b"stale pre-guard jar")
+            args = SimpleNamespace(
+                client=1,
+                testbot=str(old),
+                testbot_port=None,
+                no_testbot=False,
+            )
+            with (
+                patch.object(devstack, "ROOT", Path(tmp) / "root"),
+                patch.object(devstack, "HOME", home),
+                self.assertRaisesRegex(SystemExit, "prod-connect guard"),
             ):
                 devstack.install_testbot(args, game_dir)
 

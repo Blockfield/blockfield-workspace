@@ -392,11 +392,17 @@ def install_testbot(args, game_dir):
         jar = testbot_jar(args)
     if not jar or not jar.is_file():
         die("no testbot jar: run `just build-testbot` or pass --testbot JAR")
-    if getattr(args, "testbot", None) is None and not testbot_guard_present(jar):
-        # A retained install predating the prod-connect guard must not keep
-        # running: swap in the current build when its content hash differs,
-        # or refuse to start so the next `just build-testbot` rebuilds it.
-        jar = _guarded_testbot_jar(jar)
+    if not testbot_guard_present(jar):
+        if not isinstance(getattr(args, "testbot", None), (str, Path)):
+            # A retained install predating the prod-connect guard must not keep
+            # running: swap in the current build when its content hash differs,
+            # or refuse to start so the next `just build-testbot` rebuilds it.
+            jar = _guarded_testbot_jar(jar)
+        else:
+            die(
+                f"testbot jar {jar} lacks the prod-connect guard: "
+                "rebuild it with `just build-testbot`"
+            )
     if jar.resolve() != destination.resolve():
         materialize(jar, destination)
     return str(

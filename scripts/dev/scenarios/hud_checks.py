@@ -57,6 +57,31 @@ GRENADE_ITEMS = (
     "superbwarfare:hand_grenade",
 )
 GRENADE_TYPES = ("grenade", "throwable", "m18", "rgo", "smoke")
+# Smoke kinds smoulder for 30 s+ by design (SBW clamps an M18's life to >= 600
+# ticks and releases decoys), so they never gate the resolution check.
+SMOKE_KINDS = ("m18", "smoke")
+
+
+def blast_drop_present(entities, death_pos, radius=5):
+    """True when a blast (non-smoke) grenade entity lingers near the corpse.
+
+    Smoke drops are resolved by the drop check above: only blast kinds detonate
+    fast enough for the 25 s resolution window.
+    """
+    for entity in entities:
+        kind = entity.get("type") or ""
+        if not any(k in kind for k in GRENADE_TYPES):
+            continue
+        if any(k in kind for k in SMOKE_KINDS):
+            continue
+        pos = entity["tickPos"]
+        if (
+            abs(pos[0] - death_pos[0]) < radius
+            and abs(pos[1] - death_pos[1]) < radius
+            and abs(pos[2] - death_pos[2]) < radius
+        ):
+            return True
+    return False
 
 
 def gun_replace_command(name, gun_id, ammo=30000):
@@ -186,8 +211,19 @@ def scenario_grenade(rcon, bot, witness):
 
     The corpse is queried through a witness in the same arena: after death the
     victim sits in respawn staging, so its own entity query recenters away.
+    The witness is parked by the cook before cooking starts: an M18 finishes
+    its 80-tick cook while a post-cook TP + sleeps + kill are still in flight,
+    and the native full-cook throw (a 30 s smoke show) is not the death drop.
     """
     out = []
+    dim = bot("state")["dimension"]
+    pos = bot("state")["pos"]
+    witness("slot 0")
+    witness_uuid = offline_uuid(witness("state")["name"])
+    rcon.cmd(
+        f"execute in {dim} run tp {witness_uuid} {pos[0] + 4} {pos[1]} {pos[2]} 90 0"
+    )
+    time.sleep(1)
     cooked = None
     for slot in (2, 3):
         bot(f"slot {slot}")
@@ -217,19 +253,9 @@ def scenario_grenade(rcon, bot, witness):
     )
     if cooked is None:
         return out, False
-    death_pos = bot("state")["pos"]
-    use = bot("usestate")
-    assert use.get("using"), "cook ended before the kill"
-    ticks = use.get("ticksUsing")
-    bot_name = bot("state")["name"]
-    dim = bot("state")["dimension"]
-    witness("slot 0")
-    witness_uuid = offline_uuid(witness("state")["name"])
-    rcon.cmd(
-        f"execute in {dim} run tp {witness_uuid} "
-        f"{death_pos[0] + 4} {death_pos[1]} {death_pos[2]} 90 0"
-    )
-    time.sleep(1)
+    death = bot("state")
+    death_pos = death["pos"]
+    bot_name = death["name"]
     rcon.cmd(f"kill {bot_name}")
     time.sleep(1)
 
@@ -246,30 +272,32 @@ def scenario_grenade(rcon, bot, witness):
             for entity in entities
         )
 
+    def blast_near(query):
+        try:
+            entities = query("entities 64").get("entities", [])
+        except RuntimeError:
+            return False
+        return blast_drop_present(entities, death_pos)
+
     dropped = wait_for(lambda: drop_near(witness) or drop_near(bot), 12)
     out.append(
         check(
             "death mid-cook drops a live grenade at the corpse",
             dropped,
-            f"no grenade entity near {death_pos} (cook {cooked}, ticks {ticks})",
+            f"no grenade entity near {death_pos} (cook {cooked})",
         )
     )
     if not dropped:
         return out, False
     exploded = wait_for(
-        lambda: (
-            not any(
-                any(k in (entity.get("type") or "") for k in GRENADE_TYPES)
-                for entity in witness("entities 64").get("entities", [])
-            )
-        ),
+        lambda: not blast_near(witness) and not blast_near(bot),
         25,
     )
     out.append(
         check(
             "dropped grenade explodes (entity resolves)",
             exploded,
-            "drop still present after 25 s; fuse longer than the window",
+            "blast drop still present after 25 s near the corpse",
         )
     )
     time.sleep(4)

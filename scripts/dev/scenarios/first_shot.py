@@ -132,7 +132,7 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         summary = (
             f"{covered} queued-fired, {held} no-hold, {lost} lost, {doubled} doubled"
         )
-        required = (args.trials + 1) // 2
+        required = max(1, (args.trials + 1) // 2)  # zero/negative trials prove nothing
         if covered < required:
             summary += (
                 f" - no coverage: only {covered}/{args.trials} tapped"

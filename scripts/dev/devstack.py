@@ -23,6 +23,7 @@ import argparse
 import errno
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 import random
@@ -306,6 +307,60 @@ def testbot_enabled(args, game_dir):
     )
 
 
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+TESTBOT_GUARD_MARKER = b"refusing prod connect"
+
+
+def testbot_guard_present(jar):
+    """True when the jar was built from sources with the prod-connect guard."""
+    try:
+        path = Path(jar)
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                return any(
+                    TESTBOT_GUARD_MARKER in archive.read(name)
+                    for name in archive.namelist()
+                )
+        return False
+    except OSError:
+        return False
+
+
+def refresh_stale_testbot(jar):
+    """The current testbot build when its content hash differs, else the jar."""
+    build = newest_jar(
+        ROOT / "scripts" / "dev" / "testbot" / "build" / "libs", "bftestbot-"
+    )
+    if build is None or not build.is_file():
+        return jar
+    try:
+        if _file_sha256(build) == _file_sha256(Path(jar)):
+            return jar
+    except OSError:
+        return jar
+    return build
+
+
+def _guarded_testbot_jar(jar):
+    """Current build when the jar predates the guard, else die with a rebuild hint."""
+    if testbot_guard_present(jar):
+        return jar
+    fresh = refresh_stale_testbot(jar)
+    if not testbot_guard_present(fresh):
+        die(
+            "stale bftestbot.jar without the prod-connect guard: "
+            "run `just build-testbot`, then re-run"
+        )
+    return fresh
+
+
 def install_testbot(args, game_dir):
     destination = game_dir / "mods/bftestbot.jar"
     if not testbot_enabled(args, game_dir):
@@ -337,6 +392,17 @@ def install_testbot(args, game_dir):
         jar = testbot_jar(args)
     if not jar or not jar.is_file():
         die("no testbot jar: run `just build-testbot` or pass --testbot JAR")
+    if not testbot_guard_present(jar):
+        if not isinstance(getattr(args, "testbot", None), (str, Path)):
+            # A retained install predating the prod-connect guard must not keep
+            # running: swap in the current build when its content hash differs,
+            # or refuse to start so the next `just build-testbot` rebuilds it.
+            jar = _guarded_testbot_jar(jar)
+        else:
+            die(
+                f"testbot jar {jar} lacks the prod-connect guard: "
+                "rebuild it with `just build-testbot`"
+            )
     if jar.resolve() != destination.resolve():
         materialize(jar, destination)
     return str(
@@ -1701,17 +1767,22 @@ def client_restart(game_dir):
         info = json.loads(CLIENT_CMD_FILE.read_text(encoding="utf-8"))
         command = info["command"]
         command[0] = java_exe()
-        check_agent_server(
-            next(
-                (
-                    arg.split("=", 1)[1]
-                    for arg in command
-                    if arg.startswith("--quickPlayMultiplayer=")
-                ),
-                None,
-            )
+        quick_play = next(
+            (
+                arg.split("=", 1)[1]
+                for arg in command
+                if arg.startswith("--quickPlayMultiplayer=")
+            ),
+            None,
         )
+        check_agent_server(quick_play)
         cwd = Path(info.get("game_dir", str(game_dir)))
+        installed = cwd / "mods/bftestbot.jar"
+        if installed.is_file():
+            fresh = _guarded_testbot_jar(installed)
+            if Path(fresh).resolve() != installed.resolve():
+                materialize(fresh, installed)
+        write_stand_servers_dat(cwd, quick_play or f"127.0.0.1:{PORT}")
         headless = info.get("headless", False) or not process_owner().startswith(
             "developer:"
         )
@@ -2031,6 +2102,7 @@ def client_prepare(args):
         install_tools(game_dir, remove=args.no_tools)
     install_client_localmods(game_dir, CLIENT_PACK)
     install_client_mod(game_dir, args.mod, args.mod_repo)
+    write_stand_servers_dat(game_dir, f"127.0.0.1:{PORT}")
     ok(f"workspace client ready: {game_dir}; start with `just play --game-dir <path>`")
 
 
@@ -2348,7 +2420,88 @@ def client_launch_command(args, game_dir, name, client_pack, testbot_port):
     return command
 
 
+_TRANSPORT_PREFIXES = ("raknet;", "tcp;")
+
+
+def _stand_host(server):
+    """Bare host for the stand allow-list: prefixes, brackets, port, case, dot."""
+    addr = (server or "").strip()
+    while True:
+        lowered = addr.lower()
+        for prefix in _TRANSPORT_PREFIXES:
+            if lowered.startswith(prefix):
+                addr = addr[len(prefix) :].strip()
+                break
+        else:
+            break
+    host = addr
+    if host.startswith("["):
+        end = host.find("]")
+        host = host[1:end] if end != -1 else host[1:]
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    # A bare IPv6 literal (several colons) has no port to strip: keep it whole.
+    return host.strip().lower().rstrip(".")
+
+
+def is_stand_server(server):
+    """True when the agent client may target it: menu-only, localhost or a
+    loopback/private/link-local IP literal. Hostnames and public IPs are
+    refused with no DNS lookups, so SRV/DNS-failure gaps cannot open."""
+    if not (server or "").strip():
+        return True
+    host = _stand_host(server)
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return (
+        ip.is_loopback or ip.is_private or ip.is_link_local
+    ) and not ip.is_unspecified
+
+
+def write_stand_servers_dat(game_dir, ip):
+    """Overwrite servers.dat with the single stand entry: the released pack ships
+    a prod entry, and a stale one once sent an agent client to prod."""
+    entry = ip or f"127.0.0.1:{PORT}"
+
+    def string(value):
+        data = value.encode("utf-8")
+        return struct.pack(">H", len(data)) + data
+
+    data = b"".join(
+        [
+            b"\x0a",
+            struct.pack(">H", 0),
+            b"\x09",
+            string("servers"),
+            b"\x0a",
+            struct.pack(">i", 1),
+            b"\x01",
+            string("hidden"),
+            b"\x00",
+            b"\x08",
+            string("ip"),
+            string(entry),
+            b"\x08",
+            string("name"),
+            string("Blockfield"),
+            b"\x00\x00",
+        ]
+    )
+    path = Path(game_dir) / "servers.dat"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 def check_agent_server(server):
+    if not is_stand_server(server):
+        die(f"refusing non-stand server {server!r}: workspace stands use 127.0.0.1")
     # The stand proxy speaks RakNet on its own port; strip the transport prefix first.
     addr = server or ""
     if addr.startswith("raknet;"):
@@ -2431,6 +2584,7 @@ def play(args):
     local = addr.rsplit(":", 1)[0] in ("127.0.0.1", "localhost")
     check_agent_server(args.server)
     game_dir, command = prepare_client(args, sync_marker=local, name=name)
+    write_stand_servers_dat(game_dir, args.server or f"127.0.0.1:{PORT}")
     if headless:
         patch_headless_options(game_dir)
     gpu = getattr(args, "gpu", None)
@@ -2746,6 +2900,13 @@ def scenario(args):
 
 
 def bot(args):
+    parts = " ".join(args.command).split()
+    if (
+        len(parts) >= 2
+        and parts[0].lower() == "connect"
+        and not is_stand_server(parts[1])
+    ):
+        die(f"refusing non-stand connect {parts[1]!r}: the testbot stays on this stack")
     port = BOT_PORTS[args.client]
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:

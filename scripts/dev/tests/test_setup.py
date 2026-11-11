@@ -20,6 +20,16 @@ devstack = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(devstack)
 
 
+def _guarded_jar(payload):
+    """Minimal jar carrying the prod-connect guard marker (u-noprod round 2)."""
+    import io
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("bf/testbot/Guard.class", b"refusing prod connect:" + payload)
+    return buffer.getvalue()
+
+
 class Setup(unittest.TestCase):
     def setUp(self):
         self.context = ExitStack()
@@ -49,7 +59,10 @@ class Setup(unittest.TestCase):
         self.contract = "current-contract"
         self.client_digest = "c" * 64
         self.bot = self.root / "bftestbot.jar"
-        self.bot.write_bytes(b"current testbot")
+        # The installed jar must carry the prod-connect guard: unguarded
+        # installs are refused, so the fixture carries the marker.
+        self.bot_guard = _guarded_jar(b"current testbot")
+        self.bot.write_bytes(self.bot_guard)
         self.carpet = self.root / devstack.CARPET_ASSET[0]
         self.carpet.write_bytes(b"pinned carpet")
         for name, value in {
@@ -184,7 +197,7 @@ class Setup(unittest.TestCase):
             (self.game / "mods/current.jar").read_bytes(), b"new client mod"
         )
         self.assertEqual(
-            (self.game / "mods/bftestbot.jar").read_bytes(), b"current testbot"
+            (self.game / "mods/bftestbot.jar").read_bytes(), self.bot_guard
         )
         self.assertEqual(
             (self.game / "config/blockfield-pack-version.txt").read_text(),
@@ -219,7 +232,7 @@ class Setup(unittest.TestCase):
             (self.game / "mods/current.jar").read_bytes(), b"new client mod"
         )
         self.assertEqual(
-            (self.game / "mods/bftestbot.jar").read_bytes(), b"current testbot"
+            (self.game / "mods/bftestbot.jar").read_bytes(), self.bot_guard
         )
 
     def test_repeat_repairs_missing_or_corrupted_server_mods(self):
@@ -439,7 +452,7 @@ class Setup(unittest.TestCase):
         self.args.force = True
         devstack.setup(self.args)
         self.assertEqual(
-            (self.game / "mods/bftestbot.jar").read_bytes(), b"current testbot"
+            (self.game / "mods/bftestbot.jar").read_bytes(), self.bot_guard
         )
         self.args.force = False
         self.args.no_testbot = True

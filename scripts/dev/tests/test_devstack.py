@@ -17,6 +17,20 @@ devstack = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(devstack)
 
 
+def _guarded_jar(payload):
+    """Minimal jar carrying the prod-connect guard marker (u-noprod round 2).
+
+    The marker is the guard's own refusal text, so only a jar built from
+    guarded sources passes `testbot_guard_present`.
+    """
+    import io
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("bf/testbot/Guard.class", b"refusing prod connect:" + payload)
+    return buffer.getvalue()
+
+
 class ClientNatives(unittest.TestCase):
     @unittest.skipUnless(hasattr(devstack.os, "getuid"), "Linux runtime directories")
     def test_linux_space_paths_use_a_private_cache_per_stack_and_session(self):
@@ -350,11 +364,11 @@ class WorldSeed(unittest.TestCase):
 
 class Bot(unittest.TestCase):
     def test_says_which_port_is_dead_instead_of_hanging(self):
-        devstack.BOT_PORTS[1] = 1  # nothing listens on port 1
-        args = type("Args", (), {"client": 1, "command": ["state"], "timeout": 1})
-        with self.assertRaises(SystemExit) as raised:
-            devstack.bot(args)
-        self.assertIn("127.0.0.1:1", str(raised.exception))
+        with patch.dict(devstack.BOT_PORTS, {1: 1}):  # nothing listens on port 1
+            args = type("Args", (), {"client": 1, "command": ["state"], "timeout": 1})
+            with self.assertRaises(SystemExit) as raised:
+                devstack.bot(args)
+            self.assertIn("127.0.0.1:1", str(raised.exception))
 
 
 class SecondClient(unittest.TestCase):
@@ -375,7 +389,9 @@ class SecondClient(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             game_dir = Path(tmp)
             (game_dir / "mods").mkdir()
-            (game_dir / "mods" / "bftestbot.jar").write_bytes(b"fake")
+            # The installed jar must carry the prod-connect guard: unguarded
+            # installs are refused, so the fixture carries the marker.
+            (game_dir / "mods" / "bftestbot.jar").write_bytes(_guarded_jar(b"fake"))
             with patch.dict(devstack.BOT_PORTS, {1: 47777, 2: 47778}, clear=True):
                 for client, port in ((1, "47777"), (2, "47778")):
                     args = SimpleNamespace(
@@ -394,7 +410,8 @@ class SecondClient(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / "play" / "mods").mkdir(parents=True)
-            (home / "play" / "mods" / "bftestbot.jar").write_bytes(b"stack-bot")
+            stack_jar = _guarded_jar(b"stack-bot")
+            (home / "play" / "mods" / "bftestbot.jar").write_bytes(stack_jar)
             game2 = home / "play2"
             (game2 / "mods").mkdir(parents=True)
             args = SimpleNamespace(
@@ -410,15 +427,16 @@ class SecondClient(unittest.TestCase):
                 self.assertTrue(devstack.testbot_enabled(args, game2))
                 self.assertEqual(devstack.install_testbot(args, game2), "47778")
                 self.assertEqual(
-                    (game2 / "mods" / "bftestbot.jar").read_bytes(), b"stack-bot"
+                    (game2 / "mods" / "bftestbot.jar").read_bytes(), stack_jar
                 )
                 # A stale second-client jar converges to the refreshed stack jar
                 # on a plain run (blockfield-bot review on the rc-final7 PR).
-                (home / "play" / "mods" / "bftestbot.jar").write_bytes(b"fresh-bot")
+                fresh_jar = _guarded_jar(b"fresh-bot")
+                (home / "play" / "mods" / "bftestbot.jar").write_bytes(fresh_jar)
                 (game2 / "mods" / "bftestbot.jar").write_bytes(b"stale-bot")
                 self.assertEqual(devstack.install_testbot(args, game2), "47778")
                 self.assertEqual(
-                    (game2 / "mods" / "bftestbot.jar").read_bytes(), b"fresh-bot"
+                    (game2 / "mods" / "bftestbot.jar").read_bytes(), fresh_jar
                 )
                 # An explicit bare `--testbot` is a build request: it must build
                 # instead of silently reusing the installed stack jar.
@@ -427,7 +445,9 @@ class SecondClient(unittest.TestCase):
                 libs.mkdir(parents=True)
 
                 def fake_build(args):
-                    (libs / "bftestbot-9.9.9.jar").write_bytes(b"fresh-build")
+                    (libs / "bftestbot-9.9.9.jar").write_bytes(
+                        _guarded_jar(b"fresh-build")
+                    )
 
                 args = SimpleNamespace(
                     client=2,
@@ -443,7 +463,8 @@ class SecondClient(unittest.TestCase):
                 ):
                     self.assertEqual(devstack.install_testbot(args, game2), "47778")
                     self.assertEqual(
-                        (game2 / "mods" / "bftestbot.jar").read_bytes(), b"fresh-build"
+                        (game2 / "mods" / "bftestbot.jar").read_bytes(),
+                        _guarded_jar(b"fresh-build"),
                     )
             args = SimpleNamespace(
                 client=2,
@@ -457,6 +478,75 @@ class SecondClient(unittest.TestCase):
             ):
                 self.assertFalse(devstack.testbot_enabled(args, game2))
                 self.assertIsNone(devstack.install_testbot(args, game2))
+
+    def test_stale_installed_testbot_upgrades_from_the_current_build(self):
+        # u-noprod round 2: a retained install predating the prod-connect
+        # guard must be replaced when its content hash differs from the build.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            libs = root / "scripts" / "dev" / "testbot" / "build" / "libs"
+            libs.mkdir(parents=True)
+            fresh = _guarded_jar(b"current build")
+            (libs / "bftestbot-9.9.9.jar").write_bytes(fresh)
+            home = root / "stack"
+            game_dir = home / "play"
+            (game_dir / "mods").mkdir(parents=True)
+            (game_dir / "mods" / "bftestbot.jar").write_bytes(b"stale pre-guard jar")
+            args = SimpleNamespace(
+                client=1,
+                testbot=None,
+                testbot_port=None,
+                no_testbot=False,
+            )
+            with (
+                patch.object(devstack, "ROOT", root),
+                patch.object(devstack, "HOME", home),
+                patch.dict(devstack.BOT_PORTS, {1: 47777, 2: 47778}, clear=True),
+            ):
+                self.assertEqual(devstack.install_testbot(args, game_dir), "47777")
+            self.assertEqual((game_dir / "mods" / "bftestbot.jar").read_bytes(), fresh)
+
+    def test_unguarded_testbot_without_a_current_build_refuses_to_start(self):
+        # u-noprod round 2: with no build to compare against, a jar without
+        # the guard must refuse to start rather than run unprotected.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "stack"
+            game_dir = home / "play"
+            (game_dir / "mods").mkdir(parents=True)
+            (game_dir / "mods" / "bftestbot.jar").write_bytes(b"stale pre-guard jar")
+            args = SimpleNamespace(
+                client=1,
+                testbot=None,
+                testbot_port=None,
+                no_testbot=False,
+            )
+            with (
+                patch.object(devstack, "ROOT", Path(tmp) / "root"),
+                patch.object(devstack, "HOME", home),
+                self.assertRaisesRegex(SystemExit, "build-testbot"),
+            ):
+                devstack.install_testbot(args, game_dir)
+
+    def test_explicit_unguarded_testbot_jar_is_refused(self):
+        # u-noprod round 4: `--testbot old.jar` must not bypass the guard.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "stack"
+            game_dir = home / "play"
+            (game_dir / "mods").mkdir(parents=True)
+            old = Path(tmp) / "old.jar"
+            old.write_bytes(b"stale pre-guard jar")
+            args = SimpleNamespace(
+                client=1,
+                testbot=str(old),
+                testbot_port=None,
+                no_testbot=False,
+            )
+            with (
+                patch.object(devstack, "ROOT", Path(tmp) / "root"),
+                patch.object(devstack, "HOME", home),
+                self.assertRaisesRegex(SystemExit, "prod-connect guard"),
+            ):
+                devstack.install_testbot(args, game_dir)
 
     def test_setup_disables_skinrestorer_join_autofetch_on_stands(self):
         # rc-final6 log-scan FAIL: stands join with throwaway offline names, so

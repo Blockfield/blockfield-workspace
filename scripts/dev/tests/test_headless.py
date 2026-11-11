@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
@@ -421,6 +422,182 @@ class Headless(unittest.TestCase):
                 )
         process.terminate.assert_not_called()
         process.close.assert_called_once_with()
+
+
+class ProdGuard(unittest.TestCase):
+    """coordination#44: the agent client may only join stand addresses."""
+
+    REFUSED = (
+        "play.blockfield.pro:25566",
+        "8.8.8.8:25566",
+        "[::ffff:8.8.8.8]:25566",
+        "example.com:25566",
+    )
+    ALLOWED = (
+        "localhost:25565",
+        "127.0.0.1:25599",
+        "127.0.0.2:25566",
+        "10.0.0.5:25599",
+        "192.168.1.20:25599",
+        "[::1]:25565",
+        "[::ffff:127.0.0.1]:25565",
+        "raknet;localhost:25567",
+        "",
+    )
+
+    def test_allow_list_needs_no_dns(self):
+        def fail_dns(*args, **kwargs):
+            raise AssertionError("no DNS lookups for the allow-list")
+
+        with patch.object(socket, "getaddrinfo", side_effect=fail_dns):
+            for server in self.REFUSED:
+                self.assertFalse(devstack.is_stand_server(server))
+            for server in self.ALLOWED:
+                with self.subTest(server=server):
+                    self.assertTrue(devstack.is_stand_server(server))
+
+    def test_play_and_bot_refuse_non_stand(self):
+        for owner in ("current", "developer:1"):
+            for server in self.REFUSED:
+                with self.subTest(owner=owner, server=server):
+                    args = SimpleNamespace(
+                        game_dir=None,
+                        testbot=None,
+                        testbot_port=None,
+                        debug=False,
+                        no_testbot=True,
+                        name="Fixture",
+                        server=server,
+                    )
+                    with (
+                        patch.object(devstack, "client_pid", return_value=None),
+                        patch.object(devstack, "process_owner", return_value=owner),
+                        patch.object(devstack, "_total_memory_gib", return_value=16.0),
+                        patch.object(devstack, "prepare_client") as prepare,
+                        patch.object(devstack, "start_process") as start,
+                        self.assertRaisesRegex(SystemExit, "non-stand"),
+                    ):
+                        devstack.play(args)
+                    prepare.assert_not_called()
+                    start.assert_not_called()
+        for server in self.REFUSED:
+            with self.subTest(server=server):
+                args = SimpleNamespace(client=1, command=["connect", server], timeout=1)
+                with self.assertRaisesRegex(SystemExit, "non-stand"):
+                    devstack.bot(args)
+
+    def test_stand_host_normalisation(self):
+        cases = {
+            "raknet;127.0.0.2:25566": "127.0.0.2",
+            "TCP;10.0.0.5.:25565": "10.0.0.5",
+            "  [::1]:25565  ": "::1",
+            "[::ffff:8.8.8.8]:25566": "::ffff:8.8.8.8",
+            "LOCALHOST:25565": "localhost",
+            "": "",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(devstack._stand_host(raw), expected)
+
+    def test_restart_refuses_stale_testbot_without_a_current_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp)
+            (game_dir / "mods").mkdir(parents=True)
+            (game_dir / "mods" / "bftestbot.jar").write_bytes(b"stale pre-guard jar")
+            receipt = Path(tmp) / "client.cmd"
+            receipt.write_text(
+                json.dumps(
+                    {"command": ["java", "--quickPlayMultiplayer=127.0.0.1:25599"]}
+                )
+            )
+            record = {"pid": 321, "live": True, "native": "linux", "owner": "current"}
+            with (
+                patch.object(devstack, "CLIENT_CMD_FILE", receipt),
+                patch.object(devstack, "ROOT", Path(tmp) / "root"),
+                patch.object(devstack, "process_owner", return_value="current"),
+                patch.object(devstack, "process_record", return_value=record),
+                patch.object(devstack, "listener_owned", return_value=True),
+                patch.object(devstack, "java_exe", return_value="java"),
+                patch.object(devstack, "start_process") as start,
+                self.assertRaisesRegex(SystemExit, "build-testbot"),
+            ):
+                devstack.client_restart(game_dir)
+            start.assert_not_called()
+
+    def test_stale_servers_dat_is_rewritten_to_the_stand_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp)
+            (game_dir / "servers.dat").write_bytes(
+                b"\n\x00\x00\t\x00\x07servers\n\x00\x00\x00\x01"
+                b"\x08\x00\x02ip\x00\x1eplay.blockfield.pro:25566"
+                b"\x08\x00\x04name\x00\x04Prod\x00\x00"
+            )
+            devstack.write_stand_servers_dat(game_dir, "127.0.0.1:25599")
+            data = (game_dir / "servers.dat").read_bytes()
+            self.assertNotIn(b"blockfield.pro", data)
+            self.assertIn(b"127.0.0.1:25599", data)
+            self.assertEqual(_servers_dat_ips(data), ["127.0.0.1:25599"])
+
+    def test_testbot_connect_refuses_non_stand(self):
+        source = (
+            devstack.ROOT
+            / "scripts"
+            / "dev"
+            / "testbot"
+            / "src"
+            / "main"
+            / "java"
+            / "bf"
+            / "testbot"
+            / "TestBot.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("isStandServer", source)
+        self.assertRegex(source.lower(), "refus.*prod|prod.*refus")
+        # Allow-list: no prod names, no DNS lookups in the guard.
+        self.assertNotIn("blockfield.pro", source)
+        self.assertNotIn("getAllByName", source)
+        self.assertNotIn("getaddrinfo", source)
+        self.assertNotIn("IDN", source)
+
+
+def _servers_dat_ips(data):
+    """Minimal NBT reader for the servers.dat shape the stand writes."""
+    import struct
+
+    def string_at(pos):
+        (length,) = struct.unpack_from(">H", data, pos)
+        pos += 2
+        return data[pos : pos + length].decode("utf-8"), pos + length
+
+    pos = 0
+    assert data[pos] == 0x0A, "root must be a compound"
+    pos += 1
+    _, pos = string_at(pos)
+    ips = []
+    while data[pos] != 0x00:
+        tag, pos = data[pos], pos + 1
+        name, pos = string_at(pos)
+        if tag == 0x09 and name == "servers":
+            element, pos = data[pos], pos + 1
+            assert element == 0x0A, "servers must list compounds"
+            (count,) = struct.unpack_from(">i", data, pos)
+            pos += 4
+            for _ in range(count):
+                while data[pos] != 0x00:
+                    field, pos = data[pos], pos + 1
+                    key, pos = string_at(pos)
+                    if field == 0x08:
+                        value, pos = string_at(pos)
+                        if key == "ip":
+                            ips.append(value)
+                    elif field == 0x01:
+                        pos += 1
+                    else:
+                        raise AssertionError(f"unexpected tag {field}")
+                pos += 1
+        else:
+            raise AssertionError(f"unexpected root tag {tag} {name!r}")
+    return ips
 
 
 if __name__ == "__main__":

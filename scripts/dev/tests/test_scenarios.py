@@ -5557,7 +5557,9 @@ class HudChecks(unittest.TestCase):
         arena = "blockfield:dm_arena_1"
         start_pos = [0.5, 65.0, -28.5]
         death_pos = [28.5, 65.0, 28.5]
+        corpse_spot = [death_pos[0] + 4, death_pos[1], death_pos[2]]
         calls = {"state": 0}
+        started = {"cook": False}
 
         def bot(text):
             if text == "state":
@@ -5571,10 +5573,12 @@ class HudChecks(unittest.TestCase):
                     "health": 20,
                 }
             if text == "usestate":
+                started["cook"] = True
                 return {
                     "using": True,
                     "item": "superbwarfare:m18_smoke_grenade",
                     "ticksUsing": 30,
+                    "duration": 80,
                 }
             if text == "entities 64":
                 return {"entities": []}
@@ -5588,7 +5592,13 @@ class HudChecks(unittest.TestCase):
             if text == "slot 0":
                 return {}
             if text == "state":
-                return {"name": "Wit", "pos": start_pos, "dimension": arena}
+                # Pre-cook the witness sits at the cook spot; the re-park TP
+                # lands it on the corpse spot (the new code verifies this).
+                return {
+                    "name": "Wit",
+                    "pos": start_pos if not started["cook"] else corpse_spot,
+                    "dimension": arena,
+                }
             if text == "entities 64":
                 return {
                     "entities": [
@@ -5617,6 +5627,268 @@ class HudChecks(unittest.TestCase):
         self.assertEqual(len(kills), 1, rcon.commands)
         self.assertLess(
             rcon.commands.index(tps[-1]), rcon.commands.index(kills[0]), rcon.commands
+        )
+
+    def test_grenade_aborts_when_witness_never_parks(self):
+        """Fail-before for review major (1): the post-cook re-park wait can outlast
+        the M18 80-tick cook. The old code ignored the wait result, killed anyway,
+        and a thrown smoke near the spot satisfied the death-drop check. The
+        scenario must abort with a FAIL check and must not kill."""
+        arena = "blockfield:dm_arena_1"
+        start_pos = [0.5, 65.0, -28.5]
+        death_pos = [28.5, 65.0, 28.5]
+        calls = {"state": 0}
+
+        def bot(text):
+            if text == "state":
+                calls["state"] += 1
+                pos = start_pos if calls["state"] <= 2 else death_pos
+                return {
+                    "name": "Cook",
+                    "pos": pos,
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "usestate":
+                return {
+                    "using": True,
+                    "item": "superbwarfare:m18_smoke_grenade",
+                    "ticksUsing": 30,
+                    "duration": 80,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            if text == "bfaction spawn:BASE":
+                return {}
+            if text == "markers":
+                return {"deployed": True, "minimap": {}}
+            if text.startswith("slot ") or text.startswith("hold "):
+                return {}
+            raise AssertionError(text)
+
+        def witness(text):
+            if text == "slot 0":
+                return {}
+            if text == "state":
+                # Parked at the pre-cook spot, never reaches the corpse.
+                return {
+                    "name": "Wit",
+                    "pos": [start_pos[0] + 4, start_pos[1], start_pos[2]],
+                    "dimension": arena,
+                }
+            if text == "entities 64":
+                return {
+                    "entities": [
+                        {
+                            "type": "superbwarfare:m18_smoke_grenade",
+                            "tickPos": death_pos,
+                        }
+                    ]
+                }
+            raise AssertionError(text)
+
+        rcon = FakeRcon()
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(rcon, bot, witness)
+        self.assertIn(1, out, out)
+        self.assertFalse(redeployed)
+        self.assertEqual(
+            [c for c in rcon.commands if c.startswith("kill ")], [], rcon.commands
+        )
+
+    def test_grenade_aborts_when_cook_almost_done(self):
+        """Fail-before for review major (1), second half: with 1 tick left on the
+        80-tick cook there is no time to re-park; the scenario must abort instead
+        of racing the native throw."""
+        arena = "blockfield:dm_arena_1"
+        death_pos = [0.5, 65.0, -28.5]
+
+        def bot(text):
+            if text == "state":
+                return {
+                    "name": "Cook",
+                    "pos": death_pos,
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "usestate":
+                return {
+                    "using": True,
+                    "item": "superbwarfare:m18_smoke_grenade",
+                    "ticksUsing": 79,
+                    "duration": 80,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            if text == "bfaction spawn:BASE":
+                return {}
+            if text == "markers":
+                return {"deployed": True, "minimap": {}}
+            if text.startswith("slot ") or text.startswith("hold "):
+                return {}
+            raise AssertionError(text)
+
+        def witness(text):
+            if text == "slot 0":
+                return {}
+            if text == "state":
+                return {
+                    "name": "Wit",
+                    "pos": [death_pos[0] + 4, death_pos[1], death_pos[2]],
+                    "dimension": arena,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            raise AssertionError(text)
+
+        rcon = FakeRcon()
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(rcon, bot, witness)
+        self.assertIn(1, out, out)
+        self.assertFalse(redeployed)
+        self.assertEqual(
+            [c for c in rcon.commands if c.startswith("kill ")], [], rcon.commands
+        )
+
+    def test_grenade_witness_offset_stays_inside_bounds(self):
+        """Fail-before for review major (2): a flat +4 x offset can leave the arena
+        (cook x=28.5 -> witness 32.5 past dm_arena maxX 31, where the boundary kills
+        it). The parking spot must be clamped inside the bounds."""
+        arena = "blockfield:dm_arena_1"
+        death_pos = [28.5, 65.0, 28.5]
+        bounds = (-31, 31, -31, 31)
+        spot = [31 + 1.0, 65.0, 28.5]
+
+        def bot(text):
+            if text == "state":
+                return {
+                    "name": "Cook",
+                    "pos": death_pos,
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "usestate":
+                return {
+                    "using": True,
+                    "item": "superbwarfare:m18_smoke_grenade",
+                    "ticksUsing": 30,
+                    "duration": 80,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            if text == "bfaction spawn:BASE":
+                return {}
+            if text == "markers":
+                return {"deployed": True, "minimap": {}}
+            if text.startswith("slot ") or text.startswith("hold "):
+                return {}
+            raise AssertionError(text)
+
+        def witness(text):
+            if text == "slot 0":
+                return {}
+            if text == "state":
+                return {"name": "Wit", "pos": spot, "dimension": arena}
+            if text == "entities 64":
+                return {
+                    "entities": [
+                        {
+                            "type": "superbwarfare:m18_smoke_grenade",
+                            "tickPos": death_pos,
+                        }
+                    ]
+                }
+            raise AssertionError(text)
+
+        rcon = FakeRcon()
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(
+                rcon, bot, witness, bounds=bounds
+            )
+        self.assertEqual(out, [0, 0, 0, 0], out)
+        self.assertTrue(redeployed)
+        tps = [c for c in rcon.commands if " run tp " in c]
+        self.assertGreaterEqual(len(tps), 2, rcon.commands)
+        for tp in tps:
+            x = float(tp.split(" run tp ")[1].split()[1])
+            self.assertLessEqual(x, 31 + 1.0, tp)
+
+    def test_grenade_witness_parked_requires_same_dimension(self):
+        """Fail-before for review major (3): the parked predicate must require the
+        witness dimension to equal the death dimension. Matching coords in another
+        room (all-parts isolation) must abort, not kill into a false 'missing'."""
+        arena = "blockfield:dm_arena_1"
+        other = "blockfield:other_room_9"
+        death_pos = [0.5, 65.0, -28.5]
+        spot = [death_pos[0] + 4, death_pos[1], death_pos[2]]
+        started = {"cook": False}
+
+        def bot(text):
+            if text == "state":
+                return {
+                    "name": "Cook",
+                    "pos": death_pos,
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "usestate":
+                started["cook"] = True
+                return {
+                    "using": True,
+                    "item": "superbwarfare:m18_smoke_grenade",
+                    "ticksUsing": 30,
+                    "duration": 80,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            if text == "bfaction spawn:BASE":
+                return {}
+            if text == "markers":
+                return {"deployed": True, "minimap": {}}
+            if text.startswith("slot ") or text.startswith("hold "):
+                return {}
+            raise AssertionError(text)
+
+        def witness(text):
+            if text == "slot 0":
+                return {}
+            if text == "state":
+                return {
+                    "name": "Wit",
+                    "pos": spot,
+                    "dimension": arena if not started["cook"] else other,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            raise AssertionError(text)
+
+        rcon = FakeRcon()
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(rcon, bot, witness)
+        self.assertIn(1, out, out)
+        self.assertFalse(redeployed)
+        self.assertEqual(
+            [c for c in rcon.commands if c.startswith("kill ")], [], rcon.commands
         )
 
     def test_tag_exact_tricky_name(self):

@@ -219,27 +219,71 @@ def offline_uuid(name):
     return vanilla_uuid(name)
 
 
-def scenario_grenade(rcon, bot, witness):
+def witness_spot(death_pos, bounds=None):
+    """Witness parking spot near the corpse that stays inside the battle bounds.
+
+    A flat +4 x offset can leave the arena (a cook at x=28.5 parks the witness at
+    x=32.5 past the dm_arena x<=31 edge, where the boundary kills it to respawn
+    staging and the entity query then misses the drop): clamp inside the bounds.
+    """
+    x, z = death_pos[0] + 4, death_pos[2]
+    if bounds is not None:
+        min_x, max_x, min_z, max_z = bounds
+        x = clamp_inside(x, min_x, max_x)
+        z = clamp_inside(z, min_z, max_z)
+    return (x, death_pos[1], z)
+
+
+def scenario_grenade(rcon, bot, witness, bounds=None):
     """Cook a kit grenade, die mid-cook by RCON, assert the live drop entity.
 
     The corpse is queried through a witness in the same arena: after death the
     victim sits in respawn staging, so its own entity query recenters away.
-    The witness is parked by the cook before cooking starts and re-parked on
-    the fresh corpse right before the kill: the pre-cook TP predates the cook
-    by seconds and can fail silently or drift, leaving the witness outside
-    the 64-block query radius so the drop reads as missing. An M18 finishes
-    its 80-tick cook while a post-cook TP + sleeps + kill are still in flight,
-    and the native full-cook throw (a 30 s smoke show) is not the death drop.
+    The witness is parked by the cook and verified BEFORE cooking starts (no
+    cook is running, so the wait cannot race it), then re-parked on the fresh
+    corpse right before the kill inside the remaining cook time: an M18 finishes
+    its 80-tick cook while an unbounded post-cook TP + sleeps + kill are still
+    in flight, and the native full-cook throw (a 30 s smoke show) is not the
+    death drop, so the re-park aborts with a FAIL reason instead of killing
+    late. The spot stays inside the battle bounds and the parked predicate
+    requires the witness dimension to match the death dimension.
     """
     out = []
     dim = bot("state")["dimension"]
     pos = bot("state")["pos"]
+    spot = witness_spot(pos, bounds)
     witness("slot 0")
     witness_uuid = offline_uuid(witness("state")["name"])
     rcon.cmd(
-        f"execute in {dim} run tp {witness_uuid} {pos[0] + 4} {pos[1]} {pos[2]} 90 0"
+        f"execute in {dim} run tp {witness_uuid} {spot[0]} {spot[1]} {spot[2]} 90 0"
     )
-    time.sleep(1)
+
+    def parked_at(target, dimension):
+        def predicate():
+            try:
+                state = witness("state")
+            except (OSError, RuntimeError, ValueError, KeyError):
+                return False
+            if state.get("dimension") != dimension:
+                return False
+            at = state["pos"]
+            return (
+                abs(at[0] - target[0]) < 10
+                and abs(at[1] - target[1]) < 10
+                and abs(at[2] - target[2]) < 10
+            )
+
+        return predicate
+
+    if not wait_for(parked_at(spot, dim), 5, interval=0.2):
+        out.append(
+            check(
+                "witness parked by the cook before cooking",
+                False,
+                "witness never reached the cook spot",
+            )
+        )
+        return out, False
     cooked = None
     for slot in (2, 3):
         bot(f"slot {slot}")
@@ -274,28 +318,65 @@ def scenario_grenade(rcon, bot, witness):
     bot_name = death["name"]
     # Re-park on the fresh corpse: the pre-cook TP predates the cook by
     # seconds and can fail silently or drift (witness ~80-2000 blocks off on
-    # FAIL runs), so the 64-block query reads empty. Best-effort, no sleeps.
+    # FAIL runs), so the 64-block query reads empty. Bounded by the remaining
+    # cook: a late kill lets the native full-cook throw land first and its
+    # smoke near the spot is not the death drop, so abort instead.
+    spot = witness_spot(death_pos, bounds)
     try:
         witness_name = witness("state")["name"]
         rcon.cmd(
             f"execute in {death['dimension']} run tp {offline_uuid(witness_name)} "
-            f"{death_pos[0] + 4} {death_pos[1]} {death_pos[2]} 90 0"
+            f"{spot[0]} {spot[1]} {spot[2]} 90 0"
         )
-
-        def witness_parked():
-            try:
-                pos = witness("state")["pos"]
-            except (OSError, RuntimeError, ValueError, KeyError):
-                return False
-            return (
-                abs(pos[0] - death_pos[0] - 4) < 10
-                and abs(pos[1] - death_pos[1]) < 10
-                and abs(pos[2] - death_pos[2]) < 10
+    except (OSError, RuntimeError, ValueError, KeyError) as error:
+        out.append(
+            check(
+                "witness re-parked on the corpse before the kill",
+                False,
+                f"re-park teleport failed: {str(error)[:120]}",
             )
-
-        wait_for(witness_parked, 5, interval=0.2)
-    except (OSError, RuntimeError, ValueError, KeyError):
-        pass
+        )
+        return out, False
+    remaining = None
+    ticks, duration = cooked[2], cooked[3]
+    if ticks is not None and duration is not None:
+        try:
+            remaining = (float(duration) - float(ticks)) / 20.0
+        except (TypeError, ValueError):
+            remaining = None
+    if remaining is not None and remaining < 1.5:
+        out.append(
+            check(
+                "re-park fits in the remaining cook",
+                False,
+                f"only {remaining:.1f} s left of the {duration}-tick cook; "
+                "aborting (native throw is not the death drop)",
+            )
+        )
+        return out, False
+    budget = 2.0 if remaining is None else min(3.0, max(0.5, remaining - 0.5))
+    if not wait_for(parked_at(spot, death["dimension"]), budget, interval=0.2):
+        out.append(
+            check(
+                "witness re-parked on the corpse before the kill",
+                False,
+                "witness never reached the corpse in the remaining cook",
+            )
+        )
+        return out, False
+    try:
+        still = bot("usestate")
+    except (OSError, RuntimeError):
+        still = {}
+    if not (still.get("using") and still.get("item") in GRENADE_ITEMS):
+        out.append(
+            check(
+                "victim still cooking at the kill",
+                False,
+                "cook finished before the kill; native throw is not the death drop",
+            )
+        )
+        return out, False
     rcon.cmd(f"kill {bot_name}")
     time.sleep(1)
 
@@ -889,7 +970,10 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
             if bot2 is None:
                 print("grenade death-drop needs a witness client: skipped")
             else:
-                grenade_out, _ = scenario_grenade(rcon, bot, bot2)
+                grenade_bounds = (
+                    arena_bounds(SERVER) if args.map == "dm_arena" else None
+                )
+                grenade_out, _ = scenario_grenade(rcon, bot, bot2, grenade_bounds)
                 out += grenade_out
         if "mp5" in parts:
             out += scenario_mp5(rcon, bot, server_log)

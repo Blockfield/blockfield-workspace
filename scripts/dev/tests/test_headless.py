@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
@@ -429,7 +430,9 @@ class ProdGuard(unittest.TestCase):
     PROD_SERVERS = (
         "play.blockfield.pro:25566",
         "raknet;play.blockfield.pro:25566",
+        "tcp;play.blockfield.pro:25566",
         "PLAY.BLOCKFIELD.PRO:25565",
+        "TCP;PLAY.BLOCKFIELD.PRO.:25565",
         "play.blockfield.pro.",
         "workshop.blockfield.pro:25567",
     )
@@ -463,11 +466,60 @@ class ProdGuard(unittest.TestCase):
         for command in (
             ["connect", "play.blockfield.pro:25566"],
             ["connect", "raknet;play.blockfield.pro:25566"],
+            ["connect", "tcp;play.blockfield.pro:25566"],
         ):
             with self.subTest(command=command):
                 args = SimpleNamespace(client=1, command=command, timeout=1)
                 with self.assertRaisesRegex(SystemExit, "prod"):
                     devstack.bot(args)
+
+    def test_prod_host_normalisation(self):
+        # u-noprod round 2: the bare host feeds both the suffix check and DNS,
+        # so prefixes/ports/case/dots/IDN must be stripped before either runs.
+        cases = {
+            "raknet;Play.Blockfield.Pro:25566": "play.blockfield.pro",
+            "TCP;PLAY.BLOCKFIELD.PRO.:25565": "play.blockfield.pro",
+            "  play.blockfield.pro.  ": "play.blockfield.pro",
+            "play.blockfield.pro": "play.blockfield.pro",
+            "ｐlay.blockfield.pro:25566": "play.blockfield.pro",
+            "münchen.de:25565": "xn--mnchen-3ya.de",
+            "[::1]:25565": "::1",
+            "127.0.0.1:25599": "127.0.0.1",
+            "": "",
+            None: "",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(devstack.normalize_server_host(raw), expected)
+
+    def test_prod_ip_intersection_refuses_addresses_resolving_to_prod(self):
+        # u-noprod round 2: raw IPs and aliases that resolve to prod IPs are
+        # refused; resolution happens at check time, never via hardcoded IPs.
+        # TEST-NET documentation addresses stand in for prod/foreign IPs.
+        prod_ip = "203.0.113.7"
+        foreign_ip = "198.51.100.9"
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            table = {
+                "blockfield.pro": prod_ip,
+                "play.blockfield.pro": prod_ip,
+                "workshop.blockfield.pro": prod_ip,
+                "stand-alias.example": prod_ip,
+                prod_ip: prod_ip,
+                foreign_ip: foreign_ip,
+            }
+            if host not in table:
+                raise socket.gaierror("mocked DNS: unknown host")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (table[host], 0))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            self.assertTrue(devstack.is_prod_server("203.0.113.7:25566"))
+            self.assertTrue(devstack.is_prod_server("[203.0.113.7]:25566"))
+            self.assertTrue(devstack.is_prod_server("stand-alias.example:25566"))
+            self.assertTrue(devstack.is_prod_server("tcp;stand-alias.example:25566"))
+            self.assertFalse(devstack.is_prod_server("198.51.100.9:25566"))
+            self.assertFalse(devstack.is_prod_server("127.0.0.1:25599"))
+            self.assertFalse(devstack.is_prod_server("unresolvable.invalid:25566"))
 
     def test_stale_servers_dat_is_rewritten_to_the_stand_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -498,6 +550,11 @@ class ProdGuard(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("blockfield.pro", source)
         self.assertRegex(source.lower(), "refus.*prod|prod.*refus")
+        # u-noprod round 2: same normalisation as the Python guard, plus a
+        # runtime resolved-IP check that must never hardcode an address.
+        self.assertIn('"tcp;"', source)
+        self.assertIn("getAllByName", source)
+        self.assertIn("IDN", source)
 
 
 def _servers_dat_ips(data):

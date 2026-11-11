@@ -471,6 +471,32 @@ public final class TestBot implements ClientModInitializer {
         }
     }
 
+    // True when the host resolves to a prod IP right now (never hardcoded).
+    private static boolean prodAddressesIntersect(String host) {
+        if (host.isEmpty()
+                || host.equals("localhost")
+                || host.startsWith("127.")
+                || host.equals("::1")) return false;
+        java.util.Set<String> candidate = resolveAll(host);
+        if (candidate.isEmpty()) return false;
+        for (String prod :
+                new String[] {"blockfield.pro", "play.blockfield.pro", "workshop.blockfield.pro"}) {
+            java.util.Set<String> prodIps = resolveAll(prod);
+            for (String ip : candidate) if (prodIps.contains(ip)) return true;
+        }
+        return false;
+    }
+
+    private static java.util.Set<String> resolveAll(String host) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        try {
+            for (java.net.InetAddress addr : java.net.InetAddress.getAllByName(host))
+                out.add(addr.getHostAddress());
+        } catch (java.net.UnknownHostException ignored) {
+        }
+        return out;
+    }
+
     private static Object exec(String line) {
         Minecraft mc = Minecraft.getInstance();
         String[] a = line.split("\\s+");
@@ -1029,12 +1055,38 @@ public final class TestBot implements ClientModInitializer {
                         mc.disconnect();
                     }
                     // Stale stand profiles once pointed the agent client at prod.
-                    String host =
-                            a[1].regionMatches(true, 0, "raknet;", 0, 7) ? a[1].substring(7) : a[1];
-                    host = host.contains(":") ? host.substring(0, host.lastIndexOf(':')) : host;
+                    String noPrefix = a[1] == null ? "" : a[1].trim();
+                    boolean stripped;
+                    do {
+                        stripped = false;
+                        for (String prefix : new String[] {"raknet;", "tcp;"}) {
+                            if (noPrefix.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                                noPrefix = noPrefix.substring(prefix.length()).trim();
+                                stripped = true;
+                                break;
+                            }
+                        }
+                    } while (stripped);
+                    String host;
+                    if (noPrefix.startsWith("[")) {
+                        int end = noPrefix.indexOf(']');
+                        host = end == -1 ? noPrefix.substring(1) : noPrefix.substring(1, end);
+                    } else if (noPrefix.indexOf(':') != noPrefix.lastIndexOf(':')) {
+                        host = noPrefix; // bare IPv6 literal: no port to strip
+                    } else if (noPrefix.contains(":")) {
+                        host = noPrefix.substring(0, noPrefix.lastIndexOf(':'));
+                    } else {
+                        host = noPrefix;
+                    }
                     host = host.trim().toLowerCase(java.util.Locale.ROOT);
-                    if (host.endsWith(".")) host = host.substring(0, host.length() - 1);
-                    if (host.equals("blockfield.pro") || host.endsWith(".blockfield.pro"))
+                    while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+                    try {
+                        host = java.net.IDN.toASCII(host);
+                    } catch (IllegalArgumentException ignored) {
+                    }
+                    if (host.equals("blockfield.pro")
+                            || host.endsWith(".blockfield.pro")
+                            || prodAddressesIntersect(host))
                         throw new IllegalStateException("refusing prod connect " + a[1]);
                     ServerAddress addr = ServerAddress.parseString(a[1]);
                     ConnectScreen.startConnecting(

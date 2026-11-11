@@ -306,6 +306,47 @@ def testbot_enabled(args, game_dir):
     )
 
 
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+TESTBOT_GUARD_MARKER = b"refusing prod connect"
+
+
+def testbot_guard_present(jar):
+    """True when the jar was built from sources with the prod-connect guard."""
+    try:
+        path = Path(jar)
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                return any(
+                    TESTBOT_GUARD_MARKER in archive.read(name)
+                    for name in archive.namelist()
+                )
+        return False
+    except OSError:
+        return False
+
+
+def refresh_stale_testbot(jar):
+    """The current testbot build when its content hash differs, else the jar."""
+    build = newest_jar(
+        ROOT / "scripts" / "dev" / "testbot" / "build" / "libs", "bftestbot-"
+    )
+    if build is None or not build.is_file():
+        return jar
+    try:
+        if _file_sha256(build) == _file_sha256(Path(jar)):
+            return jar
+    except OSError:
+        return jar
+    return build
+
+
 def install_testbot(args, game_dir):
     destination = game_dir / "mods/bftestbot.jar"
     if not testbot_enabled(args, game_dir):
@@ -337,6 +378,16 @@ def install_testbot(args, game_dir):
         jar = testbot_jar(args)
     if not jar or not jar.is_file():
         die("no testbot jar: run `just build-testbot` or pass --testbot JAR")
+    if getattr(args, "testbot", None) is None and not testbot_guard_present(jar):
+        # A retained install predating the prod-connect guard must not keep
+        # running: swap in the current build when its content hash differs,
+        # or refuse to start so the next `just build-testbot` rebuilds it.
+        jar = refresh_stale_testbot(jar)
+        if not testbot_guard_present(jar):
+            die(
+                "stale bftestbot.jar without the prod-connect guard: "
+                "run `just build-testbot`, then re-run"
+            )
     if jar.resolve() != destination.resolve():
         materialize(jar, destination)
     return str(
@@ -2349,15 +2400,69 @@ def client_launch_command(args, game_dir, name, client_pack, testbot_port):
     return command
 
 
+_PROD_BASE_HOST = "blockfield.pro"
+_PROD_HOSTS = (_PROD_BASE_HOST, "play.blockfield.pro", "workshop.blockfield.pro")
+_TRANSPORT_PREFIXES = ("raknet;", "tcp;")
+
+
+def normalize_server_host(server):
+    """Bare host for prod checks: transport prefix, port, case, dot, IDN.
+
+    Suffix matching alone accidentally tolerates prefixes, but DNS resolution
+    needs the bare host, so strip everything before comparing or resolving.
+    """
+    addr = (server or "").strip()
+    while True:
+        lowered = addr.lower()
+        for prefix in _TRANSPORT_PREFIXES:
+            if lowered.startswith(prefix):
+                addr = addr[len(prefix) :].strip()
+                break
+        else:
+            break
+    host = addr
+    if host.startswith("["):
+        end = host.find("]")
+        host = host[1:end] if end != -1 else host[1:]
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    # A bare IPv6 literal (several colons) has no port to strip: keep it whole.
+    host = host.strip().lower().rstrip(".")
+    if host:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            pass
+    return host
+
+
+def _resolve_ips(host):
+    """IPs a host resolves to right now; empty when unresolvable."""
+    try:
+        infos = socket.getaddrinfo(
+            host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+        )
+    except OSError:
+        return set()
+    return {info[4][0] for info in infos if info[4]}
+
+
 def is_prod_server(server):
     """True when the address points at prod (coordination#44: stands never join prod)."""
-    addr = (server or "").strip()
-    if addr[:7].lower() == "raknet;":
-        addr = addr[7:]
-    host = addr.rsplit(":", 1)[0].strip().lower().rstrip(".")
-    if host.startswith("["):
+    host = normalize_server_host(server)
+    if not host:
         return False
-    return host == "blockfield.pro" or host.endswith(".blockfield.pro")
+    if host == _PROD_BASE_HOST or host.endswith("." + _PROD_BASE_HOST):
+        return True
+    if host == "localhost" or host.startswith("127.") or host == "::1":
+        return False
+    candidate = _resolve_ips(host)
+    if not candidate:
+        return False
+    prod = set()
+    for name in _PROD_HOSTS:
+        prod |= _resolve_ips(name)
+    return bool(candidate & prod)
 
 
 def write_stand_servers_dat(game_dir, ip):

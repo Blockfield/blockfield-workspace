@@ -963,10 +963,14 @@ def write_env(vm_id, remote_root, task):
     session = f"boat-{vm_id}-{task}"
     # Export BF_DEV_HOME first so the managed JDK lands under the task dir;
     # resolve JH/QBIN now and bake literal values into the env file.
+    # Fresh forks lack `just` (ws#88 rc=127): provision the pinned,
+    # checksummed just via the toolchain before anything needs it, then
+    # prove it resolves through the provisioned env.
     script = (
         f"cd {shlex.quote(remote_root)}"
         f" && export BF_DEV_HOME={shlex.quote(bf_home)}"
         f" AI_AGENT_SESSION_ID={shlex.quote(session)}"
+        " && python3 -I scripts/quality.py run just --version"
         " && python3 -I scripts/quality.py run java -version"
         " && JH=$(python3 -c \"import sys; sys.path.insert(0, 'scripts');"
         ' from toolchain import java_home; print(java_home())")'
@@ -984,10 +988,11 @@ def write_env(vm_id, remote_root, task):
         f" > {shlex.quote(bf_home)}/boat-env.sh"
         f" && cat {shlex.quote(bf_home)}/boat-env.sh"
         ' && "$JH/bin/java" -version'
+        f" && source {shlex.quote(bf_home)}/boat-env.sh && just --version"
     )
     rc, out = vm_exec(vm_id, script, timeout=600)
     if rc != 0:
-        raise RuntimeError(f"env provisioning failed:\n{out}")
+        raise RuntimeError(f"env provisioning failed (pinned just + java):\n{out}")
     return f"{bf_home}/boat-env.sh"
 
 

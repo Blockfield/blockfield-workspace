@@ -2095,3 +2095,50 @@ class PinnedServer(unittest.TestCase):
             current = boat_build.remote_shas("vm", str(guest))
         self.assertEqual(current[""], guest_head)
         self.assertEqual(current["server"], want)
+
+
+class PinnedJustOnFreshFork(unittest.TestCase):
+    """Fresh forks lack `just` (ws#88: rc=127 on bx_m6ypmzyf).
+
+    write_env must install/verify the pinned just via the checksummed
+    toolchain (`quality.py run just --version`, never apt/cargo latest)
+    and prove it resolves through the provisioned env, or fail naming just.
+    """
+
+    def run_write_env(self, reply):
+        scripts = []
+
+        def fake_vm_exec(vm_id, script, timeout=120):
+            scripts.append(script)
+            return reply
+
+        with patch.object(boat_build, "vm_exec", side_effect=fake_vm_exec):
+            result = boat_build.write_env("bx_x", "/srv/guest/ws", "task-x")
+        return result, scripts[0]
+
+    def test_provisions_pinned_just_before_java(self):
+        _, script = self.run_write_env((0, "ok"))
+        # Fail-before: the old script provisioned java only, so `just ...`
+        # user commands died with rc=127 on fresh forks.
+        self.assertIn("scripts/quality.py run just --version", script)
+        self.assertLess(
+            script.index("scripts/quality.py run just --version"),
+            script.index("scripts/quality.py run java -version"),
+        )
+        self.assertNotIn("apt-get install just", script)
+        self.assertNotIn("cargo install just", script)
+
+    def test_verifies_just_through_provisioned_env(self):
+        _, script = self.run_write_env((0, "ok"))
+        # Fail-before: QBIN listed the pin dir without proving the binary
+        # is there and on the env PATH.
+        self.assertIn("just --version", script)
+        self.assertIn("boat-env.sh", script)
+
+    def test_failure_names_just(self):
+        with (
+            patch.object(boat_build, "vm_exec", return_value=(1, "download failed")),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            boat_build.write_env("bx_x", "/srv/guest/ws", "task-x")
+        self.assertIn("just", str(ctx.exception))

@@ -471,6 +471,68 @@ public final class TestBot implements ClientModInitializer {
         }
     }
 
+    // Allow-list: localhost or loopback/private/link-local IP literal, no DNS.
+    private static String standHost(String server) {
+        String addr = server == null ? "" : server.trim();
+        boolean stripped;
+        do {
+            stripped = false;
+            for (String prefix : new String[] {"raknet;", "tcp;"}) {
+                if (addr.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                    addr = addr.substring(prefix.length()).trim();
+                    stripped = true;
+                    break;
+                }
+            }
+        } while (stripped);
+        String host;
+        if (addr.startsWith("[")) {
+            int end = addr.indexOf(']');
+            host = end == -1 ? addr.substring(1) : addr.substring(1, end);
+        } else if (addr.indexOf(':') != addr.lastIndexOf(':')) host = addr;
+        else if (addr.contains(":")) host = addr.substring(0, addr.lastIndexOf(':'));
+        else host = addr;
+        host = host.trim().toLowerCase(java.util.Locale.ROOT);
+        while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        return host;
+    }
+
+    private static boolean isStandServer(String server) {
+        if (server == null || server.trim().isEmpty()) return true;
+        String host = standHost(server);
+        if (host.equals("localhost")) return true;
+        int pct = host.indexOf('%');
+        if (pct != -1) host = host.substring(0, pct);
+        if (host.regionMatches(true, 0, "::ffff:", 0, 7)) host = host.substring(7);
+        if (!host.contains(":")) return isStandIpv4(host);
+        if (!host.matches("[0-9a-f:.]+")) return false;
+        try {
+            java.net.InetAddress addr = java.net.InetAddress.getByName(host);
+            if (addr.isLoopbackAddress() || addr.isLinkLocalAddress() || addr.isSiteLocalAddress())
+                return true;
+            byte[] b = addr.getAddress(); // ULA fc00::/7, never a hostname here
+            return b.length == 16 && (b[0] & 0xfe) == (byte) 0xfc;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean isStandIpv4(String host) {
+        String[] p = host.split("\\.", -1);
+        if (p.length != 4) return false;
+        int[] o = new int[4];
+        for (int i = 0; i < 4; i++) {
+            if (!p[i].matches("\\d{1,3}")) return false;
+            o[i] = Integer.parseInt(p[i]);
+            if (o[i] > 255) return false;
+        }
+        return o[0] == 127
+                || o[0] == 10
+                || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254);
+    }
+
     private static Object exec(String line) {
         Minecraft mc = Minecraft.getInstance();
         String[] a = line.split("\\s+");
@@ -1028,6 +1090,9 @@ public final class TestBot implements ClientModInitializer {
                         mc.level.disconnect();
                         mc.disconnect();
                     }
+                    // Stale stand profiles once pointed the agent client at prod.
+                    if (!isStandServer(a[1]))
+                        throw new IllegalStateException("refusing prod connect " + a[1]);
                     ServerAddress addr = ServerAddress.parseString(a[1]);
                     ConnectScreen.startConnecting(
                             new TitleScreen(),

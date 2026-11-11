@@ -5315,7 +5315,11 @@ class HudChecks(unittest.TestCase):
 
                     return bot
 
-                with patch("time.sleep"), patch("builtins.print"):
+                with (
+                    patch("time.sleep"),
+                    patch("builtins.print"),
+                    patch.object(hud_checks, "probe_vulnerable", return_value=True),
+                ):
                     out, killed = hud_checks.scenario_duel(
                         SimpleNamespace(cmd=command),
                         player("Shooter"),
@@ -6029,11 +6033,245 @@ class HudChecks(unittest.TestCase):
         self.assertEqual(hud_checks.scenario_tag(None, bot, bot2, entry), [0, 0])
 
     def test_tag_requires_tricky_name(self):
+        # Missing tricky-name setup is a skip, never a product FAIL: a stock
+        # stand names the second client PlayerNNNN (issue #87).
+
         def bot2(command):
             assert command == "state", command
             return {"name": "Normal", "dimension": "blockfield:hamburg_2"}
 
-        self.assertEqual(hud_checks.scenario_tag(None, lambda cmd: [], bot2, None), [1])
+        with patch("builtins.print"):
+            self.assertEqual(
+                hud_checks.scenario_tag(None, lambda cmd: [], bot2, None), []
+            )
+
+    def duel_pair(self, kill_on_shoot=True):
+        """Minimal (shooter, victim, rcon) for scenario_duel: the first lane
+        kills when kill_on_shoot, nobody dies otherwise."""
+        arena = "blockfield:dm_arena_1"
+        entry = {"attacker": "Shooter", "target": "Victim"}
+        state = {"dead": False, "shots": 0}
+
+        def command(text):
+            if " run tp " in text:
+                return "Teleported"
+            if text.endswith(".GunCurrentAmmoCount"):
+                return "entity has the following entity data: 30"
+            raise AssertionError(text)
+
+        def shooter(text):
+            if text == "state":
+                return {
+                    "name": "Shooter",
+                    "pos": [0, 65.0, 0],
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "killfeed":
+                return {"entries": [entry] if state["dead"] else []}
+            if text.startswith("entities "):
+                return {"entities": [{"type": "player"}]}
+            if text.startswith("aimshoot "):
+                state["shots"] += 1
+                if kill_on_shoot:
+                    state["dead"] = True
+                return {"result": "SUCCESS"}
+            if text == "slot 0":
+                return {}
+            raise AssertionError(text)
+
+        def victim(text):
+            if text == "state":
+                return {
+                    "name": "Victim",
+                    "pos": [0, 65.0, 0],
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 0 if state["dead"] else 20,
+                }
+            if text == "killfeed":
+                return {"entries": [entry] if state["dead"] else []}
+            raise AssertionError(text)
+
+        return arena, entry, state, SimpleNamespace(cmd=command), shooter, victim
+
+    def test_duel_probes_vulnerability_before_lanes(self):
+        """Fail-before (issue #87): lanes without a vulnerability gate die on
+        the spawn shield. The duel must probe first, with the arena and UUIDs."""
+        arena, entry, _, rcon, shooter, victim = self.duel_pair()
+        probes = []
+
+        def fake_probe(rcon_arg, arena_arg, victim_arg, shooter_arg, timeout=0):
+            probes.append((arena_arg, victim_arg, shooter_arg, timeout))
+            return True
+
+        with (
+            patch("time.sleep"),
+            patch("builtins.print"),
+            patch.object(hud_checks, "probe_vulnerable", side_effect=fake_probe),
+        ):
+            out, killed = hud_checks.scenario_duel(rcon, shooter, victim, arena, None)
+        self.assertEqual(
+            probes,
+            [
+                (
+                    arena,
+                    hud_checks.offline_uuid("Victim"),
+                    hud_checks.offline_uuid("Shooter"),
+                    60,
+                )
+            ],
+            probes,
+        )
+        self.assertEqual(out, [0, 0, 0], out)
+        self.assertEqual(killed, entry)
+
+    def test_duel_aborts_when_victim_shielded(self):
+        """Fail-before: a shielded victim fails the protection gate without
+        burning lanes (no shots, no kill)."""
+        arena, _, state, rcon, shooter, victim = self.duel_pair()
+        with (
+            patch("time.sleep"),
+            patch("builtins.print"),
+            patch.object(hud_checks, "probe_vulnerable", return_value=False),
+        ):
+            out, killed = hud_checks.scenario_duel(rcon, shooter, victim, arena, None)
+        self.assertEqual(out, [1], out)
+        self.assertIsNone(killed)
+        self.assertEqual(state["shots"], 0)
+
+    def test_rcon_kill_waits_out_spawn_protection(self):
+        """Fail-before (issue #87): the fallback must not credit a protected
+        victim. A shielded victim fails the gate and takes no lethal hit."""
+        killer_name, victim_name = "Killer", "Victim"
+        arena = "blockfield:dm_arena_1"
+        cmds = []
+
+        def killer(text):
+            if text == "state":
+                return {"name": killer_name, "dimension": arena}
+            if text == "killfeed":
+                return {"entries": []}
+            raise AssertionError(text)
+
+        def victim(text):
+            if text == "state":
+                return {"name": victim_name, "dimension": arena}
+            if text == "killfeed":
+                return {"entries": []}
+            raise AssertionError(text)
+
+        rcon = SimpleNamespace(cmd=cmds.append)
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "server_health", return_value=20.0),
+            patch.object(hud_checks, "probe_vulnerable", return_value=False),
+        ):
+            out, entry = hud_checks.rcon_kill(rcon, killer, victim)
+        self.assertEqual(out, [1], out)
+        self.assertIsNone(entry)
+        # Only the pre-probe heal goes out; never the lethal hit.
+        self.assertFalse(any(" run damage " in c for c in cmds), cmds)
+
+    def test_rcon_kill_stops_when_the_heal_never_lands(self):
+        cmds = []
+
+        def player(name, hp):
+            def call(text):
+                if text == "state":
+                    return {"name": name, "dimension": "a", "health": hp}
+                if text == "killfeed":
+                    return {"entries": []}
+                raise AssertionError(text)
+
+            return call
+
+        def command(text):
+            cmds.append(text)
+            return "Applied effect"
+
+        with (
+            patch.object(hud_checks, "server_health", return_value=1.0),
+            patch.object(hud_checks, "wait_for", return_value=False),
+            patch.object(
+                hud_checks, "probe_vulnerable", side_effect=AssertionError("probed")
+            ),
+        ):
+            out, entry = hud_checks.rcon_kill(
+                SimpleNamespace(cmd=command), player("K", 20), player("V", 1)
+            )
+        self.assertIsNone(entry)
+        self.assertFalse(any(" run damage " in c for c in cmds), cmds)
+
+    def test_rcon_kill_probes_before_lethal_hit(self):
+        """Fail-before: the lethal RCON hit goes out only after the probe."""
+        killer_name, victim_name = "Killer", "Victim"
+        arena = "blockfield:dm_arena_1"
+        cmds = []
+        probes = []
+
+        def killer(text):
+            if text == "state":
+                return {"name": killer_name, "dimension": arena}
+            if text == "killfeed":
+                return {"entries": []}
+            raise AssertionError(text)
+
+        healed = {"ticks": 0}
+
+        def victim(text):
+            if text == "state":
+                # Client copy is stale: always shows full HP.
+                return {"name": victim_name, "dimension": arena, "health": 20}
+            if text == "killfeed":
+                return {"entries": []}
+            raise AssertionError(text)
+
+        def command(text):
+            cmds.append(text)
+            if " run damage " in text and " 100" in text:
+                return "Applied 100.0 damage to Victim"
+            if "instant_health" in text:
+                return "Applied effect"
+            if "data get entity" in text and "Health" in text:
+                # Server Health: 1 HP until a tick after the heal.
+                healed["ticks"] += 1
+                hp = 20.0 if healed["ticks"] > 1 else 1.0
+                return f"Victim has the following entity data: {hp}f"
+            raise AssertionError(text)
+
+        def fake_probe(rcon_arg, arena_arg, victim_arg, shooter_arg, timeout=0):
+            # The heal must have landed server-side before the 1-HP probe.
+            assert healed["ticks"] > 1, "probe before the server heal landed"
+            probes.append((arena_arg, victim_arg, shooter_arg))
+            return True
+
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "probe_vulnerable", side_effect=fake_probe),
+            patch.object(
+                hud_checks,
+                "wait_for",
+                side_effect=lambda fn, *a, **k: fn() or fn() or fn(),
+            ),
+        ):
+            # Victim never dies in this fake, so only the gate + lethal-hit
+            # checks run; what matters is the probe came first.
+            hud_checks.rcon_kill(SimpleNamespace(cmd=command), killer, victim)
+        self.assertEqual(
+            probes,
+            [
+                (
+                    arena,
+                    hud_checks.offline_uuid(victim_name),
+                    hud_checks.offline_uuid(killer_name),
+                )
+            ],
+            probes,
+        )
+        lethal = [c for c in cmds if " 100" in c]
+        self.assertEqual(len(lethal), 1, cmds)
 
     def test_tricky_names_are_login_valid(self):
         for name in hud_checks.TRICKY_NAMES:

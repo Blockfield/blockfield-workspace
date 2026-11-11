@@ -5303,6 +5303,120 @@ class HudChecks(unittest.TestCase):
             out = hud_checks.scenario_isolation(rcon, victim, parked, "room1")
         self.assertEqual(out, [0] * 6, out)
 
+    def grenade_pair(self, cooked_item, lingering):
+        """Fake (bot, witness) for scenario_grenade: `cooked_item` cooks, `lingering`
+        entities stay near the corpse for the resolution gate."""
+        arena = "blockfield:dm_arena_1"
+        death_pos = [28.5, 65.0, 28.5]
+
+        def bot(text):
+            if text == "state":
+                return {
+                    "name": "Cook",
+                    "pos": death_pos,
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "usestate":
+                return {"using": True, "item": cooked_item, "ticksUsing": 30}
+            if text == "entities 64":
+                return {"entities": []}
+            if text == "bfaction spawn:BASE":
+                return {}
+            if text == "markers":
+                return {"deployed": True, "minimap": {}}
+            if text.startswith("slot ") or text.startswith("hold "):
+                return {}
+            raise AssertionError(text)
+
+        def witness(text):
+            if text == "slot 0":
+                return {}
+            if text == "state":
+                return {"name": "Wit", "pos": death_pos, "dimension": arena}
+            if text == "entities 64":
+                return {"entities": lingering}
+            raise AssertionError(text)
+
+        return bot, witness, death_pos
+
+    def test_grenade_smoke_drop_passes_resolution_gate(self):
+        """SBW M18 / LR smoke smoulder for 30 s+ by design: a lingering smoke drop
+        near the corpse must not fail the resolution gate."""
+        lingering = [
+            {
+                "type": "superbwarfare:m18_smoke_grenade",
+                "tickPos": [28.5, 65.0, 28.5],
+            }
+        ]
+        bot, witness, _ = self.grenade_pair(
+            "superbwarfare:m18_smoke_grenade", lingering
+        )
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(FakeRcon(), bot, witness)
+        self.assertEqual(out, [0, 0, 0, 0], out)
+        self.assertTrue(redeployed)
+
+    def test_grenade_blast_drop_near_corpse_blocks_resolution_gate(self):
+        """The gate keeps its teeth: a lingering blast grenade still fails."""
+        lingering = [
+            {"type": "superbwarfare:hand_grenade", "tickPos": [28.5, 65.0, 28.5]}
+        ]
+        bot, witness, _ = self.grenade_pair("lrtactical:throwable", lingering)
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(FakeRcon(), bot, witness)
+        self.assertEqual(out, [0, 0, 1, 0], out)
+        self.assertTrue(redeployed)
+
+    def test_grenade_blast_predicate_ignores_smoke_and_distant_blast(self):
+        near = [0.0, 65.0, 0.0]
+        far = [60.0, 65.0, 0.0]
+        self.assertFalse(
+            hud_checks.blast_drop_present(
+                [{"type": "superbwarfare:m18_smoke_grenade", "tickPos": near}], near
+            )
+        )
+        self.assertFalse(
+            hud_checks.blast_drop_present(
+                [{"type": "superbwarfare:smoke_decoy", "tickPos": near}], near
+            )
+        )
+        self.assertFalse(
+            hud_checks.blast_drop_present(
+                [{"type": "lrtactical:smoke_grenade", "tickPos": near}], near
+            )
+        )
+        self.assertTrue(
+            hud_checks.blast_drop_present(
+                [{"type": "superbwarfare:hand_grenade", "tickPos": near}], near
+            )
+        )
+        self.assertTrue(
+            hud_checks.blast_drop_present(
+                [{"type": "lrtactical:explode_grenade", "tickPos": near}], near
+            )
+        )
+        self.assertFalse(
+            hud_checks.blast_drop_present(
+                [{"type": "superbwarfare:hand_grenade", "tickPos": far}], near
+            )
+        )
+
+    def test_grenade_blast_near_fails_closed_on_query_error(self):
+        def raising(_):
+            raise RuntimeError("transient query failure")
+
+        self.assertTrue(hud_checks.blast_near(raising, [0.0, 65.0, 0.0]))
+
     def test_tag_exact_tricky_name(self):
         evil = "x_reset_x"
 

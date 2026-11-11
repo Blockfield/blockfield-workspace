@@ -195,6 +195,25 @@ def local_repo_present(rel):
     return (ROOT / rel / ".git").exists() if rel else True
 
 
+def pinned_server_sha(ws_commit=None):
+    """Pinned server SHA for the wanted workspace commit.
+
+    The private server is not a submodule (a public repo cannot track a
+    private one): its pin lives in pins/server.sha. Prefer the pin recorded
+    at the wanted workspace commit (so --branch/--workspace-sha transfer the
+    pin they point at), falling back to the worktree file, which fails
+    loudly when missing or empty.
+    """
+    if ws_commit:
+        out = run_git("show", f"{ws_commit}:pins/server.sha", cwd=ROOT, check=False)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import server_checkout
+
+    return server_checkout.pinned_sha(ROOT)
+
+
 def local_shas(args):
     """Resolve wanted SHAs: {repo_relpath: sha}, '' is the workspace itself."""
     if args.branch:
@@ -221,15 +240,24 @@ def local_shas(args):
             if line:
                 sha, name = line.split()[:2]
                 wanted[name] = sha
+    # The server is git-ignored, not a submodule, so neither ls-tree nor
+    # submodule status lists it: without this the VM keeps the golden's
+    # stale server checkout while the task tests pinned server code.
+    wanted["server"] = pinned_server_sha(wanted[""])
     for item in args.submodule:
         name, _, sha = item.partition("=")
         if not name or not sha:
             raise SystemExit(f"bad --submodule {item!r}, want PATH=SHA")
         repo = ROOT / name
         if not local_repo_present(name):
+            hint = (
+                "`just server-checkout` first (needs access to the private server repo)"
+                if name == "server"
+                else f"`git submodule update --init {name}` first"
+            )
             raise SystemExit(
                 f"bad --submodule {item!r}: no initialized checkout at {name}; "
-                f"run `git submodule update --init {name}` first"
+                f"run {hint}"
             )
         wanted[name] = run_git(
             "rev-parse", f"{sha}^{{commit}}", cwd=repo
@@ -525,7 +553,11 @@ def remote_status(vm_id, command_id, exec_start, timeout, record=None):
 def remote_shas(vm_id, remote_root):
     script = (
         f"cd {shlex.quote(remote_root)} && git rev-parse HEAD && "
-        "git submodule status | sed 's/^ *//'"
+        "git submodule status | sed 's/^ *//' && "
+        # The server is git-ignored, not a submodule: report its HEAD in the
+        # same "<sha> <name>" shape so a stale golden checkout is detected.
+        "{ test -d server/.git && git -C server rev-parse HEAD | "
+        "awk '{print $1\" server\"}'; true; }"
     )
     _, out = vm_exec(vm_id, script)
     lines = out.strip().splitlines()
@@ -736,7 +768,29 @@ GH_CREDENTIAL = "credential.https://github.com.helper=!gh auth git-credential"
 def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
     """Check out the exact commit on the VM, transferring objects if needed."""
     remote = f"{remote_root}/{rel}".rstrip("/")
-    if rel:
+    if rel == "server":
+        # Not a submodule (no .gitmodules entry): clone the private server
+        # repo directly. Boat puts the GitHub token only into its own clones
+        # and gh, not into git's global config.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import server_checkout
+
+        url = server_checkout.SERVER_URL
+        rc, out = vm_exec(
+            vm_id,
+            f"test -e {shlex.quote(remote + '/.git')} || {{ "
+            f"{{ git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)} || "
+            f"git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)}; }}; }} && "
+            # A fresh clone starts with hooks unwired: point it at the versioned
+            # hooks when they exist and no explicit choice was made (best-effort).
+            f"{{ test -d {shlex.quote(remote + '/.githooks')} && "
+            f"git -C {shlex.quote(remote)} config --get core.hooksPath >/dev/null 2>&1 || "
+            f"test ! -d {shlex.quote(remote + '/.githooks')} || "
+            f"git -C {shlex.quote(remote)} config core.hooksPath .githooks || true; }}",
+        )
+        if rc != 0:
+            raise RuntimeError(f"cannot initialize server checkout:\n{out}")
+    elif rel:
         rc, out = vm_exec(
             vm_id,
             # Clone the default branch rather than `submodule update`, which needs the gitlink commit
@@ -779,10 +833,14 @@ def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
     if not (rc == 0 and out.strip() == want):
         # Local-only commits: ship the delta as a bundle (never via origin).
         if not local_repo_present(rel):
+            hint = (
+                "`just server-checkout` first (needs access to the private server repo)"
+                if rel == "server"
+                else f"`git submodule update --init {rel}` first"
+            )
             raise RuntimeError(
                 f"want {want} in {rel or 'workspace'} is not on the VM and the "
-                f"local checkout of {rel} is not initialized; run "
-                f"`git submodule update --init {rel}` first"
+                f"local checkout of {rel} is not initialized; run {hint}"
             )
         if (
             run_git(

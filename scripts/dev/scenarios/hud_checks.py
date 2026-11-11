@@ -584,7 +584,12 @@ def rcon_kill(rcon, killer, victim):
     killer_name, victim_name = killer("state")["name"], victim("state")["name"]
     # The duel lanes just proved nothing when we get here (or a standalone
     # caller skipped them): the shield may still be up, so wait it out instead
-    # of crediting a protected victim.
+    # of crediting a protected victim. Heal first: failed lanes may have left
+    # the victim at 1 HP, and the probe's 1-HP hit would kill them uncounted.
+    rcon.cmd(
+        f"execute in {dim} run effect give {offline_uuid(victim_name)}"
+        " minecraft:instant_health 1 10 true"
+    )
     if not probe_vulnerable(
         rcon, dim, offline_uuid(victim_name), offline_uuid(killer_name), timeout=60
     ):

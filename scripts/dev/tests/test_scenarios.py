@@ -6047,7 +6047,8 @@ class HudChecks(unittest.TestCase):
             out, entry = hud_checks.rcon_kill(rcon, killer, victim)
         self.assertEqual(out, [1], out)
         self.assertIsNone(entry)
-        self.assertEqual(cmds, [], cmds)
+        # Only the pre-probe heal goes out; never the lethal hit.
+        self.assertFalse(any(" run damage " in c for c in cmds), cmds)
 
     def test_rcon_kill_probes_before_lethal_hit(self):
         """Fail-before: the lethal RCON hit goes out only after the probe."""
@@ -6074,9 +6075,13 @@ class HudChecks(unittest.TestCase):
             cmds.append(text)
             if " run damage " in text and " 100" in text:
                 return "Applied 100.0 damage to Victim"
+            if "instant_health" in text:
+                return "Applied effect"
             raise AssertionError(text)
 
         def fake_probe(rcon_arg, arena_arg, victim_arg, shooter_arg, timeout=0):
+            # The victim must be healed before the 1-HP probe hit.
+            assert any("instant_health" in c for c in cmds), cmds
             probes.append((arena_arg, victim_arg, shooter_arg))
             return True
 

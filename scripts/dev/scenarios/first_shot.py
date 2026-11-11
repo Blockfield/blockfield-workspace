@@ -56,6 +56,8 @@ def tap_trial(rcon, bot, player, index):
         bot("tacz reload")
         time.sleep(2.0)
         before = ammo_count(rcon, player)
+        if before is None:
+            return False, f"trial {index}: ammo unreadable after reload"
     bot("slot 1")
     time.sleep(0.2)
     bot("slot 0")
@@ -130,8 +132,18 @@ def run(args, rcon_factory=connect_rcon, bot_factory=Bot):
         summary = (
             f"{covered} queued-fired, {held} no-hold, {lost} lost, {doubled} doubled"
         )
+        required = (args.trials + 1) // 2
+        if covered < required:
+            summary += (
+                f" - no coverage: only {covered}/{args.trials} tapped"
+                f" during hold (need >= {required})"
+            )
         out.append(
-            check("zero lost trials, no doubles", lost == 0 and doubled == 0, summary)
+            check(
+                "hold coverage, zero lost, no doubles",
+                lost == 0 and doubled == 0 and covered >= required,
+                summary,
+            )
         )
         return tally(out) and 1 or 0
     finally:

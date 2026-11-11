@@ -734,6 +734,11 @@ class FirstShot(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("DOUBLE", detail)
 
+    def test_unreadable_after_reload_is_fail_row(self):
+        ok, detail = self.drive([3, "nope"])
+        self.assertFalse(ok)
+        self.assertIn("unreadable", detail)
+
     def test_run_passes_trial_index(self):
         from types import SimpleNamespace
 
@@ -772,6 +777,50 @@ class FirstShot(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         self.assertEqual(seen, [1, 2, 3])
+
+    def test_run_fails_without_hold_coverage(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+
+        from scenarios.range import DIM as RANGE_DIM
+
+        class FakeBot:
+            def __call__(self, command):
+                if command == "state":
+                    return {
+                        "dimension": RANGE_DIM,
+                        "held": first_shot.GUN,
+                        "name": "Rig",
+                    }
+                return {}
+
+            def close(self):
+                pass
+
+        args = SimpleNamespace(
+            trials=4, rcon_host="h", rcon_port=1, rcon_password="p", bot_port=2
+        )
+        buf = io.StringIO()
+        with (
+            patch.object(
+                first_shot,
+                "tap_trial",
+                side_effect=lambda r, b, p, i: (
+                    True,
+                    f"trial {i} no-hold ammo->29 (draw settled before tap)",
+                ),
+            ),
+            patch.object(first_shot.time, "sleep"),
+            redirect_stdout(buf),
+        ):
+            rc = first_shot.run(
+                args,
+                rcon_factory=lambda *a: object(),
+                bot_factory=lambda *a: FakeBot(),
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("no coverage", buf.getvalue())
 
 
 class WorldC2(unittest.TestCase):

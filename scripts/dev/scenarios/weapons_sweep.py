@@ -483,10 +483,22 @@ def take_firing_position(rcon, player, detail):
     """
     x, y, z = VICTIM_LANE_POS
     try:
-        _rcon_read(rcon, f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+        # Plain RCON `tp` lands in the command SOURCE's dimension (the
+        # overworld for RCON), not the player's: without `execute in` the
+        # range player is yanked into the overworld at lane coords, where
+        # the pad does not exist, and falls (coordination#11). Every other
+        # scenario teleports as `execute in <dim> run tp` (common
+        # settle_after_tp); the lane tp does the same.
+        _rcon_read(
+            rcon,
+            f"execute in {VICTIM_DIM} run tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0",
+        )
         if not pad_ready(rcon):
             return False
-        _rcon_read(rcon, f"tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0")
+        _rcon_read(
+            rcon,
+            f"execute in {VICTIM_DIM} run tp {player} {x} {y} {z} {VICTIM_LANE_YAW} 0",
+        )
         time.sleep(1.2)
     except (OSError, RuntimeError):
         return False

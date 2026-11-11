@@ -18,6 +18,7 @@ from scenarios import (  # noqa: E402
     body_pose,
     common,
     entry,
+    first_shot,
     parkour,
     hitreg,
     hud_checks,
@@ -675,6 +676,7 @@ class Registry(unittest.TestCase):
                 "dm",
                 "duo",
                 "entry",
+                "first-shot",
                 "hitreg",
                 "hud-checks",
                 "knife",
@@ -689,6 +691,136 @@ class Registry(unittest.TestCase):
                 "world-c2",
             ],
         )
+
+
+class FirstShot(unittest.TestCase):
+    def drive(self, ammo_seq, shoot_result="IS_DRAWING"):
+        ammo = list(ammo_seq)
+
+        class Rcon:
+            def cmd(self, command):
+                if "GunCurrentAmmoCount" in command:
+                    value = ammo.pop(0) if len(ammo) > 1 else ammo[0]
+                    return f"player has data: {value}"
+                return "ok"
+
+        class FakeBot:
+            def __call__(self, command):
+                if command.startswith("slot"):
+                    return {"slot": command.split()[-1]}
+                if command == "tacz shoot":
+                    return {"result": shoot_result}
+                if command == "tacz status":
+                    return {"drawTimestamp": 1, "drawCooldownMs": 100}
+                if command == "tacz reload":
+                    return {"ok": True}
+                return {}
+
+        with patch.object(first_shot.time, "sleep"):
+            return first_shot.tap_trial(Rcon(), FakeBot(), "Rig", 1)
+
+    def test_queued_tap_fires_once(self):
+        ok, detail = self.drive([30, 30, 29, 29])
+        self.assertTrue(ok, detail)
+        self.assertIn("queued tap fired once", detail)
+
+    def test_lost_tap_fails(self):
+        ok, detail = self.drive([30, 30, 30, 30, 30, 30, 30, 30, 30])
+        self.assertFalse(ok)
+        self.assertIn("LOST", detail)
+
+    def test_double_fails(self):
+        ok, detail = self.drive([30, 28, 28])
+        self.assertFalse(ok)
+        self.assertIn("DOUBLE", detail)
+
+    def test_unreadable_after_reload_is_fail_row(self):
+        ok, detail = self.drive([3, "nope"])
+        self.assertFalse(ok)
+        self.assertIn("unreadable", detail)
+
+    def test_run_passes_trial_index(self):
+        from types import SimpleNamespace
+
+        from scenarios.range import DIM as RANGE_DIM
+
+        seen = []
+
+        class FakeBot:
+            def __call__(self, command):
+                if command == "state":
+                    return {
+                        "dimension": RANGE_DIM,
+                        "held": first_shot.GUN,
+                        "name": "Rig",
+                    }
+                return {}
+
+            def close(self):
+                pass
+
+        args = SimpleNamespace(
+            trials=3, rcon_host="h", rcon_port=1, rcon_password="p", bot_port=2
+        )
+        with (
+            patch.object(
+                first_shot,
+                "tap_trial",
+                side_effect=lambda r, b, p, i: seen.append(i) or (True, f"trial {i}"),
+            ),
+            patch.object(first_shot.time, "sleep"),
+        ):
+            rc = first_shot.run(
+                args,
+                rcon_factory=lambda *a: object(),
+                bot_factory=lambda *a: FakeBot(),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [1, 2, 3])
+
+    def test_run_fails_without_hold_coverage(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+
+        from scenarios.range import DIM as RANGE_DIM
+
+        class FakeBot:
+            def __call__(self, command):
+                if command == "state":
+                    return {
+                        "dimension": RANGE_DIM,
+                        "held": first_shot.GUN,
+                        "name": "Rig",
+                    }
+                return {}
+
+            def close(self):
+                pass
+
+        args = SimpleNamespace(
+            trials=4, rcon_host="h", rcon_port=1, rcon_password="p", bot_port=2
+        )
+        buf = io.StringIO()
+        with (
+            patch.object(
+                first_shot,
+                "tap_trial",
+                side_effect=lambda r, b, p, i: (
+                    True,
+                    f"trial {i} no-hold ammo->29 (draw settled before tap)",
+                ),
+            ),
+            patch.object(first_shot.time, "sleep"),
+            redirect_stdout(buf),
+        ):
+            rc = first_shot.run(
+                args,
+                rcon_factory=lambda *a: object(),
+                bot_factory=lambda *a: FakeBot(),
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("no coverage", buf.getvalue())
 
 
 class WorldC2(unittest.TestCase):

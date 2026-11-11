@@ -5549,6 +5549,76 @@ class HudChecks(unittest.TestCase):
 
         self.assertTrue(hud_checks.blast_near(raising, [0.0, 65.0, 0.0]))
 
+    def test_grenade_witness_reparked_at_corpse_before_kill(self):
+        """The pre-cook witness TP predates the cook by seconds and can fail
+        silently or drift (FAIL runs saw the witness ~80-2000 blocks from the
+        corpse, querying an empty radius). The scenario must re-park on the
+        fresh corpse right before the RCON kill."""
+        arena = "blockfield:dm_arena_1"
+        start_pos = [0.5, 65.0, -28.5]
+        death_pos = [28.5, 65.0, 28.5]
+        calls = {"state": 0}
+
+        def bot(text):
+            if text == "state":
+                calls["state"] += 1
+                pos = start_pos if calls["state"] <= 2 else death_pos
+                return {
+                    "name": "Cook",
+                    "pos": pos,
+                    "dimension": arena,
+                    "held": hud_checks.KIT_GUN,
+                    "health": 20,
+                }
+            if text == "usestate":
+                return {
+                    "using": True,
+                    "item": "superbwarfare:m18_smoke_grenade",
+                    "ticksUsing": 30,
+                }
+            if text == "entities 64":
+                return {"entities": []}
+            if text == "bfaction spawn:BASE":
+                return {}
+            if text.startswith("slot ") or text.startswith("hold "):
+                return {}
+            raise AssertionError(text)
+
+        def witness(text):
+            if text == "slot 0":
+                return {}
+            if text == "state":
+                return {"name": "Wit", "pos": start_pos, "dimension": arena}
+            if text == "entities 64":
+                return {
+                    "entities": [
+                        {
+                            "type": "superbwarfare:m18_smoke_grenade",
+                            "tickPos": death_pos,
+                        }
+                    ]
+                }
+            raise AssertionError(text)
+
+        rcon = FakeRcon()
+        with (
+            patch("time.sleep"),
+            patch.object(hud_checks, "wait_for", side_effect=lambda fn, *a, **k: fn()),
+            patch("builtins.print"),
+        ):
+            out, redeployed = hud_checks.scenario_grenade(rcon, bot, witness)
+        self.assertEqual(out, [0, 0, 0, 0], out)
+        self.assertTrue(redeployed)
+        tps = [c for c in rcon.commands if " run tp " in c]
+        self.assertGreaterEqual(len(tps), 2, rcon.commands)
+        corpse_tp = f"{death_pos[0] + 4} {death_pos[1]} {death_pos[2]}"
+        self.assertIn(corpse_tp, tps[-1], tps)
+        kills = [c for c in rcon.commands if c.startswith("kill ")]
+        self.assertEqual(len(kills), 1, rcon.commands)
+        self.assertLess(
+            rcon.commands.index(tps[-1]), rcon.commands.index(kills[0]), rcon.commands
+        )
+
     def test_tag_exact_tricky_name(self):
         evil = "x_reset_x"
 

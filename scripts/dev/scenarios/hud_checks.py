@@ -224,7 +224,10 @@ def scenario_grenade(rcon, bot, witness):
 
     The corpse is queried through a witness in the same arena: after death the
     victim sits in respawn staging, so its own entity query recenters away.
-    The witness is parked by the cook before cooking starts: an M18 finishes
+    The witness is parked by the cook before cooking starts and re-parked on
+    the fresh corpse right before the kill: the pre-cook TP predates the cook
+    by seconds and can fail silently or drift, leaving the witness outside
+    the 64-block query radius so the drop reads as missing. An M18 finishes
     its 80-tick cook while a post-cook TP + sleeps + kill are still in flight,
     and the native full-cook throw (a 30 s smoke show) is not the death drop.
     """
@@ -269,6 +272,30 @@ def scenario_grenade(rcon, bot, witness):
     death = bot("state")
     death_pos = death["pos"]
     bot_name = death["name"]
+    # Re-park on the fresh corpse: the pre-cook TP predates the cook by
+    # seconds and can fail silently or drift (witness ~80-2000 blocks off on
+    # FAIL runs), so the 64-block query reads empty. Best-effort, no sleeps.
+    try:
+        witness_name = witness("state")["name"]
+        rcon.cmd(
+            f"execute in {death['dimension']} run tp {offline_uuid(witness_name)} "
+            f"{death_pos[0] + 4} {death_pos[1]} {death_pos[2]} 90 0"
+        )
+
+        def witness_parked():
+            try:
+                pos = witness("state")["pos"]
+            except (OSError, RuntimeError, ValueError, KeyError):
+                return False
+            return (
+                abs(pos[0] - death_pos[0] - 4) < 10
+                and abs(pos[1] - death_pos[1]) < 10
+                and abs(pos[2] - death_pos[2]) < 10
+            )
+
+        wait_for(witness_parked, 5, interval=0.2)
+    except (OSError, RuntimeError, ValueError, KeyError):
+        pass
     rcon.cmd(f"kill {bot_name}")
     time.sleep(1)
 

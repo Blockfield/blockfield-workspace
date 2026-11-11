@@ -88,6 +88,45 @@ class Plan(unittest.TestCase):
         )
 
 
+class ContractChecks(unittest.TestCase):
+    def meta(self, compat, client="c" * 64):
+        return {
+            "compatibility": compat,
+            "client": client,
+            "client_version": "2.77.0",
+        }
+
+    def prod(self, compat, client="p" * 64):
+        return {"compatibility": compat, "client": client, "build": "v2.76.0"}
+
+    def test_same_contract_client_drift_warns_without_failing(self):
+        # Same contract: server deploys and rolls back alone, no client_tag.
+        res = release.contract_checks("server", self.meta(PROD), self.prod(PROD))
+        self.assertTrue(res)
+        self.assertEqual([level for level, _ in res if level == "FAIL"], [])
+        self.assertTrue(
+            any(
+                level == "WARN" and "without client_tag" in text for level, text in res
+            ),
+            res,
+        )
+
+    def test_moved_contract_still_needs_client_tag(self):
+        res = release.contract_checks("server", self.meta(MOVED), self.prod(PROD))
+        self.assertEqual([level for level, _ in res if level == "FAIL"], [])
+        self.assertTrue(
+            any("client_tag" in text for _, text in res),
+            res,
+        )
+
+    def test_unchanged_contract_is_ok(self):
+        prod = self.prod(PROD)
+        res = release.contract_checks(
+            "server", self.meta(PROD, client=prod["client"]), prod
+        )
+        self.assertEqual([level for level, _ in res if level in ("FAIL", "WARN")], [])
+
+
 class Safety(unittest.TestCase):
     def test_mutate_refuses_tags_and_deploys(self):
         for cmd in (

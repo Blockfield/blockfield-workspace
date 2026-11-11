@@ -893,6 +893,20 @@ class EnsureWorktree(unittest.TestCase):
         self.assertEqual(len(self.cmds), 1, self.cmds)
         self.assertIn("status --short", self.cmds[0])
 
+    def test_failed_status_probe_resets_like_a_dirty_tree(self):
+        cmds = []
+
+        def execute(vm_id, script, timeout=120):
+            cmds.append(script)
+            if "status --short" in script:
+                return 128, "fatal: index file corrupt"
+            return 0, ""
+
+        with patch.object(boat_build, "vm_exec", side_effect=execute):
+            state = boat_build.reset_stale_server("bx_x", "/vm/root", "d" * 40)
+        self.assertEqual(state, "reset")
+        self.assertTrue(any("reset --hard" in c for c in cmds), cmds)
+
 
 class LocalJarArgs(unittest.TestCase):
     def test_bad_spec_rejected(self):

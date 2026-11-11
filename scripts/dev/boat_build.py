@@ -1124,7 +1124,9 @@ def reset_stale_server(vm_id, remote_root, want):
     """
     remote = f"{remote_root}/server"
     rc, out = vm_exec(vm_id, f"git -C {shlex.quote(remote)} status --short")
-    if rc != 0 or not out.strip():
+    # A failed probe (corrupt index, half-applied patch) is not proof of a
+    # clean tree: reset it like a dirty one.
+    if rc == 0 and not out.strip():
         return "clean"
     rc, out = vm_exec(
         vm_id,
@@ -1497,6 +1499,10 @@ def main(argv=None):
             patched = ensure_worktree(vm_id, remote_root, home, wanted, stage_dir)
         else:
             patched = 0
+            if "server" in wanted:
+                # --no-worktree ships no patch, so a previous run's server
+                # patch must still be dropped.
+                reset_stale_server(vm_id, remote_root, wanted["server"])
         env_file = write_env(vm_id, remote_root, args.task)
         bf_home = f"{remote_root}/.dev/{args.task}"
         installed = []

@@ -237,6 +237,30 @@ def face_off(
                             f"lane {tag}: ammo {lane_ammo:g}->{after_ammo:g},"
                             f" HP {before_hp}->{state['health']}",
                         )
+            if until_dead and last_hp < before_hp:
+                # The lane hits but the per-lane budget ran out before the
+                # kill (TTK above shots_per_lane, e.g. armored AK74 needing
+                # 5+ while the budget is 4): stay on this open lane instead
+                # of abandoning it for possibly-blocked ones. Bounded by the
+                # lane-entry mag, so a blocked lane still costs only its
+                # budget and an unkillable victim ends the lane, never hangs.
+                for _ in range(int(lane_ammo)):
+                    result = shooter(f"aimshoot {victim_name}")
+                    if result.get("result") == "IS_DRAWING":
+                        time.sleep(0.5)
+                        result = shooter(f"aimshoot {victim_name}")
+                    if result.get("result") == "NO_AMMO":
+                        break
+                    time.sleep(0.5)
+                    state = victim("state")
+                    if gone(state):
+                        return (
+                            True,
+                            f"kill on lane {tag}:"
+                            f" ammo {mag:g} spent, victim out ({dimension(state)})",
+                        )
+                    if state["health"] < before_hp:
+                        last_hp = state["health"]
         except (OSError, RuntimeError, AssertionError) as error:
             # A lost target mid-lane (respawn flicker, render unload) or a kit
             # wiped mid-leg fails the lane, not the scenario: the next lane

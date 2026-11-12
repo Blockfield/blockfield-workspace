@@ -1380,22 +1380,44 @@ def wait_release_run(side, sha, timeout_s, interval_s, tag):
     return found
 
 
+# A just-dispatched run ID can 404 for ~15 s (eventual consistency): treat it
+# as pending inside this grace window, then fail with a pointer, not a traceback.
+RUN_NOT_VISIBLE_GRACE_S = 60
+
+
+def _run_not_visible(error):
+    text = str(error).lower()
+    return "not found" in text or "could not find" in text or "no run" in text
+
+
 def wait_run_success(side, run_id, timeout_s, interval_s, repo=None):
     repo = repo or REPO[side]
+    start = time.monotonic()
 
     def ready():
-        found = json.loads(
-            gh(
-                "run",
-                "view",
-                str(run_id),
-                "--repo",
-                repo,
-                "--json",
-                "status,conclusion,url",
+        try:
+            found = json.loads(
+                gh(
+                    "run",
+                    "view",
+                    str(run_id),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "status,conclusion,url",
+                )
+                or "{}"
             )
-            or "{}"
-        )
+        except RuntimeError as error:
+            if not _run_not_visible(error):
+                raise
+            if time.monotonic() - start < RUN_NOT_VISIBLE_GRACE_S:
+                return None
+            raise RuntimeError(
+                f"{side} run {run_id} is still not visible after"
+                f" {RUN_NOT_VISIBLE_GRACE_S}s; inspect Actions on {repo},"
+                " do not retry the dispatch"
+            ) from error
         conclusion = (found.get("conclusion") or "").upper()
         if conclusion == "SUCCESS":
             return found

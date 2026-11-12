@@ -409,33 +409,43 @@ def vm_exec(vm_id, script, timeout=120, record=None):
         script,
         check=False,
     )
-    rc, out = parse_exec_output(result.stdout, result.returncode)
+    rc, out, verdict = parse_exec_output(result.stdout, result.returncode)
     command_id = parse_command_id(result.stdout)
-    if not command_id:
-        # No command to poll: a saved run could never match history, so a
-        # resume would loop exit 75 forever. Fail here instead.
-        detail = (result.stdout or "") + (getattr(result, "stderr", "") or "")
-        if result.returncode and not dispatched_output(result.stdout):
-            raise RuntimeError(f"boat exec failed before dispatch:\n{detail}")
-        raise RuntimeError(
-            "boat exec returned no command id; dispatch status unknown: check "
-            f"`boat history {vm_id} --mode commands --limit 5 --json` for a "
-            "command started just now. If it is there, put its commandId into "
-            "the run record and resume with --resume-run; otherwise rerun the "
-            "build. Giving up instead of polling exit 75 with no command.\n"
-            f"boat exec rc={result.returncode}, output tail:\n{detail[-2000:]}"
+    if command_id:
+        if record is not None:
+            record.update(commandId=command_id, dispatchedAt=start)
+        finished, code, stored = remote_status(
+            vm_id, command_id, start, timeout, record
         )
-    if record is not None:
-        record.update(commandId=command_id, dispatchedAt=start)
-    finished, code, stored = remote_status(vm_id, command_id, start, timeout, record)
-    if not finished:
-        raise Running(vm_id, command_id, script, start, timeout)
-    return code, stored or out
+        if not finished:
+            raise Running(vm_id, command_id, script, start, timeout)
+        return code, stored or out
+    if verdict:
+        # Live-stream mode (boat exec timeouts above 600 s) never names a
+        # commandId, but its exit frame already is the verdict: report it
+        # instead of failing with 'no command id'.
+        if record is not None:
+            record.update(exitCode=rc, finishedAt=_now_iso())
+        return rc, out
+    # No command to poll: a saved run could never match history, so a
+    # resume would loop exit 75 forever. Fail here instead.
+    detail = (result.stdout or "") + (getattr(result, "stderr", "") or "")
+    if result.returncode and not dispatched_output(result.stdout):
+        raise RuntimeError(f"boat exec failed before dispatch:\n{detail}")
+    raise RuntimeError(
+        "boat exec returned no command id; dispatch status unknown: check "
+        f"`boat history {vm_id} --mode commands --limit 5 --json` for a "
+        "command started just now. If it is there, put its commandId into "
+        "the run record and resume with --resume-run; otherwise rerun the "
+        "build. Giving up instead of polling exit 75 with no command.\n"
+        f"boat exec rc={result.returncode}, output tail:\n{detail[-2000:]}"
+    )
 
 
 def parse_exec_output(text, cli_rc):
     """Unwrap `boat exec` output: a single JSON envelope (short timeouts) or
-    JSONL stream frames (long timeouts). Returns (rc, combined output)."""
+    JSONL stream frames (long timeouts). Returns (rc, combined output,
+    terminal verdict present)."""
     try:
         payload = json.loads(text)
     except ValueError:
@@ -443,10 +453,11 @@ def parse_exec_output(text, cli_rc):
     if isinstance(payload, dict) and "stdout" in payload:
         out = (payload.get("stdout") or "") + (payload.get("stderr") or "")
         try:
-            return int(payload.get("exitCode", cli_rc)), out
+            code = int(payload.get("exitCode", cli_rc))
         except (TypeError, ValueError):
-            return cli_rc, out
-    chunks, rc, framed = [], cli_rc, False
+            return cli_rc, out, False
+        return code, out, payload.get("exitCode") is not None
+    chunks, rc, framed, verdict = [], cli_rc, False, False
     for line in text.splitlines():
         try:
             frame = json.loads(line)
@@ -461,10 +472,11 @@ def parse_exec_output(text, cli_rc):
             try:
                 rc = int(frame.get("exitCode", rc))
             except (TypeError, ValueError):
-                pass
+                continue
+            verdict = frame.get("exitCode") is not None
     if framed:
-        return rc, "".join(chunks)
-    return cli_rc, text
+        return rc, "".join(chunks), verdict
+    return cli_rc, text, False
 
 
 def parse_command_id(text):

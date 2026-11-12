@@ -106,7 +106,7 @@ class ExecEnvelope(unittest.TestCase):
     def test_parses_json_envelope(self):
         envelope = '{"exitCode": 3, "stdout": "41d5cb5\\n", "stderr": "warn\\n"}'
         self.assertEqual(
-            boat_build.parse_exec_output(envelope, 0), (3, "41d5cb5\nwarn\n")
+            boat_build.parse_exec_output(envelope, 0), (3, "41d5cb5\nwarn\n", True)
         )
 
     def test_plain_output_passes_through(self):
@@ -135,7 +135,40 @@ class ExecEnvelope(unittest.TestCase):
             '{"type": "stderr", "data": "warn\\n"}\n'
             '{"type": "exit", "exitCode": 3}\n'
         )
-        self.assertEqual(boat_build.parse_exec_output(stream, 0), (3, "hi\nwarn\n"))
+        self.assertEqual(
+            boat_build.parse_exec_output(stream, 0), (3, "hi\nwarn\n", True)
+        )
+
+    def test_live_stream_without_id_returns_its_own_verdict(self):
+        # ws#103: timeouts above 600 s stream live (attached/nextOffset/exit
+        # frames, never a commandId), yet the exit frame already is the
+        # verdict — report it instead of failing with 'no command id'.
+        stream = (
+            '{"processId":13186,"stderrOffset":0,"stdoutOffset":0,"type":"attached"}\n'
+            '{"data":"gradle line\\n","nextOffset":12,"type":"stdout"}\n'
+            '{"data":"BOAT_BUILD rc=1 elapsed=53s\\n","nextOffset":100,"type":"stdout"}\n'
+            '{"exitCode":1,"signal":null,"status":"exited",'
+            '"stderrOffset":0,"stdoutOffset":100,"type":"exit"}\n'
+        )
+        record = {}
+        with patch.object(
+            boat_build, "run_boat", return_value=FakeResult(1, stream)
+        ) as exec_call:
+            rc, out = boat_build.vm_exec("bx_x", "true", record=record)
+        self.assertEqual(exec_call.call_count, 1)  # no history poll needed
+        self.assertEqual(rc, 1)
+        self.assertIn("gradle line", out)
+        self.assertIn("BOAT_BUILD rc=1", out)
+        self.assertEqual(record["exitCode"], 1)
+        self.assertTrue(record["finishedAt"])
+
+    def test_envelope_without_id_returns_its_own_verdict(self):
+        envelope = (
+            '{"exitCode": 2, "stdout": "out\\n", "stderr": "err\\n", '
+            '"finishedAt": "2026-11-12T17:00:00.000Z"}'
+        )
+        with patch.object(boat_build, "run_boat", return_value=FakeResult(2, envelope)):
+            self.assertEqual(boat_build.vm_exec("bx_x", "true"), (2, "out\nerr\n"))
 
 
 class StopAlways(unittest.TestCase):

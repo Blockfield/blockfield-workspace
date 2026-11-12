@@ -248,10 +248,27 @@ def version_gate(rcon, server_log, client_log, client_pin, server_root):
     return out, False
 
 
+def leave_to_lobby(bot, timeout=30):
+    """Leave any room/range dimension so the next play starts from the lobby.
+
+    The hub silently drops play/join while the bot is parked in the firing
+    range, so without this the room-open wait times out with no log line.
+    Returns True when the bot reports a lobby dimension in time.
+    """
+    bot("closescreen")
+    bot("bfaction leave")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_lobby_dimension(dimension(bot("state"))):
+            return True
+        time.sleep(1)
+    return is_lobby_dimension(dimension(bot("state")))
+
+
 def open_room(bot, get_log, mode, map_id, timeout=60):
     """Open a casual room via the hub menu; returns (room number, log snapshot)."""
     mark = len(get_log().splitlines())
-    bot("closescreen")
+    leave_to_lobby(bot)
     bot(f"bfaction play:{mode}:{map_id}")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -275,6 +292,8 @@ def wait_dim(bot, wanted, timeout, any_of=()):
 
 def deploy(bot, get_log, mode, map_id, bot2=None, timeout=60):
     """Open a room, pick assault, wait for the arena; returns (room, arena)."""
+    if bot2 is not None:
+        leave_to_lobby(bot2)
     room = open_room(bot, get_log, mode, map_id, timeout)
     if bot2 is not None:
         bot2("bfaction join:" + room)

@@ -2877,6 +2877,81 @@ class RcBattery(unittest.TestCase):
                 all(row["result"] == "PASS" for row in record["checks"]), record
             )
 
+    def test_open_room_leaves_range_before_play(self):
+        # u-ws99: rc died with "room deathmatch hamburg did not open in
+        # 60s" when the bot was still parked in the firing range. The hub
+        # silently drops play there, so the room line never appears until
+        # the bot leaves to the lobby first.
+        sent = []
+        dims = {"dim": "blockfield_shared:firing_range"}
+
+        def bot(command, timeout=None):
+            sent.append(command)
+            if command == "bfaction leave":
+                dims["dim"] = "minecraft:overworld"
+            if command == "state":
+                return {"name": "Bot1", "dimension": dims["dim"]}
+            return {}
+
+        def get_log():
+            if (
+                "bfaction play:deathmatch:hamburg" in sent
+                and "bfaction leave" in sent
+                and sent.index("bfaction play:deathmatch:hamburg")
+                > sent.index("bfaction leave")
+            ):
+                return "quiet line\nКомната 7 открыта\n"
+            return "quiet line\n"
+
+        with patch("time.sleep"):
+            self.assertEqual(
+                rc.open_room(bot, get_log, "deathmatch", "hamburg", timeout=5),
+                "7",
+            )
+        self.assertLess(
+            sent.index("bfaction leave"),
+            sent.index("bfaction play:deathmatch:hamburg"),
+        )
+
+    def test_deploy_leaves_both_bots_before_join(self):
+        # The second bot also survives earlier legs parked in the range,
+        # and join from there is dropped just as silently as play.
+        sent = []
+        dims = {
+            "Bot1": "blockfield_shared:firing_range",
+            "Bot2": "blockfield_shared:firing_range",
+        }
+
+        def make_bot(name):
+            def bot(command, timeout=None):
+                sent.append((name, command))
+                if command == "bfaction leave":
+                    dims[name] = "minecraft:overworld"
+                elif command == "bfaction class:assault:0":
+                    dims[name] = "blockfield:hamburg_7"
+                if command == "state":
+                    return {"name": name, "dimension": dims[name]}
+                return {}
+
+            return bot
+
+        bot1, bot2 = make_bot("Bot1"), make_bot("Bot2")
+
+        def get_log():
+            plays = [cmd for _, cmd in sent if cmd.startswith("bfaction play:")]
+            leaves = [cmd for _, cmd in sent if cmd == "bfaction leave"]
+            if plays and len(leaves) >= 2:
+                return "Комната 7 открыта\n"
+            return ""
+
+        with patch("time.sleep"):
+            room, arena = rc.deploy(bot1, get_log, "deathmatch", "hamburg", bot2)
+        self.assertEqual((room, arena), ("7", "blockfield:hamburg_7"))
+        play_at = sent.index(("Bot1", "bfaction play:deathmatch:hamburg"))
+        self.assertLess(sent.index(("Bot1", "bfaction leave")), play_at)
+        self.assertLess(sent.index(("Bot2", "bfaction leave")), play_at)
+        self.assertIn(("Bot2", "bfaction join:7"), sent)
+
 
 class KnifeAcceptance(unittest.TestCase):
     ARENA = "blockfield:hamburg_3"

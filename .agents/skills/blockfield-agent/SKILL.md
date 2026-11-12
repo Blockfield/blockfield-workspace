@@ -91,6 +91,12 @@ personal opt-in: the Boat parts below apply only when the task owner opted in
 - Prod is read-only.
 - One PR per task in the owning repo; batch fixes, no follow-up PRs.
 - Never rebase/merge in the main checkout; never `pkill`/`killall` anything.
+- GUI apps under Xvfb (Tauri/WebKitGTK/Slint launcher, any GTK app): run them as
+  `dbus-run-session -- <cmd>` (or `DBUS_SESSION_BUS_ADDRESS=disabled:` when no bus is
+  needed). Without it WebKitGTK autolaunches a session bus plus portals/gvfs/at-spi that
+  outlive the test and exhaust the host user's D-Bus and inotify limits. After the run,
+  prove nothing of yours remains: no processes with your session env, no FUSE mounts
+  under your temp `HOME` (`mount | grep <tmp-home>`).
 
 ## Coordinator backlog repos
 

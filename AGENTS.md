@@ -1,6 +1,7 @@
 # Blockfield: правила агента
 
 - Перед стендом: [README](README.md), [DEVELOPING](docs/DEVELOPING.md).
+- Скиллы агента — в `.agents/skills` (Claude читает их через ссылки в `.claude/skills`): `blockfield-agent` для каждой задачи, `blockfield-boat` и `blockfield-boat-coordinator` при opt-in Boat.
   Межрепозиторные связи: [ARCHITECTURE](docs/ARCHITECTURE.md); обновляйте карту и контракт владельца при изменении связи.
 - Код меняйте в его repo: `client/`, `server/`, `localmods/*` — submodules; workspace хранит инструменты и проверенные SHA.
   Перед модом прочитайте целиком его `CLAUDE.md` и `docs/AGENTS.md`; подробные справочники — по задаче.

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Blockfield Boat Coordinator"
+  short_description: "Track Boat allowance, spending rate and VM cleanup"

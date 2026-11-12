@@ -1121,6 +1121,20 @@ class DispatchGrace(unittest.TestCase):
             ):
                 release.wait_run_success("server", self.RUN_ID, 1800, 5, "R")
 
+    def test_late_404_after_long_visible_wait_gets_fresh_grace(self):
+        now = [1000.0]
+        replies = [self.payload("in_progress", "")] * 30 + [
+            self.NOT_FOUND,
+            self.payload("completed", "SUCCESS"),
+        ]
+        with (
+            mock.patch.object(release, "gh", side_effect=replies) as gh,
+            mock.patch("time.monotonic", lambda: now[0]),
+            mock.patch("time.sleep", lambda s: now.__setitem__(0, now[0] + s)),
+        ):
+            release.wait_run_success("server", self.RUN_ID, 1800, 5, "R")
+        self.assertEqual(gh.call_count, 32)
+
     def test_other_errors_raise_at_once(self):
         with mock.patch.object(
             release,

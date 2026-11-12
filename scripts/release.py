@@ -1392,7 +1392,8 @@ def _run_not_visible(error):
 
 def wait_run_success(side, run_id, timeout_s, interval_s, repo=None):
     repo = repo or REPO[side]
-    start = time.monotonic()
+    # Grace runs from the first 404 of a streak, not from the wait start.
+    not_visible_since = [None]
 
     def ready():
         try:
@@ -1411,13 +1412,16 @@ def wait_run_success(side, run_id, timeout_s, interval_s, repo=None):
         except RuntimeError as error:
             if not _run_not_visible(error):
                 raise
-            if time.monotonic() - start < RUN_NOT_VISIBLE_GRACE_S:
+            if not_visible_since[0] is None:
+                not_visible_since[0] = time.monotonic()
+            if time.monotonic() - not_visible_since[0] < RUN_NOT_VISIBLE_GRACE_S:
                 return None
             raise RuntimeError(
                 f"{side} run {run_id} is still not visible after"
                 f" {RUN_NOT_VISIBLE_GRACE_S}s; inspect Actions on {repo},"
                 " do not retry the dispatch"
             ) from error
+        not_visible_since[0] = None
         conclusion = (found.get("conclusion") or "").upper()
         if conclusion == "SUCCESS":
             return found

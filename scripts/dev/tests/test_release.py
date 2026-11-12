@@ -1077,6 +1077,82 @@ class Ship(unittest.TestCase):
             verify.assert_not_called()
 
 
+class DispatchGrace(unittest.TestCase):
+    """A just-dispatched run ID can 404 briefly; wait_run_success retries it."""
+
+    RUN_ID = 123456789
+    NOT_FOUND = RuntimeError(
+        "gh run view 123456789 --repo R --json status,conclusion,url\n"
+        "HTTP 404: Not Found (https://api.github.com/repos/R/actions/runs/123456789)"
+    )
+
+    def payload(self, status, conclusion):
+        return json.dumps(
+            {
+                "status": status,
+                "conclusion": conclusion,
+                "url": "https://example.invalid/run",
+            }
+        )
+
+    def test_404_then_success_is_pending_not_failure(self):
+        with mock.patch.object(
+            release,
+            "gh",
+            side_effect=[
+                self.NOT_FOUND,
+                self.NOT_FOUND,
+                self.payload("in_progress", ""),
+                self.payload("completed", "SUCCESS"),
+            ],
+        ) as gh:
+            release.wait_run_success("server", self.RUN_ID, 120, 0, "R")
+        self.assertEqual(gh.call_count, 4)
+
+    def test_persistent_404_fails_with_pointer_inside_grace(self):
+        now = [1000.0]
+        with (
+            mock.patch.object(release, "gh", side_effect=self.NOT_FOUND),
+            mock.patch("time.monotonic", lambda: now[0]),
+            mock.patch("time.sleep", lambda s: now.__setitem__(0, now[0] + s)),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "123456789.*still not visible.*do not retry"
+            ):
+                release.wait_run_success("server", self.RUN_ID, 1800, 5, "R")
+
+    def test_late_404_after_long_visible_wait_gets_fresh_grace(self):
+        now = [1000.0]
+        replies = [self.payload("in_progress", "")] * 30 + [
+            self.NOT_FOUND,
+            self.payload("completed", "SUCCESS"),
+        ]
+        with (
+            mock.patch.object(release, "gh", side_effect=replies) as gh,
+            mock.patch("time.monotonic", lambda: now[0]),
+            mock.patch("time.sleep", lambda s: now.__setitem__(0, now[0] + s)),
+        ):
+            release.wait_run_success("server", self.RUN_ID, 1800, 5, "R")
+        self.assertEqual(gh.call_count, 32)
+
+    def test_other_errors_raise_at_once(self):
+        with mock.patch.object(
+            release,
+            "gh",
+            side_effect=RuntimeError("gh run view 123456789\nHTTP 401: Unauthorized"),
+        ) as gh:
+            with self.assertRaisesRegex(RuntimeError, "Unauthorized"):
+                release.wait_run_success("server", self.RUN_ID, 120, 0, "R")
+        self.assertEqual(gh.call_count, 1)
+
+    def test_failed_conclusion_still_raises(self):
+        with mock.patch.object(
+            release, "gh", return_value=self.payload("completed", "FAILURE")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "FAILURE"):
+                release.wait_run_success("server", self.RUN_ID, 120, 0, "R")
+
+
 class PairGates(unittest.TestCase):
     def test_client_release_visibility(self):
         tag = "v2.77.0"

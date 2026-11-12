@@ -161,6 +161,7 @@ class ExecEnvelope(unittest.TestCase):
         self.assertIn("BOAT_BUILD rc=1", out)
         self.assertEqual(record["exitCode"], 1)
         self.assertTrue(record["finishedAt"])
+        self.assertEqual(record["output"], out)
 
     def test_envelope_without_id_returns_its_own_verdict(self):
         envelope = (
@@ -169,6 +170,54 @@ class ExecEnvelope(unittest.TestCase):
         )
         with patch.object(boat_build, "run_boat", return_value=FakeResult(2, envelope)):
             self.assertEqual(boat_build.vm_exec("bx_x", "true"), (2, "out\nerr\n"))
+
+
+class ResumeSavedVerdict(unittest.TestCase):
+    def test_resume_saved_live_verdict_finishes_and_stops(self):
+        # Review finding on ws#104: a live-stream verdict was saved, then a
+        # later failure before manifest left resume.json terminal but
+        # command-less — --resume-run must finish with the saved verdict,
+        # not report RUNNING (75) forever with the VM left running.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out_dir = Path(tmp.name) / "run"
+        out_dir.mkdir()
+        out = "gradle line\nBOAT_BUILD rc=1 elapsed=53s\n"
+        saved = {
+            "vm": "bx_x",
+            "record": {
+                "vm": "bx_x",
+                "command": ["true"],
+                "exitCode": 1,
+                "finishedAt": "2026-11-12T17:00:00.000Z",
+                "output": out,
+            },
+            "patterns": [],
+            "keep": False,
+            "timeout": 1800,
+            "phase": "run",
+            "out": None,
+        }
+        (out_dir / "resume.json").write_text(json.dumps(saved))
+        calls = []
+
+        def fake_run_boat(*args, **kwargs):
+            calls.append(args[0])
+            if args[0] == "history":
+                raise AssertionError("a saved verdict needs no history poll")
+            if args[0] == "stop":
+                return FakeResult(0, "")
+            raise AssertionError(f"unexpected boat call: {args}")
+
+        with (
+            patch.object(boat_build, "run_boat", side_effect=fake_run_boat),
+            patch.object(boat_build, "wait_state", return_value="stopped"),
+        ):
+            rc = boat_build.main(["--resume-run", str(out_dir / "resume.json")])
+        self.assertEqual(rc, 1)
+        self.assertEqual((out_dir / "build.log").read_text(), out)
+        self.assertTrue((out_dir / "manifest.json").is_file())
+        self.assertIn("stop", calls)
 
 
 class StopAlways(unittest.TestCase):

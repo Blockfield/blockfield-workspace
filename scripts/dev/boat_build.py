@@ -425,7 +425,9 @@ def vm_exec(vm_id, script, timeout=120, record=None):
         # commandId, but its exit frame already is the verdict: report it
         # instead of failing with 'no command id'.
         if record is not None:
-            record.update(exitCode=rc, finishedAt=_now_iso())
+            # No commandId exists to poll later: persist the output with the
+            # verdict so a resume after a pre-manifest failure can finish.
+            record.update(exitCode=rc, finishedAt=_now_iso(), output=out)
         return rc, out
     # No command to poll: a saved run could never match history, so a
     # resume would loop exit 75 forever. Fail here instead.
@@ -1426,7 +1428,16 @@ def finish_run(saved, out_dir):
     # Pre-change resume files lack "timeout": fall back to the argparse
     # default, never the stream window.
     timeout = saved.get("timeout", DEFAULT_TIMEOUT)
-    if record.get("dispatchedAt") is None:
+    if (
+        record.get("exitCode") is not None
+        and record.get("finishedAt") is not None
+        and not record.get("commandId")
+    ):
+        # Saved live-stream verdict with no commandId to poll (a later
+        # failure before manifest left this resume terminal): finish it from
+        # the saved output instead of reporting RUNNING forever.
+        done, code, out = True, record["exitCode"], record.pop("output", "")
+    elif record.get("dispatchedAt") is None:
         # Legacy resume file: no dispatch timestamp, so no budget and never
         # a dead verdict — but a finished verdict still completes the run.
         done, code, out = _legacy_verdict(vm_id, record)

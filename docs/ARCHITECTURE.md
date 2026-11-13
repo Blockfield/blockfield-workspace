@@ -23,6 +23,7 @@
 | `Blockfield-Launcher` (отдельный репозиторий)                                                                                            | Tauri UI, аккаунт, установка игры/пака, deep links                             | [README](https://github.com/Blockfield/Blockfield-Launcher/blob/main/README.md), [DEVELOPMENT](https://github.com/Blockfield/Blockfield-Launcher/blob/main/docs/DEVELOPMENT.md) |
 | `blockfield-releases` (отдельный репозиторий)                                                                                            | Публичные клиентские артефакты                                                 | [README](https://github.com/Blockfield/blockfield-releases/blob/main/README.md)                                                                                                 |
 | `blockfield-proxy`, `blockfield-workshop`, `blockfield-site`, `blockfield-bot`, `blockfield-errors`, `blockfield-distribution` (private) | Proxy/Limbo, мастерская карт, сайт, Discord-бот, страницы ошибок, раздача пака | Документация в соответствующих приватных репозиториях                                                                                                                           |
+| `blockfield-control-plane` (private)                                                                                                     | Права, операции и доставка команд/настроек агентам игры                        | `docs/V2.md` в репозитории control plane                                                                                                                                        |
 
 ## Юниты и владельцы данных
 
@@ -33,6 +34,9 @@ flowchart LR
   P --> W[Workshop editor / candidate-test]
   G -->|results / stats| S[Site]
   S -->|settings| G
+  S -->|typed actions / console| CP[Control plane]
+  A[Agent MCP] -->|console| CP
+  CP -->|events, acks + output| G
   S <-->|inbox / state| C[Workshop controller]
   C --> G
   C --> W
@@ -46,6 +50,7 @@ flowchart LR
 | Workshop editor / candidate-test | `blockfield-workshop` (controller), `blockfield-mod` (tablet) | Map CAS и активные heads у controller; game захватывает одну версию карты               |
 | Proxy + Limbo-лобби              | `blockfield-proxy`                                            | Без durable-хранилища на этой карте                                                     |
 | Site                             | `blockfield-site`                                             | PostgreSQL или SQLite: статистика, комнаты, настройки, админка                          |
+| Control plane                    | `blockfield-control-plane`                                    | Своя PostgreSQL: учётки, права, операции, outbox и receipts агентов                     |
 | Launcher                         | `Blockfield-Launcher`                                         | Локальные профили и установленный пак                                                   |
 | Pack distribution                | `blockfield-distribution`, `blockfield-client`                | Артефакты GitHub Releases; раздаётся текущий пак                                        |
 | Discord bot                      | `blockfield-bot`                                              | См. `docs/DEPLOY.md` бота                                                               |
@@ -53,18 +58,19 @@ flowchart LR
 
 ## Контракты
 
-| Связь                                 | Определение                                                                                                                                                                          |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Совместимость паков                   | Client `compatibility.json`, server `client-compatibility.json`; формат описан в `docs/DEPLOY.md` сервера                                                                            |
-| Login-контракт пака                   | Mod [PackContract](https://github.com/Blockfield/blockfield-mod/blob/main/docs/DEVELOPMENT-REFERENCE.md) (`blockfield:pack_contract`); подробности в [ADR](adr/002-pack-contract.md) |
-| Mod server ↔ mod client               | Fabric DTO и протокол в `common/.../network/`; контракт — [AGENTS](https://github.com/Blockfield/blockfield-mod/blob/main/docs/AGENTS.md), решения — [ADR](adr/002-pack-contract.md) |
-| Вход игроков: RakNet + TCP            | [ADR](adr/004-tcp-entry-next-to-raknet.md); транспорт принадлежит proxy                                                                                                              |
-| Game и Workshop — разные backend      | [ADR](adr/003-workshop-separate-backend.md); lifecycle — workshop `docs/OPERATIONS.md`                                                                                               |
-| Game → site: результаты и диагностика | Mod [PRODUCER](https://github.com/Blockfield/blockfield-mod/blob/main/docs/statistics/PRODUCER.md); приём — site `docs/statistics.md`                                                |
-| Site → game: настройки                | Mod [admin-settings](https://github.com/Blockfield/blockfield-mod/blob/main/docs/admin-settings.md) (`settings.json` / `applied.json`)                                               |
-| Site ↔ workshop: кандидаты карт       | Site `docs/admin.md`; controller `docs/OPERATIONS.md`                                                                                                                                |
-| Комнаты и deep links                  | Launcher [ROOMS-AND-DISCORD](https://github.com/Blockfield/Blockfield-Launcher/blob/main/docs/ROOMS-AND-DISCORD.md)                                                                  |
-| Текст релизов                         | Workspace `.github/actions/release-text`; формат — client [release notes](https://github.com/Blockfield/blockfield-client/blob/main/docs/RELEASE-NOTES.md)                           |
-| TestBot — single source               | Workspace `scripts/dev/testbot`; the mod rig consumes it at a pinned commit (`dev/rig/testbot/testbot-pin.txt` in `blockfield-mod`)                                                  |
+| Связь                                 | Определение                                                                                                                                                                                                                                                             |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Совместимость паков                   | Client `compatibility.json`, server `client-compatibility.json`; формат описан в `docs/DEPLOY.md` сервера                                                                                                                                                               |
+| Login-контракт пака                   | Mod [PackContract](https://github.com/Blockfield/blockfield-mod/blob/main/docs/DEVELOPMENT-REFERENCE.md) (`blockfield:pack_contract`); подробности в [ADR](adr/002-pack-contract.md)                                                                                    |
+| Mod server ↔ mod client               | Fabric DTO и протокол в `common/.../network/`; контракт — [AGENTS](https://github.com/Blockfield/blockfield-mod/blob/main/docs/AGENTS.md), решения — [ADR](adr/002-pack-contract.md)                                                                                    |
+| Вход игроков: RakNet + TCP            | [ADR](adr/004-tcp-entry-next-to-raknet.md); транспорт принадлежит proxy                                                                                                                                                                                                 |
+| Game и Workshop — разные backend      | [ADR](adr/003-workshop-separate-backend.md); lifecycle — workshop `docs/OPERATIONS.md`                                                                                                                                                                                  |
+| Game → site: результаты и диагностика | Mod [PRODUCER](https://github.com/Blockfield/blockfield-mod/blob/main/docs/statistics/PRODUCER.md); приём — site `docs/statistics.md`                                                                                                                                   |
+| Site → game: настройки                | Mod [admin-settings](https://github.com/Blockfield/blockfield-mod/blob/main/docs/admin-settings.md) (`settings.json` / `applied.json`)                                                                                                                                  |
+| Site/агент → game: команды и консоль  | Только через control plane, у сайта нет RCON: CP `docs/V2.md` (`/v2/actions/moderation.*`, `console.run`, read-only allowlist); потребитель — mod `common/.../controlplane/`; исполнение — server `docs/DEPLOY.md`; агентский `cp-console` — README плагина dokploy-mcp |
+| Site ↔ workshop: кандидаты карт       | Site `docs/admin.md`; controller `docs/OPERATIONS.md`                                                                                                                                                                                                                   |
+| Комнаты и deep links                  | Launcher [ROOMS-AND-DISCORD](https://github.com/Blockfield/Blockfield-Launcher/blob/main/docs/ROOMS-AND-DISCORD.md)                                                                                                                                                     |
+| Текст релизов                         | Workspace `.github/actions/release-text`; формат — client [release notes](https://github.com/Blockfield/blockfield-client/blob/main/docs/RELEASE-NOTES.md)                                                                                                              |
+| TestBot — single source               | Workspace `scripts/dev/testbot`; the mod rig consumes it at a pinned commit (`dev/rig/testbot/testbot-pin.txt` in `blockfield-mod`)                                                                                                                                     |
 
 Решения с историей и проверенными фактами: [docs/adr/](adr/).

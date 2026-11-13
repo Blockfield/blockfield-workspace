@@ -1449,6 +1449,121 @@ class RcBattery(unittest.TestCase):
         hits = rc.scan_errors(log, rc.LOG_SCAN_ALLOW)
         self.assertEqual(len(hits), 1)
 
+    def test_leave_to_lobby_waits_for_join(self):
+        """Round4 attempt 1: the battery sent `bfaction leave` before the
+        client had joined (renderer-ready != joined), and the client threw
+        `Cannot send packets when not in game!` into four product FAIL rows.
+        The lobby leave must wait until the testbot state reports a
+        dimension before the first in-game command."""
+
+        class JoiningBot:
+            def __init__(self):
+                self.polls = 0
+
+            def __call__(self, command, *args, **kwargs):
+                if command == "state":
+                    self.polls += 1
+                    dimension = "" if self.polls <= 2 else "minecraft:overworld"
+                    return {"name": "Bot", "dimension": dimension}
+                if command == "bfaction leave" and self.polls <= 2:
+                    raise RuntimeError(
+                        "bfaction leave: java.lang.IllegalStateException:"
+                        " Cannot send packets when not in game!"
+                    )
+                return {}
+
+            def close(self):
+                pass
+
+        bot = JoiningBot()
+        with patch("time.sleep"):
+            self.assertTrue(rc.leave_to_lobby(bot))
+        self.assertGreater(bot.polls, 2)
+
+    def test_leave_to_lobby_never_joined_is_not_ready(self):
+        """A client that never joins is an invalid setup, never a product
+        FAIL: the leave raises readiness.NotReady (a plain Exception, so the
+        per-leg RuntimeError handlers cannot swallow it into a FAIL row and
+        run() records an explicit non-passing readiness row instead)."""
+
+        class GhostBot:
+            def __call__(self, command, *args, **kwargs):
+                if command == "state":
+                    return {"name": "Ghost", "dimension": ""}
+                return {}
+
+            def close(self):
+                pass
+
+        try:
+            rc.leave_to_lobby(GhostBot(), timeout=2)
+        except readiness.NotReady:
+            pass
+        else:
+            self.fail("expected readiness.NotReady for a client that never joins")
+
+    def test_open_room_lets_join_refusal_through(self):
+        """open_room must not convert the join refusal into a product FAIL:
+        the NotReady from the lobby leave reaches run()'s readiness handler."""
+
+        class GhostBot:
+            def __call__(self, command, *args, **kwargs):
+                return {"name": "Ghost", "dimension": ""}
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                rc,
+                "leave_to_lobby",
+                side_effect=readiness.NotReady("client never joined", "no dimension"),
+            ),
+            self.assertRaises(readiness.NotReady),
+        ):
+            rc.open_room(GhostBot(), lambda: "", "deathmatch", "hamburg", timeout=0)
+
+    def test_scan_errors_allows_offline_profile_lookup_failure(self):
+        # Round4 attempt 2 log-scan FAIL: the offline stand fetched a random
+        # offline-mode UUID from the Mojang session servers and the sandbox
+        # answered with an HTML error page. The `MinecraftClientException:
+        # Failed to read value` continuation is allowed only directly after
+        # the vanilla `Couldn't look up profile properties for` WARN
+        # (.dev/release-pair-20261113/round4-rc/server-latest.log:1351-1352).
+        warn = (
+            "[15:16:27] [Worker-Main-2/WARN]: Couldn't look up profile"
+            " properties for 48591ed2-2371-37b0-ac2b-f3caa6ac283e"
+        )
+        failure = (
+            "com.mojang.authlib.exceptions.MinecraftClientException:"
+            " Failed to read value <!DOCTYPE html PUBLIC"
+            " '-//W3C//DTD XHTML 1.0 Transitional//EN'"
+            " 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'>"
+        )
+        self.assertEqual(
+            rc.scan_errors(warn + "\n" + failure + "\n", rc.LOG_SCAN_ALLOW), []
+        )
+
+    def test_scan_errors_keeps_unrelated_minecraft_client_exception(self):
+        # Same WARN predecessor, different exception message: still fails.
+        warn = (
+            "[15:16:27] [Worker-Main-2/WARN]: Couldn't look up profile"
+            " properties for 48591ed2-2371-37b0-ac2b-f3caa6ac283e"
+        )
+        other = (
+            "com.mojang.authlib.exceptions.MinecraftClientException:"
+            " Failed to connect to session server"
+        )
+        self.assertEqual(
+            rc.scan_errors(warn + "\n" + other + "\n", rc.LOG_SCAN_ALLOW), [other]
+        )
+        # Same failure message without the WARN predecessor: still fails.
+        failure = (
+            "com.mojang.authlib.exceptions.MinecraftClientException:"
+            " Failed to read value <!DOCTYPE html>"
+        )
+        self.assertEqual(rc.scan_errors(failure + "\n", rc.LOG_SCAN_ALLOW), [failure])
+
     def test_run_refuses_without_second_client(self):
         """rc-final6: a bot-less second client degraded the RC to SKIP rows
         instead of failing loudly. The battery refuses to start when the

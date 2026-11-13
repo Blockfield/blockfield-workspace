@@ -302,6 +302,21 @@ def is_lobby_dimension(dim):
     )
 
 
+def wait_in_game(bot, timeout=30):
+    """True once the client has joined the server (testbot state has a dimension).
+
+    Renderer-ready is not joined: the first in-game command throws
+    `Cannot send packets when not in game!` while the dimension is still "".
+    Tick-aware poll bounded by `timeout`; False when the client never joins.
+    """
+    matched, _, _ = wait_for(
+        lambda remaining: bot("state", timeout=remaining),
+        lambda s: isinstance(s, dict) and dimension(s) != "",
+        timeout,
+    )
+    return matched
+
+
 def number(response):
     match = re.search(r"data: (-?\d+(?:\.\d+)?)[bdfsL]?$", response or "")
     if not match:

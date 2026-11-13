@@ -22,6 +22,7 @@ from .common import (
     is_lobby_dimension,
     rcon_args,
     tally,
+    wait_in_game,
 )
 
 SCENARIO = {
@@ -37,6 +38,19 @@ ERROR_RE = re.compile(
 )
 # Bracket level in log4j lines (`[12:16:12] [Render thread/INFO]: ...`).
 LEVEL_RE = re.compile(r"\[[^\]]+/([A-Z]+)\]")
+# Offline stand, random offline-mode UUIDs: the server async-fetches the fake
+# profile from the Mojang session servers and the sandbox answers with an
+# HTML error page, whose text lands in the log. The
+# `MinecraftClientException: Failed to read value` continuation is allowed
+# only on the line directly following the vanilla
+# `Couldn't look up profile properties for` WARN (round4-rc
+# server-latest.log lines 1351-1352); any other MinecraftClientException
+# (different message, or the same message without that WARN above it) still
+# fails the scan.
+PROFILE_LOOKUP_WARN_RE = re.compile(r"Couldn't look up profile properties for")
+OFFLINE_PROFILE_FAILURE_RE = re.compile(
+    r"MinecraftClientException: Failed to read value"
+)
 # Levels that never fail the scan: an INFO line only matches ERROR_RE via a
 # quoted substring (the llvmpipe "type=ERROR" shader notice), never a real
 # error. WARN/ERROR and lines without a level prefix still fail.
@@ -186,7 +200,8 @@ def scan_errors(text, allow=()):
     text = text or ""
     softpipe_stand = bool(SOFTPIPE_RENDERER_RE.search(text))
     out = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         if not ERROR_RE.search(line):
             continue
         level = LEVEL_RE.search(line)
@@ -200,6 +215,10 @@ def scan_errors(text, allow=()):
             and level.group(1) == "ERROR"
             and SOFTPIPE_CAP_RE.search(line)
             and not SOFTPIPE_CONTEXT_RE.search(line)
+        ):
+            continue
+        if OFFLINE_PROFILE_FAILURE_RE.search(line) and (
+            PROFILE_LOOKUP_WARN_RE.search(lines[index - 1]) if index > 0 else False
         ):
             continue
         out.append(line.strip())
@@ -253,8 +272,20 @@ def leave_to_lobby(bot, timeout=30):
 
     The hub silently drops play/join while the bot is parked in the firing
     range, so without this the room-open wait times out with no log line.
-    Returns True when the bot reports a lobby dimension in time.
+    Waits for the join first: renderer-ready is not in-game, and the first
+    in-game command throws `Cannot send packets when not in game!` while the
+    testbot state still has no dimension. Returns True when the bot reports
+    a lobby dimension in time; raises readiness.NotReady when the client
+    never joins (an invalid setup, never a product FAIL). The join and the
+    lobby wait each get the full timeout: a slow join must not starve the
+    lobby poll.
     """
+    if not wait_in_game(bot, timeout=timeout):
+        raise readiness.NotReady(
+            "client never joined",
+            "testbot state never reported a dimension: in-game commands"
+            " would throw `Cannot send packets when not in game!`",
+        )
     bot("closescreen")
     bot("bfaction leave")
     deadline = time.monotonic() + timeout

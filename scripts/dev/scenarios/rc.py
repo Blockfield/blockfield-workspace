@@ -276,10 +276,10 @@ def leave_to_lobby(bot, timeout=30):
     in-game command throws `Cannot send packets when not in game!` while the
     testbot state still has no dimension. Returns True when the bot reports
     a lobby dimension in time; raises readiness.NotReady when the client
-    never joins (an invalid setup, never a product FAIL). One shared
-    deadline bounds both waits.
+    never joins (an invalid setup, never a product FAIL). The join and the
+    lobby wait each get the full timeout: a slow join must not starve the
+    lobby poll.
     """
-    deadline = time.monotonic() + timeout
     if not wait_in_game(bot, timeout=timeout):
         raise readiness.NotReady(
             "client never joined",
@@ -288,6 +288,7 @@ def leave_to_lobby(bot, timeout=30):
         )
     bot("closescreen")
     bot("bfaction leave")
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if is_lobby_dimension(dimension(bot("state"))):
             return True

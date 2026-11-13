@@ -311,7 +311,9 @@ def wait_in_game(bot, timeout=30):
     """
     matched, _, _ = wait_for(
         lambda remaining: bot("state", timeout=remaining),
-        lambda s: isinstance(s, dict) and dimension(s) != "",
+        lambda s: (
+            isinstance(s, dict) and isinstance(dimension(s), str) and dimension(s) != ""
+        ),
         timeout,
     )
     return matched

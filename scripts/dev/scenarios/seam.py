@@ -117,7 +117,7 @@ def entry_rows(probe, label, tcp, udp, rooms_url, gate_file, want_game, want_wor
 
 
 def version_rows(args, root, rcon_factory):
-    """G0 identity per target: stand mod vs mod-server source (fails), prod build vs tag."""
+    """G0 identity per target: stand mod vs gameplay lock (mod-server fallback, fails), prod build vs tag."""
     from . import rc
 
     rows = []

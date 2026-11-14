@@ -1311,6 +1311,13 @@ class RcBattery(unittest.TestCase):
                     },
                 }
             ),
+            json.dumps(
+                {
+                    **base,
+                    "files": {"blockfield-server-1.55.3+mc1.21.1-typo.jar": "b" * 64},
+                }
+            ),
+            "[" * 100000 + "]" * 100000,
         ]
         for payload in invalid_payloads:
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:

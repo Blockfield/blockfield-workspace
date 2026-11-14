@@ -141,7 +141,7 @@ def lock_mod_version(server_root):
         raise ValueError(f"gameplay lock is not a regular file: {path}")
     try:
         pin = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise ValueError(f"gameplay lock unreadable: {error}") from error
     if (
         not isinstance(pin, dict)
@@ -164,6 +164,8 @@ def lock_mod_version(server_root):
         match = LOCK_ASSET_RE.fullmatch(name)
         if match:
             versions.append(match.group(1))
+        elif name.startswith("blockfield-server-"):
+            raise ValueError(f"invalid gameplay lock entry: {name}")
     if len(versions) > 1:
         raise ValueError(f"multiple game jar entries in gameplay lock: {path}")
     return versions[0] if versions else None

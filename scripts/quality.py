@@ -433,6 +433,7 @@ def tests():
             run("pnpm" if (ROOT / "pnpm-lock.yaml").is_file() else "npm", "run", "test")
     for directory in (
         "tests",
+        "scripts/assets",
         "scripts/dev/tests",
         "tools/workshop",
         ".github/actions/release-text",

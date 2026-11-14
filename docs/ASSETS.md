@@ -112,7 +112,7 @@ just assets music/music-v4 <каталог-релиза>
 just assets world-seed/world-seed-v11 <каталог-релиза>
 ```
 
-Команда использует `server/scripts/publish-assets.py` и закреплённый rclone.
+Команда использует `scripts/assets/publish-assets.py` и закреплённый rclone.
 `copy --immutable --checksum` не удаляет другие объекты и запрещает замену
 отличающихся файлов. `check --download --one-way` сравнивает содержимое всех
 публикуемых файлов, сохраняя дополнительные исторические метаданные в prefix.
@@ -132,9 +132,9 @@ release notes. При наличии `r2-url` сборка скачивает т
 hash её metafile в `index.toml`, затем hash индекса в `pack.toml`.
 У map-пина поля `repository`, `release` и `asset` сохраняют происхождение;
 `r2-url` указывает на `maps/<map-id>/<release>/<asset>`. Новые принятые карты
-публикует `server/scripts/maps/publish_map.py`: тот же R2 publisher, GitHub
+публикует `scripts/maps/publish_map.py` (в `blockfield-gameplay`): тот же R2 publisher, GitHub
 метаданные и PR с согласованными JSON/пином; публикация карты не развёртывает прод.
-Для world-seed CI и локальный стенд используют `scripts/fetch-world-seed.py`:
+Для world-seed локальный стенд (`just setup`) использует `scripts/assets/fetch-world-seed.py`:
 кеш проверяется по SHA256, новый файл заменяет старый только после проверки.
 При добавлении версии внесите её ключ, размер, SHA256 и происхождение в реестр.
 

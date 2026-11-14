@@ -33,10 +33,16 @@ personal opt-in: the Boat parts below apply only when the task owner opted in
    watches the PR and dispatches the findings round or the merge. Never
    copy scripts to /tmp, never `sleep`-poll output files.
    Push budget (default 2, brief may change): push 1 after green gates;
-   when a findings brief arrives, read the review App body + inline comments
-   on the head; fix ALL its findings in one batch; push 2. Findings left after the budget →
-   `BLOCKED: review findings` with the list + local SHA. A published
-   branch is never rebased or force-pushed: merge its base (origin/next in product repos, origin/main in workspace) into it. Product-repo PRs branch from and target `next`; only the coordinator merges next→main.
+   when a findings brief arrives, read the review App body and every unresolved review thread,
+   including outdated ones from earlier heads (only checks on older heads are superseded), and handle them per the `babysit-pr` skill (it wins over
+   this playbook on PR handling): verify each against the source, fix real bugs in one
+   batch, decline the rest (unneeded tests, unimportant edge-case guards, extra
+   compatibility) with a written reason, resolve those threads and list them as follow-up
+   issues; push 2. Findings left after the budget →
+   `BLOCKED: review findings` with the list + local SHA. When the base moved (BEHIND,
+   conflicts, or new base commits touch the PR's files), rebase the PR branch onto its base
+   (origin/next in product repos, origin/main in workspace) and `git push --force-with-lease`
+   — only your own PR branch, never next/main/tags. Product-repo PRs branch from and target `next`; only the coordinator merges next→main.
    No reruns, no empty pushes, no `--no-verify` without saying why.
 5. Sources and evidence: read another repo/submodule at the ref the brief
    names (`git fetch`; default origin/next in product repos, origin/main in workspace), cite repo+SHA; the workspace

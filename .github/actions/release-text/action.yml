@@ -17,9 +17,6 @@ inputs:
   source-repository:
     description: Repository with the code and tags when it differs from the release repository
     default: ${{ github.repository }}
-  server-repository:
-    description: Repository used for the server pin on client and launcher releases
-    default: Blockfield/blockfield-server
   build-json:
     description: Path to this build's build.json for the client-fingerprint check (client)
     default: ""
@@ -55,7 +52,6 @@ runs:
         KIND: ${{ inputs.kind }}
         OUT_DIR: ${{ inputs.out-dir }}
         SOURCE_REPOSITORY: ${{ inputs.source-repository }}
-        SERVER_REPOSITORY: ${{ inputs.server-repository }}
         BUILD_JSON: ${{ inputs.build-json }}
         FRESH: ${{ inputs.fresh }}
         PR_NUMBER: ${{ inputs.pr-number }}
@@ -63,7 +59,6 @@ runs:
       run: |
         if [ "$MODE" = release ]; then
           args=(release --repository "$REPOSITORY" --version "$VERSION" --kind "$KIND" --out-dir "$OUT_DIR" --source-repository "$SOURCE_REPOSITORY")
-          [ -n "$SERVER_REPOSITORY" ] && args+=(--server-repository "$SERVER_REPOSITORY")
           [ -n "$BUILD_JSON" ] && args+=(--build-json "$BUILD_JSON")
           [ "$FRESH" = true ] && args+=(--fresh)
         else

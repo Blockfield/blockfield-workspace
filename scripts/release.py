@@ -43,6 +43,13 @@ MOD_REPO = f"{ORG}/blockfield-mod"
 WORKSPACE_REPO = f"{ORG}/blockfield-workspace"
 SIDES = ("client", "server")
 REPO = {"client": f"{ORG}/blockfield-client", "server": f"{ORG}/blockfield-server"}
+# Split-server repos after the cutover: gameplay owns the game JAR and deploy,
+# dedicated owns packaging and releases. Status lists them; archive stays the
+# release source until the cutover owns releases (coordination#62).
+NEW_SERVER_REPOS = (
+    ("gameplay", f"{ORG}/blockfield-gameplay"),
+    ("dedicated", f"{ORG}/blockfield-dedicated"),
+)
 # Where the published release of each side lives (the client publishes into blockfield-releases).
 RELEASES = {
     "client": f"{ORG}/blockfield-releases",
@@ -939,6 +946,35 @@ def latest_tag(repo):
     return out[0]["tagName"] if out else None
 
 
+def branch_exists(repo, branch):
+    """True when the branch exists on origin (read-only, no checkout)."""
+    done = run("gh", "api", f"repos/{repo}/branches/{branch}", check=False)
+    return done.returncode == 0
+
+
+def split_repo_lines(name, repo):
+    """Status lines for a split-server repo: latest release plus commits ahead of it.
+
+    Read-only (gh API, no checkout); every failure degrades to a line so
+    `release status` keeps reporting the archive-based release it gates on."""
+    try:
+        latest = latest_tag(repo)
+    except RuntimeError as error:
+        return [f"{name}: releases unreadable ({' '.join(str(error).split())[:160]})"]
+    if latest is None:
+        return [f"{name}: no published releases"]
+    ref = "next" if branch_exists(repo, "next") else "main"
+    try:
+        cmp = json.loads(gh("api", f"repos/{repo}/compare/{latest}...{ref}"))
+    except RuntimeError as error:
+        detail = " ".join(str(error).split())[:160]
+        return [f"{name}: last published {latest} (compare unreadable: {detail})"]
+    return [
+        f"{name}: last published {latest}, "
+        f"{cmp.get('ahead_by', '?')} unreleased commit(s) on origin/{ref}"
+    ]
+
+
 def cmd_status(args):
     prod = prod_state()
     say(
@@ -985,6 +1021,10 @@ def cmd_status(args):
         )
         for name, tag, new in behind:
             say(f"  behind: {name} {tag} -> {new}")
+    say("\nsplit-server repos (cutover targets; informational until the cutover):")
+    for name, repo in NEW_SERVER_REPOS:
+        for line in split_repo_lines(name, repo):
+            say(f"  {line}")
     for side in SIDES:
         if changed[side]:
             repo = repo_dir(side)

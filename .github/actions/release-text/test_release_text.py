@@ -1443,6 +1443,7 @@ class LauncherKind(unittest.TestCase):
 
         with (
             mock.patch.object(rt, "published_releases", side_effect=releases),
+            mock.patch.object(rt, "_root_commit", return_value="c" * 40),
             mock.patch.object(rt, "merged_prs", side_effect=fetch) as merged,
         ):
             pin = rt.launcher_server_pin(
@@ -1450,9 +1451,10 @@ class LauncherKind(unittest.TestCase):
             )
         calls = [c.args[:3] for c in merged.call_args_list]
         self.assertIn((rt.ARCHIVE_REPOSITORY, "v2.82.0", "v2.82.1"), calls)
-        self.assertIn((repo, "v2.83.0", "v2.83.1"), calls)
+        self.assertIn((repo, "c" * 40, "v2.83.1"), calls)
         self.assertEqual(
-            pin["text"], "blockfield-server: v2.82.0 → v2.82.1; v2.83.0 → v2.83.1"
+            pin["text"],
+            "blockfield-server: v2.82.0 → v2.82.1; " + "c" * 7 + " → v2.83.1",
         )
         self.assertEqual(pin["pull_requests"], archive_prs + fresh_prs)
         self.assertTrue(any("раздел" in gap for gap in gaps), gaps)

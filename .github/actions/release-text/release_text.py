@@ -479,14 +479,7 @@ def launcher_server_pin(previous_release, gaps, repository=SERVER_REPOSITORY):
             if old_a and new_a and old_a != new_a:
                 halves.append((ARCHIVE_REPOSITORY, old_a, new_a))
             if new is not None:
-                ordered = sorted(
-                    (key, tag)
-                    for r in releases
-                    for key, tag in [(rn.version_key(r["tag_name"]), r["tag_name"])]
-                    if rn.comparable(key, ("v",))
-                )
-                first = ordered[0][1]
-                halves.append((repository, first if first != new else None, new))
+                halves.append((repository, None, new))
     except Exception as exc:
         gaps.append(f"изменения сервера не собраны ({describe(exc)})")
         return None

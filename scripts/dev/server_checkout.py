@@ -65,6 +65,22 @@ def checkout_repo(root, dirname, url, pin):
         die(f"{target} exists but is not a git checkout: move it aside first")
     if not target.exists():
         run_git("clone", url, str(target), cwd=root)
+    else:
+        # Workspaces predating the dedicated/gameplay split still point
+        # server/ at the archived blockfield-server repo, whose history
+        # never contains the dedicated pin: repoint before fetching.
+        current = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=target,
+            capture_output=True,
+            text=True,
+        )
+        leaf = current.stdout.strip().rstrip("/").split("/")[-1].split(":")[-1]
+        if current.returncode == 0 and leaf in (
+            "blockfield-server",
+            "blockfield-server.git",
+        ):
+            run_git("remote", "set-url", "origin", url, cwd=target)
     run_git("fetch", "origin", cwd=target)
     if git_output("status", "--porcelain", "--untracked-files=no", cwd=target):
         die(f"{target} has local changes: stash, commit or reset them first")

@@ -98,6 +98,45 @@ class CheckoutPair(unittest.TestCase):
                 "pins/dedicated.sha",
             )
 
+    def test_old_blockfield_server_origin_is_repointed(self):
+        # Review finding on the dedicated/gameplay repoint: a server/
+        # checkout from the archived blockfield-server repo kept its
+        # origin, so the fetch could never obtain the dedicated pin.
+        legacy = make_origin(self.root, "blockfield-server")
+        subprocess.run(
+            ["git", "commit", "-q", "--allow-empty", "-m", "legacy-only"],
+            cwd=self.root / "blockfield-server",
+            check=True,
+        )
+        legacy = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.root / "blockfield-server",
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertNotEqual(legacy, self.dedicated)
+        subprocess.run(
+            ["git", "clone", "-q", str(self.root / "blockfield-server"), "server"],
+            cwd=self.root,
+            check=True,
+        )
+        server_checkout.checkout_repo(
+            self.root,
+            "server",
+            str(self.root / "dedicated-origin"),
+            "pins/dedicated.sha",
+        )
+        origin = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=self.root / "server",
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(origin, str(self.root / "dedicated-origin"))
+        self.assertEqual(self.head("server"), self.dedicated)
+
     def test_dirty_checkout_is_refused(self):
         server_checkout.checkout_repo(
             self.root,

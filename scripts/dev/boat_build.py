@@ -832,6 +832,10 @@ def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
             f"test -e {shlex.quote(remote + '/.git')} || {{ "
             f"{{ git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)} || "
             f"git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)}; }}; }} && "
+            # Golden VMs predate the dedicated/gameplay split: their server/
+            # origin is still the archived blockfield-server repo, which never
+            # contains the dedicated pin. Repoint before fetching.
+            f"git -C {shlex.quote(remote)} remote set-url origin {shlex.quote(url)} && "
             # A fresh clone starts with hooks unwired: point it at the versioned
             # hooks when they exist and no explicit choice was made (best-effort).
             f"{{ test -d {shlex.quote(remote + '/.githooks')} && "
@@ -1157,17 +1161,17 @@ def wait_state(vm_id, want=("stopped",), timeout=240):
 BOAT_APPLIED_PATHS = ".git/boat-applied-paths"
 
 
-def reset_stale_server(vm_id, remote_root, want):
-    """Reset a dirty remote server tree to the pin when no patch ships.
+def reset_stale_checkout(vm_id, remote_root, rel, want):
+    """Reset a dirty remote checkout tree to the pin when no patch ships.
 
-    A reused warm VM still carries the previous run's applied server patch
+    A reused warm VM still carries the previous run's applied patch
     while remote_shas reports a matching HEAD, so without this the run
-    tests stale server edits despite a clean local server. ensure_worktree
+    tests stale edits despite a clean local tree. ensure_worktree
     records every applied path in .git/boat-applied-paths; any recorded path
     the pin does not track is removed explicitly (plain `clean -fd` keeps
     ignored files, while `-x` would wipe build caches).
     """
-    remote = f"{remote_root}/server"
+    remote = f"{remote_root}/{rel}"
     marker = f"{remote}/{BOAT_APPLIED_PATHS}"
     mrc, applied = vm_exec(vm_id, f"cat {shlex.quote(marker)} 2>/dev/null")
     recorded = applied if mrc == 0 and applied.strip() else ""
@@ -1221,19 +1225,21 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             name = f"{(rel or 'workspace').replace('/', '_')}.patch"
             (stage_dir / name).write_bytes(patch)
             patches[rel] = name
-    if "server" in wanted and "server" not in patches:
-        reset_stale_server(vm_id, remote_root, wanted["server"])
+    if "server" in wanted or "gameplay" in wanted:
+        for rel in ("server", "gameplay"):
+            if rel in wanted and rel not in patches:
+                reset_stale_checkout(vm_id, remote_root, rel, wanted[rel])
     if not patches:
         return 0
     run_boat("push", vm_id, str(stage_dir))
     for rel, name in patches.items():
         remote = f"{remote_root}/{rel}".rstrip("/")
         guest = f"{home}/{stage_dir.name}/{name}"
-        if rel == "server":
+        if rel in ("server", "gameplay"):
             # A reused warm VM still carries the previous run's applied patch,
             # including ignored files `git status` cannot see: the recorded
             # applied paths drive their removal.
-            reset_stale_server(vm_id, remote_root, wanted[rel])
+            reset_stale_checkout(vm_id, remote_root, rel, wanted[rel])
         else:
             # A reused warm VM still carries the previous run's applied patch,
             # so apply --check would fail on the leftovers: reset to want
@@ -1267,7 +1273,7 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             raise RuntimeError(
                 f"worktree patch apply failed for {rel or 'workspace'}:\n{out}"
             )
-        if rel == "server":
+        if rel in ("server", "gameplay"):
             # Record every applied path so a later clean run can remove stale
             # leftovers the status probe cannot see (e.g. ignored files).
             marker = f"{remote}/{BOAT_APPLIED_PATHS}"
@@ -1587,10 +1593,11 @@ def main(argv=None):
             patched = ensure_worktree(vm_id, remote_root, home, wanted, stage_dir)
         else:
             patched = 0
-            if "server" in wanted:
-                # --no-worktree ships no patch, so a previous run's server
-                # patch must still be dropped.
-                reset_stale_server(vm_id, remote_root, wanted["server"])
+            for rel in ("server", "gameplay"):
+                if rel in wanted:
+                    # --no-worktree ships no patch, so a previous run's patch
+                    # must still be dropped.
+                    reset_stale_checkout(vm_id, remote_root, rel, wanted[rel])
         env_file = write_env(vm_id, remote_root, args.task)
         bf_home = f"{remote_root}/.dev/{args.task}"
         installed = []

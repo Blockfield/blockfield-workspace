@@ -49,6 +49,28 @@
       ]
     },
     {
+      "key": "maps/dm_arena/map-dm_arena-e3f74328594fced5/SHA256SUMS",
+      "size": 79,
+      "sha256": "598b4af6a84ea582b4c3e8554bd16a68e284c60909830bca9be49d76d2cce384",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "map-dm_arena-e3f74328594fced5"
+        }
+      ]
+    },
+    {
+      "key": "maps/dm_arena/map-dm_arena-e3f74328594fced5/dm_arena.zip",
+      "size": 22919,
+      "sha256": "e3f74328594fced56575eb4810ec633fe48a2f9ed51f92e7b3d2dc72d82e7dee",
+      "sources": [
+        {
+          "repository": "Blockfield/blockfield-server",
+          "release": "map-dm_arena-e3f74328594fced5"
+        }
+      ]
+    },
+    {
       "key": "maps/firing_range/map-firing-range-house-v1/SHA256SUMS",
       "size": 83,
       "sha256": "608d228b7db029fb6dc3240d2e8613c2912755ceb789e6f1e2297a56f3aa8903",
@@ -137,6 +159,18 @@
           "release": "map-firing-range-house-v2"
         }
       ]
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-training-v3/SHA256SUMS",
+      "size": 83,
+      "sha256": "b1039c2ca34f57d94d3bc6cf7a4b11fec0ba1c1b4cbf087a7771f996561153c2",
+      "sources": []
+    },
+    {
+      "key": "maps/firing_range/map-firing-range-training-v3/firing_range.zip",
+      "size": 1454878,
+      "sha256": "d844071d220bb819c89b80eedf962f0d50140e9985a2d34e4d9163e402dacae7",
+      "sources": []
     },
     {
       "key": "maps/kozyatyn/map-kozyatyn-887d42bc80e11cde/SHA256SUMS",

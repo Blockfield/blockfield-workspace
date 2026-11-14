@@ -2,6 +2,7 @@
 .dev/
 temp/
 /server/
+/gameplay/
 localmods/*
 !localmods/mods.json.example
 !localmods/blockfield-mod

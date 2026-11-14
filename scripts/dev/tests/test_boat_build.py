@@ -757,11 +757,12 @@ class BranchSubmodules(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
-        # The server pin is git-ignored, not a submodule: every workspace
-        # commit carries it, so fixtures must too.
+        # The checkout pins are git-ignored, not submodules: every workspace
+        # commit carries them, so fixtures must too.
         self.pin = "b" * 40
         (self.super / "pins").mkdir()
-        (self.super / "pins" / "server.sha").write_text(self.pin + "\n")
+        (self.super / "pins" / "dedicated.sha").write_text(self.pin + "\n")
+        (self.super / "pins" / "gameplay.sha").write_text("e" * 40 + "\n")
         subprocess.run(["git", "add", "-A"], cwd=self.super, check=True)
         subprocess.run(["git", "commit", "-qm", "subs"], cwd=self.super, check=True)
         subprocess.run(["git", "branch", "task"], cwd=self.super, check=True)
@@ -1816,9 +1817,10 @@ class UninitializedSubmodules(unittest.TestCase):
         commit_file(root / "origin", "f.txt", "a\n", "init")
         make_repo(root / "super", origin=root / "origin")
         self.super = root / "super"
-        # Fixture workspaces carry the server pin like the real checkout.
+        # Fixture workspaces carry the checkout pins like the real checkout.
         (self.super / "pins").mkdir()
-        (self.super / "pins" / "server.sha").write_text("b" * 40 + "\n")
+        (self.super / "pins" / "dedicated.sha").write_text("b" * 40 + "\n")
+        (self.super / "pins" / "gameplay.sha").write_text("e" * 40 + "\n")
         subprocess.run(["git", "add", "-A"], cwd=self.super, check=True)
         subprocess.run(
             ["git", "commit", "-qm", "pin server"], cwd=self.super, check=True
@@ -1996,11 +1998,11 @@ class UninitializedSubmodules(unittest.TestCase):
 
 
 class PinnedServer(unittest.TestCase):
-    """The remote build checks out exactly the pinned server SHA (ws#88).
+    """The remote build checks out exactly the pinned pair SHAs (ws#88).
 
-    The server is git-ignored, not a submodule, so ls-tree/submodule
-    status never list it: the old code left the golden's stale server
-    checkout on the VM while the task tested pinned server code.
+    The server and gameplay checkouts are git-ignored, not submodules, so
+    ls-tree/submodule status never list them: the old code left the golden's
+    stale server checkout on the VM while the task tested pinned server code.
     """
 
     def setUp(self):
@@ -2010,28 +2012,34 @@ class PinnedServer(unittest.TestCase):
         make_repo(root / "ws")
         self.ws = root / "ws"
         self.pin = "c" * 40
+        self.gameplay_pin = "e" * 40
         (self.ws / "pins").mkdir()
-        (self.ws / "pins" / "server.sha").write_text(self.pin + "\n")
+        (self.ws / "pins" / "dedicated.sha").write_text(self.pin + "\n")
+        (self.ws / "pins" / "gameplay.sha").write_text(self.gameplay_pin + "\n")
         subprocess.run(["git", "add", "-A"], cwd=self.ws, check=True)
-        subprocess.run(["git", "commit", "-qm", "pin server"], cwd=self.ws, check=True)
+        subprocess.run(["git", "commit", "-qm", "pin pair"], cwd=self.ws, check=True)
 
-    def test_local_shas_includes_pin(self):
+    def test_local_shas_includes_pins(self):
         args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
         with patch.object(boat_build, "ROOT", self.ws):
-            self.assertEqual(boat_build.local_shas(args)["server"], self.pin)
+            wanted = boat_build.local_shas(args)
+        self.assertEqual(wanted["server"], self.pin)
+        self.assertEqual(wanted["gameplay"], self.gameplay_pin)
 
-    def test_branch_reads_branch_pin(self):
+    def test_branch_reads_branch_pins(self):
         new_pin = "d" * 40
         subprocess.run(["git", "checkout", "-qb", "srv"], cwd=self.ws, check=True)
-        (self.ws / "pins" / "server.sha").write_text(new_pin + "\n")
+        (self.ws / "pins" / "dedicated.sha").write_text(new_pin + "\n")
         subprocess.run(["git", "commit", "-qam", "bump pin"], cwd=self.ws, check=True)
         subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
         args = boat_build.parse_args(["--vm", "bx_x", "--branch", "srv", "--", "true"])
         with patch.object(boat_build, "ROOT", self.ws):
-            self.assertEqual(boat_build.local_shas(args)["server"], new_pin)
+            wanted = boat_build.local_shas(args)
+        self.assertEqual(wanted["server"], new_pin)
+        self.assertEqual(wanted["gameplay"], self.gameplay_pin)
 
     def test_missing_pin_fails_loudly(self):
-        (self.ws / "pins" / "server.sha").unlink()
+        (self.ws / "pins" / "dedicated.sha").unlink()
         subprocess.run(["git", "commit", "-qam", "drop pin"], cwd=self.ws, check=True)
         args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
         with patch.object(boat_build, "ROOT", self.ws):
@@ -2042,7 +2050,7 @@ class PinnedServer(unittest.TestCase):
         # Fail-before: --branch at a commit with no pin silently tested
         # the current checkout's pin (an unrelated server revision).
         subprocess.run(["git", "checkout", "-qb", "nopin"], cwd=self.ws, check=True)
-        (self.ws / "pins" / "server.sha").unlink()
+        (self.ws / "pins" / "dedicated.sha").unlink()
         subprocess.run(["git", "commit", "-qam", "drop pin"], cwd=self.ws, check=True)
         subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
         args = boat_build.parse_args(
@@ -2056,7 +2064,7 @@ class PinnedServer(unittest.TestCase):
         # Fail-before: --branch at a commit with an empty pin silently
         # tested the current checkout's pin.
         subprocess.run(["git", "checkout", "-qb", "emptypin"], cwd=self.ws, check=True)
-        (self.ws / "pins" / "server.sha").write_text("\n")
+        (self.ws / "pins" / "dedicated.sha").write_text("\n")
         subprocess.run(["git", "commit", "-qam", "empty pin"], cwd=self.ws, check=True)
         subprocess.run(["git", "checkout", "-q", "main"], cwd=self.ws, check=True)
         args = boat_build.parse_args(
@@ -2071,7 +2079,7 @@ class PinnedServer(unittest.TestCase):
         # patch applied, so the VM tested the old server code with the new
         # pin file.
         new_pin = "d" * 40
-        (self.ws / "pins" / "server.sha").write_text(new_pin + "\n")
+        (self.ws / "pins" / "dedicated.sha").write_text(new_pin + "\n")
         args = boat_build.parse_args(["--vm", "bx_x", "--", "true"])
         with patch.object(boat_build, "ROOT", self.ws):
             self.assertEqual(boat_build.local_shas(args)["server"], new_pin)
@@ -2079,7 +2087,7 @@ class PinnedServer(unittest.TestCase):
     def test_no_worktree_keeps_committed_pin(self):
         # --no-worktree never ships the pin change, so the committed pin
         # (the tree the VM actually checks out) still decides.
-        (self.ws / "pins" / "server.sha").write_text("d" * 40 + "\n")
+        (self.ws / "pins" / "dedicated.sha").write_text("d" * 40 + "\n")
         args = boat_build.parse_args(["--vm", "bx_x", "--no-worktree", "--", "true"])
         with patch.object(boat_build, "ROOT", self.ws):
             self.assertEqual(boat_build.local_shas(args)["server"], self.pin)
@@ -2093,7 +2101,7 @@ class PinnedServer(unittest.TestCase):
                 boat_build.local_shas(args)
         self.assertIn("server-checkout", str(ctx.exception))
 
-    def run_server_ensure(self, replies):
+    def run_server_ensure(self, replies, rel="server"):
         scripts = list(replies)
 
         def fake_vm_exec(vm_id, script, timeout=120):
@@ -2112,7 +2120,7 @@ class PinnedServer(unittest.TestCase):
                 "bx_x",
                 "/srv/guest/blockfield-workspace",
                 "/srv/guest",
-                "server",
+                rel,
                 self.pin,
                 stage,
             )
@@ -2131,9 +2139,22 @@ class PinnedServer(unittest.TestCase):
             ),
             "checked out",
         )
-        self.assertIn("blockfield-server", self.vm_scripts[0])
+        self.assertIn("blockfield-dedicated", self.vm_scripts[0])
         checkout = next(s for s in self.vm_scripts if "checkout --detach" in s)
         self.assertIn(self.pin, checkout)
+
+    def test_gameplay_ensure_clones_gameplay_repo(self):
+        self.assertEqual(
+            self.run_server_ensure(
+                [
+                    (0, ""),  # gameplay/.git exists: skip the clone
+                    (0, self.pin),  # rev-parse HEAD: at the pin
+                ],
+                rel="gameplay",
+            ),
+            "already there",
+        )
+        self.assertIn("blockfield-gameplay", self.vm_scripts[0])
 
     def test_server_already_there_skips_transfer(self):
         self.assertEqual(

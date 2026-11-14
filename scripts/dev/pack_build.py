@@ -58,10 +58,11 @@ def main(argv=None):
     parser.add_argument("--world-seed", type=Path)
     parser.add_argument("--client-manifest")
     parser.add_argument("--build-id", default="dev")
-    # The game server jar is built from mod-server, never downloaded: forwarded
-    # to the server build as-is (older build-distribution.py ignores the extras).
+    # The game server jar is built from gameplay sources: forwarded to the
+    # server build as-is (older build-distribution.py ignores the extras).
     parser.add_argument("--server-jar", type=Path, default=None)
     parser.add_argument("--no-server-jar", action="store_true")
+    parser.add_argument("--gameplay-lock", type=Path, default=None)
     args = parser.parse_args(argv)
     args.root = (args.root or ROOT / args.side).resolve()
     args.server_source = args.server_source or args.root / "server"

@@ -908,10 +908,69 @@ class ServerJar(unittest.TestCase):
         args = SimpleNamespace(server_jar=None)
         with (
             patch.object(devstack, "local_jars", return_value={}),
+            patch.object(devstack, "gameplay_pinned_jar", return_value=None),
             patch.dict(devstack.os.environ, {}, clear=True),
         ):
             with self.assertRaises(SystemExit):
                 devstack.resolve_server_jar(args.server_jar)
+
+    def test_pinned_gameplay_jar_used_when_no_local_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = Path(tmp) / "blockfield-server-1.65.0+mc1.21.1.jar"
+            jar.write_bytes(b"PK")
+            args = SimpleNamespace(server_jar=None)
+            with (
+                patch.object(devstack, "local_jars", return_value={}),
+                patch.object(devstack, "gameplay_pinned_jar", return_value=jar),
+                patch.dict(devstack.os.environ, {}, clear=True),
+            ):
+                self.assertEqual(devstack.resolve_server_jar(args.server_jar), jar)
+
+    def test_gameplay_pinned_jar_returns_none_without_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(devstack.gameplay_pinned_jar(Path(tmp) / "pack"))
+
+    def test_gameplay_pinned_jar_downloads_and_verifies(self):
+        import hashlib
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            modpack = root / "pack"
+            dist = modpack / "distribution"
+            dist.mkdir(parents=True)
+            scripts = modpack / "scripts"
+            scripts.mkdir()
+            data = b"PK fake gameplay server jar"
+            digest = hashlib.sha256(data).hexdigest()
+            name = "blockfield-server-1.65.0+mc1.21.1.jar"
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps(
+                    {
+                        "repository": "Blockfield/blockfield-gameplay",
+                        "tag": "v2.83.0",
+                        "files": {name: digest},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixture = root / "fixture.jar"
+            fixture.write_bytes(data)
+            (scripts / "fetch-gameplay-jar.py").write_text(
+                "import sys\n"
+                "from pathlib import Path\n"
+                "lock_at = Path(sys.argv[sys.argv.index('--lock') + 1])\n"
+                "out_at = Path(sys.argv[sys.argv.index('--out') + 1])\n"
+                "asset = sys.argv[-1]\n"
+                f"target = out_at / 'v2.83.0' / asset\n"
+                "target.parent.mkdir(parents=True, exist_ok=True)\n"
+                f"target.write_bytes(Path({str(fixture)!r}).read_bytes())\n"
+                "print(target)\n",
+                encoding="utf-8",
+            )
+            with patch.object(devstack, "INPUT_CACHE", root / "cache"):
+                jar = devstack.gameplay_pinned_jar(modpack)
+            self.assertEqual(jar.read_bytes(), data)
 
     def test_non_runtime_jar_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -925,12 +984,15 @@ class ServerJar(unittest.TestCase):
             home = Path(tmp)
             modpack = home / "pack"
             (modpack / "server").mkdir(parents=True)
+            gameplay = home / "gameplay"
+            (gameplay / "server" / "blockfield").mkdir(parents=True)
             jar = home / "blockfield-server-1.57.0+mc1.21.1.jar"
             jar.write_bytes(b"PK")
             seed = home / "seed.zip"
             seed.write_bytes(b"seed")
             with (
                 patch.object(devstack, "HOME", home),
+                patch.object(devstack, "GAMEPLAY", gameplay),
                 patch.object(devstack, "ensure_localmods"),
                 patch.object(devstack, "fetch_mod_jars"),
                 patch.object(devstack, "fetch_world_seed", return_value=seed),
@@ -940,6 +1002,38 @@ class ServerJar(unittest.TestCase):
             args = pack.call_args.args[0]
             self.assertIn("--server-jar", args)
             self.assertEqual(args[args.index("--server-jar") + 1], jar)
+            self.assertEqual(
+                args[args.index("--server-source") + 1], gameplay / "server"
+            )
+
+    def test_build_distribution_verifies_jar_against_gameplay_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            modpack = home / "pack"
+            dist = modpack / "distribution"
+            dist.mkdir(parents=True)
+            (dist / "gameplay.lock.json").write_text("{}")
+            gameplay = home / "gameplay"
+            (gameplay / "server" / "blockfield").mkdir(parents=True)
+            jar = home / "blockfield-server-1.57.0+mc1.21.1.jar"
+            jar.write_bytes(b"PK")
+            seed = home / "seed.zip"
+            seed.write_bytes(b"seed")
+            with (
+                patch.object(devstack, "HOME", home),
+                patch.object(devstack, "GAMEPLAY", gameplay),
+                patch.object(devstack, "ensure_localmods"),
+                patch.object(devstack, "fetch_mod_jars"),
+                patch.object(devstack, "fetch_world_seed", return_value=seed),
+                patch.object(devstack, "run_pack_build") as pack,
+            ):
+                devstack.build_distribution(modpack, modpack, jar)
+            args = pack.call_args.args[0]
+            self.assertIn("--gameplay-lock", args)
+            self.assertEqual(
+                args[args.index("--gameplay-lock") + 1],
+                dist / "gameplay.lock.json",
+            )
 
     def test_pack_build_forwards_server_jar_to_the_server_build(self):
         pack_build = importlib.util.module_from_spec(
@@ -956,8 +1050,10 @@ class ServerJar(unittest.TestCase):
                 "    raise AssertionError('no pins in this tree')\n"
                 "def build(args):\n"
                 f"    __import__('pathlib').Path({str(root / 'seen.txt')!r}).write_text(\n"
-                "        repr((str(args.server_jar), args.no_server_jar)))\n"
+                "        repr((str(args.server_jar), args.no_server_jar, str(args.gameplay_lock))))\n"
             )
+            lock = root / "gameplay.lock.json"
+            lock.write_text("{}")
             seed = root / "seed.zip"
             seed.write_bytes(b"seed")
             jar = root / "blockfield-server-1.57.0+mc1.21.1.jar"
@@ -979,11 +1075,13 @@ class ServerJar(unittest.TestCase):
                     "dev",
                     "--server-jar",
                     str(jar),
+                    "--gameplay-lock",
+                    str(lock),
                 ]
             )
             self.assertEqual(
                 (root / "seen.txt").read_text(),
-                repr((str(jar), False)),
+                repr((str(jar), False, str(lock))),
             )
 
 

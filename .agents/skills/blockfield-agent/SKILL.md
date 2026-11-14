@@ -33,8 +33,8 @@ personal opt-in: the Boat parts below apply only when the task owner opted in
    watches the PR and dispatches the findings round or the merge. Never
    copy scripts to /tmp, never `sleep`-poll output files.
    Push budget (default 2, brief may change): push 1 after green gates;
-   when a findings brief arrives, read the review App body and every unresolved inline thread
-   on the current head (checks and comments on older heads are superseded) and handle them per the `babysit-pr` skill (it wins over
+   when a findings brief arrives, read the review App body and every unresolved review thread,
+   including outdated ones from earlier heads (only checks on older heads are superseded), and handle them per the `babysit-pr` skill (it wins over
    this playbook on PR handling): verify each against the source, fix real bugs in one
    batch, decline the rest (unneeded tests, unimportant edge-case guards, extra
    compatibility) with a written reason, resolve those threads and list them as follow-up

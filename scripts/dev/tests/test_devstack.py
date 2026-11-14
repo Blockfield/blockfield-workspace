@@ -350,7 +350,13 @@ class WorldSeed(unittest.TestCase):
                 )
                 devstack.fetch_world_seed(pack)
                 self.assertEqual(
-                    str(pack / "scripts/fetch-world-seed.py"), calls[0][-1]
+                    [
+                        str(devstack.ROOT / "scripts/toolchain.py"),
+                        str(devstack.ROOT / "scripts/assets/fetch-world-seed.py"),
+                        "--root",
+                        str(pack),
+                    ],
+                    calls[0][-4:],
                 )
                 self.assertNotIn("gh", calls[0])
                 (pack / "sources" / "world-seed.zip").write_bytes(b"new seed")

@@ -3111,5 +3111,65 @@ class FfNextToMain(unittest.TestCase):
         self.assertEqual(git(side, "merge-base", "origin/main", "origin/next"), root)
 
 
+class SplitRepos(unittest.TestCase):
+    def lines(self, gh, run_code=0):
+        run = mock.Mock(returncode=run_code, stdout="", stderr="")
+        with (
+            mock.patch.object(release, "gh", side_effect=gh),
+            mock.patch.object(release, "run", return_value=run) as run_mock,
+        ):
+            got = release.split_repo_lines("dedicated", "Blockfield/blockfield-x")
+        return got, run_mock
+
+    def test_lists_latest_release_and_ahead_on_next(self):
+        def gh(*args):
+            if args[0] == "release":
+                return json.dumps([{"tagName": "v2.83.0"}])
+            return json.dumps({"ahead_by": 4})
+
+        got, _ = self.lines(gh)
+        self.assertEqual(
+            got,
+            [
+                "dedicated: last published v2.83.0, 4 unreleased commit(s) on origin/next"
+            ],
+        )
+
+    def test_main_when_next_is_missing(self):
+        def gh(*args):
+            if args[0] == "release":
+                return json.dumps([{"tagName": "v2.83.0"}])
+            return json.dumps({"ahead_by": 0})
+
+        got, run_mock = self.lines(gh, run_code=1)
+        self.assertEqual(
+            got,
+            [
+                "dedicated: last published v2.83.0, 0 unreleased commit(s) on origin/main"
+            ],
+        )
+        self.assertIn("branches/next", run_mock.call_args.args[2])
+
+    def test_no_published_releases(self):
+        with mock.patch.object(release, "gh", return_value="[]") as gh:
+            got = release.split_repo_lines("gameplay", "Blockfield/blockfield-x")
+        gh.assert_called_once()
+        self.assertEqual(got, ["gameplay: no published releases"])
+
+    def test_failures_degrade_to_lines(self):
+        got, _ = self.lines(mock.Mock(side_effect=RuntimeError("boom")))
+        self.assertEqual(len(got), 1)
+        self.assertIn("releases unreadable", got[0])
+
+        def gh(*args):
+            if args[0] == "release":
+                return json.dumps([{"tagName": "v2.83.0"}])
+            raise RuntimeError("gone")
+
+        got, _ = self.lines(gh)
+        self.assertEqual(len(got), 1)
+        self.assertIn("last published v2.83.0 (compare unreadable", got[0])
+
+
 if __name__ == "__main__":
     unittest.main()

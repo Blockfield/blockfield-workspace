@@ -122,6 +122,7 @@ def pin_version(text):
 
 # Game jar asset in distribution/gameplay.lock.json (server PR #475):
 # blockfield-server-<mod_version>+mc<mc>.jar carries the gameplay version.
+LOCK_ENTRY_RE = re.compile(r"blockfield-(server|workshop)-[^/\s]+\.jar")
 LOCK_ASSET_RE = re.compile(
     r"blockfield-server-(\d+\.\d+\.\d+)(?:\+mc\d+\.\d+\.\d+)?\.jar"
 )
@@ -134,20 +135,38 @@ def lock_mod_version(server_root):
     jar asset also returns None so the caller falls back to gradle.properties.
     """
     path = Path(server_root) / "distribution" / "gameplay.lock.json"
-    if not path.is_file():
+    if not path.exists() and not path.is_symlink():
         return None
+    if not path.is_file():
+        raise ValueError(f"gameplay lock is not a regular file: {path}")
     try:
         pin = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ValueError(f"gameplay lock unreadable: {error}") from error
-    files = pin.get("files") if isinstance(pin, dict) else None
-    if not isinstance(files, dict):
+    if (
+        not isinstance(pin, dict)
+        or not isinstance(pin.get("repository"), str)
+        or not re.fullmatch(r"[^/\s]+/[^/\s]+", pin["repository"])
+        or not isinstance(pin.get("tag"), str)
+        or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", pin["tag"])
+        or not isinstance(pin.get("files"), dict)
+        or not pin["files"]
+    ):
         raise ValueError(f"invalid gameplay lock: {path}")
-    for name in files:
-        match = LOCK_ASSET_RE.fullmatch(name or "")
+    versions = []
+    for name, sha in pin["files"].items():
+        if (
+            not LOCK_ENTRY_RE.fullmatch(name)
+            or not isinstance(sha, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha)
+        ):
+            raise ValueError(f"invalid gameplay lock entry: {name}")
+        match = LOCK_ASSET_RE.fullmatch(name)
         if match:
-            return match.group(1)
-    return None
+            versions.append(match.group(1))
+    if len(versions) > 1:
+        raise ValueError(f"multiple game jar entries in gameplay lock: {path}")
+    return versions[0] if versions else None
 
 
 def server_mod_source(server_root):

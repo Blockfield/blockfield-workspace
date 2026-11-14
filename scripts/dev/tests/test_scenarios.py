@@ -1284,20 +1284,59 @@ class RcBattery(unittest.TestCase):
             self.assertEqual(rc.server_mod_source(Path(tmp)), ("1.57.0", None))
 
     def test_server_mod_source_rejects_invalid_lock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dist = Path(tmp) / "distribution"
-            dist.mkdir()
-            (dist / "gameplay.lock.json").write_text("{no json", encoding="utf-8")
-            with self.assertRaises(ValueError):
-                rc.server_mod_source(Path(tmp))
-        with tempfile.TemporaryDirectory() as tmp:
-            dist = Path(tmp) / "distribution"
-            dist.mkdir()
-            (dist / "gameplay.lock.json").write_text(
-                json.dumps({"files": ["not-a-dict"]}), encoding="utf-8"
-            )
-            with self.assertRaises(ValueError):
-                rc.server_mod_source(Path(tmp))
+        base = {
+            "repository": "Blockfield/blockfield-server",
+            "tag": "v2.82.0",
+            "files": {"blockfield-server-1.57.0+mc1.21.1.jar": "b" * 64},
+        }
+        invalid_payloads = [
+            "{no json",
+            json.dumps({**base, "files": ["not-a-dict"]}),
+            json.dumps({**base, "repository": "invalid-repo"}),
+            json.dumps({**base, "tag": "2.82.0"}),
+            json.dumps({**base, "files": {}}),
+            json.dumps({**base, "files": {"other-1.57.0.jar": "b" * 64}}),
+            json.dumps(
+                {**base, "files": {"blockfield-server-1.57.0+mc1.21.1.jar": None}}
+            ),
+            json.dumps(
+                {**base, "files": {"blockfield-server-1.57.0+mc1.21.1.jar": "B" * 64}}
+            ),
+            json.dumps(
+                {
+                    **base,
+                    "files": {
+                        "blockfield-server-1.57.0+mc1.21.1.jar": "a" * 64,
+                        "blockfield-server-1.58.0+mc1.21.1.jar": "b" * 64,
+                    },
+                }
+            ),
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp:
+                dist = Path(tmp) / "distribution"
+                dist.mkdir()
+                (dist / "gameplay.lock.json").write_text(payload, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    rc.server_mod_source(Path(tmp))
+
+    def test_server_mod_source_rejects_non_regular_lock_path(self):
+        for kind in ("dir", "dangling-symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                dist = Path(tmp) / "distribution"
+                dist.mkdir()
+                lock = dist / "gameplay.lock.json"
+                if kind == "dir":
+                    lock.mkdir()
+                else:
+                    lock.symlink_to(dist / "missing.json")
+                props = Path(tmp) / "mod-server"
+                props.mkdir()
+                (props / "gradle.properties").write_text(
+                    "mod_version=1.57.0\n", encoding="utf-8"
+                )
+                with self.assertRaises(ValueError):
+                    rc.server_mod_source(Path(tmp))
 
     def test_loaded_version_prefers_commit_pair(self):
         self.assertEqual(

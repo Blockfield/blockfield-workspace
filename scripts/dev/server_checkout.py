@@ -1,8 +1,10 @@
-"""Materialize the private server checkout pinned by pins/server.sha.
+"""Materialize the pack-root and lobby-source checkouts pinned by pins/.
 
-The public workspace cannot track the private server as a submodule, so
-developers with access clone it beside this checkout, detached at the
-recorded SHA: `just server-checkout`. Idempotent; fails loudly without access.
+The public workspace tracks neither repo as a submodule: dedicated (the
+server pack root) is a separate public repo and gameplay (the lobby sources)
+is private. Developers materialize both beside this checkout, detached at
+the recorded SHAs: `just server-checkout`. Idempotent; fails loudly without
+access.
 """
 
 import subprocess
@@ -10,20 +12,28 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SERVER_URL = "https://github.com/Blockfield/blockfield-server.git"
+DEDICATED_URL = "https://github.com/Blockfield/blockfield-dedicated.git"
+GAMEPLAY_URL = "https://github.com/Blockfield/blockfield-gameplay.git"
+
+# dirname beside the workspace root, pin file, clone URL. The dedicated
+# checkout keeps the historical `server/` path, so it stays the pack root.
+CHECKOUTS = (
+    ("server", "pins/dedicated.sha", DEDICATED_URL),
+    ("gameplay", "pins/gameplay.sha", GAMEPLAY_URL),
+)
 
 
 def die(message):
     raise SystemExit(f"server-checkout: {message}")
 
 
-def pinned_sha(root=ROOT):
+def pinned_sha(root=ROOT, pin="pins/dedicated.sha"):
     try:
-        sha = (root / "pins" / "server.sha").read_text(encoding="utf-8").strip()
+        sha = (root / pin).read_text(encoding="utf-8").strip()
     except OSError:
-        die("pins/server.sha is missing: restore it from the workspace checkout")
+        die(f"{pin} is missing: restore it from the workspace checkout")
     if not sha:
-        die("pins/server.sha is empty")
+        die(f"{pin} is empty")
     return sha
 
 
@@ -47,14 +57,30 @@ def git_output(*args, cwd):
         die(f"git {' '.join(args)} failed in {cwd}: {error}")
 
 
-def checkout_server(root=ROOT, url=SERVER_URL):
-    """Clone server/ beside the workspace and pin it detached at pins/server.sha."""
-    sha = pinned_sha(root)
-    target = root / "server"
+def checkout_repo(root, dirname, url, pin):
+    """Clone the checkout beside the workspace and pin it detached at the pin."""
+    sha = pinned_sha(root, pin)
+    target = root / dirname
     if target.is_dir() and not (target / ".git").exists():
         die(f"{target} exists but is not a git checkout: move it aside first")
     if not target.exists():
         run_git("clone", url, str(target), cwd=root)
+    else:
+        # Workspaces predating the dedicated/gameplay split still point
+        # server/ at the archived blockfield-server repo, whose history
+        # never contains the dedicated pin: repoint before fetching.
+        current = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=target,
+            capture_output=True,
+            text=True,
+        )
+        leaf = current.stdout.strip().rstrip("/").split("/")[-1].split(":")[-1]
+        if current.returncode == 0 and leaf in (
+            "blockfield-server",
+            "blockfield-server.git",
+        ):
+            run_git("remote", "set-url", "origin", url, cwd=target)
     run_git("fetch", "origin", cwd=target)
     if git_output("status", "--porcelain", "--untracked-files=no", cwd=target):
         die(f"{target} has local changes: stash, commit or reset them first")
@@ -71,9 +97,18 @@ def checkout_server(root=ROOT, url=SERVER_URL):
     return target
 
 
+def checkout_pair(root=ROOT):
+    """Check out dedicated (pack root) and gameplay (lobby source)."""
+    return [checkout_repo(root, dirname, url, pin) for dirname, pin, url in CHECKOUTS]
+
+
 def main():
-    checkout_server()
-    print(f"server ready at {pinned_sha()} (server/)")
+    dedicated, gameplay = checkout_pair()
+    print(
+        f"dedicated ready at {pinned_sha(pin='pins/dedicated.sha')} (server/), "
+        f"gameplay ready at {pinned_sha(pin='pins/gameplay.sha')} (gameplay/)"
+    )
+    return dedicated, gameplay
 
 
 if __name__ == "__main__":

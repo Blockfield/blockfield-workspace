@@ -58,7 +58,10 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 CLIENT_PACK = ROOT / "client"  # blockfield-client submodule: pins, client archives
 SERVER_PACK = (
     ROOT / "server"
-)  # blockfield-server submodule: pins, world seed, build-distribution.py
+)  # blockfield-dedicated checkout: pins, world seed, build-distribution.py
+GAMEPLAY = (
+    ROOT / "gameplay"
+)  # blockfield-gameplay checkout: lobby sources for --server-source
 LOCALMODS = (
     ROOT / "localmods"
 )  # submodules of blockfield-mod + forks, see localmods/mods.json.example
@@ -236,7 +239,7 @@ def modpack_dir(argument=None, side="server"):
     die(
         f"{side} pack not found: run from the blockfield-workspace checkout or pass --modpack"
         if side != "server"
-        else f"{side} pack not found: run `just server-checkout` first (needs access to the private server repo)"
+        else f"{side} pack not found: run `just server-checkout` first (gameplay needs access to the private gameplay repo)"
     )
 
 
@@ -537,11 +540,64 @@ def pinned_jar_ok(jar, metadata):
     return hashlib.new(algorithm, jar.read_bytes()).hexdigest() == expected
 
 
-def resolve_server_jar(explicit=None):
-    """Blockfield server jar for the stand: explicit Boat/CI build or the localmods build.
+def gameplay_pinned_jar(modpack):
+    """Game jar pinned by the pack's gameplay lock, or None without a lock.
 
-    The download pin is gone: the jar is built from mod-server (:server:remapJar),
-    never downloaded. Precedence: explicit path, BF_SERVER_JAR, localmods/ build.
+    The dedicated checkout ships scripts/fetch-gameplay-jar.py, which reads
+    distribution/gameplay.lock.json and verifies the sha256. The jar lands in
+    the shared input cache, so it downloads once per pinned tag.
+    """
+    modpack = Path(modpack)
+    lock = modpack / "distribution" / "gameplay.lock.json"
+    script = modpack / "scripts" / "fetch-gameplay-jar.py"
+    try:
+        pin = json.loads(lock.read_text(encoding="utf-8"))
+        names = [
+            name
+            for name in pin.get("files", {})
+            if name.startswith("blockfield-server-") and name.endswith(".jar")
+        ]
+        tag = pin.get("tag", "")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if len(names) != 1 or not re.fullmatch(r"v\d+\.\d+\.\d+", tag or ""):
+        return None
+    if not script.is_file():
+        return None
+    cache = INPUT_CACHE / "gameplay"
+    run(
+        [
+            sys.executable,
+            "-I",
+            "-X",
+            "utf8",
+            str(script),
+            "--lock",
+            str(lock),
+            "--out",
+            str(cache),
+            names[0],
+        ],
+        message=f"Downloading {names[0]}",
+    )
+    jar = cache / tag / names[0]
+    try:
+        if (
+            jar.is_file()
+            and hashlib.sha256(jar.read_bytes()).hexdigest() == pin["files"][names[0]]
+        ):
+            return jar
+    except OSError:
+        pass
+    return None
+
+
+def resolve_server_jar(explicit=None, modpack=None):
+    """Blockfield server jar for the stand: explicit, local, or pinned build.
+
+    The download pin is gone: the jar is built from gameplay sources, never
+    from the workspace. Precedence: explicit path, BF_SERVER_JAR, localmods/
+    build, pinned gameplay release (distribution/gameplay.lock.json).
     """
     explicit = explicit or os.environ.get("BF_SERVER_JAR")
     if explicit:
@@ -558,9 +614,13 @@ def resolve_server_jar(explicit=None):
     jar = local_jars(ROOT).get("blockfield-server.pw.toml")
     if jar and jar.is_file():
         return jar
+    jar = gameplay_pinned_jar(modpack or SERVER_PACK)
+    if jar is not None:
+        return jar
     die(
         "no server jar: run `just build-mods blockfield-mod` (Gradle runs on a Boat VM,"
-        " never here), or pass --server-jar with a :server:remapJar output (BF_SERVER_JAR)"
+        " never here), check out the pinned pair (`just server-checkout`),"
+        " or pass --server-jar with a :server:remapJar output (BF_SERVER_JAR)"
     )
 
 
@@ -588,7 +648,7 @@ def fetch_mod_jars(modpack, client_pack=None):
 
     Server pack owns files/mods/; per-side metafiles live in their submodules.
     Metafiles covered by a localmods/ build are skipped: the jar comes from sources.
-    The server mod jar is never downloaded: it is built from mod-server
+    The server mod jar is not a pack pin: it is built from gameplay sources
     (see resolve_server_jar()) and enters the distribution through --server-jar.
     """
     client_pack = client_pack or CLIENT_PACK
@@ -722,14 +782,24 @@ def enable_proxy_mods():
 
 
 def build_distribution(modpack, client_pack=None, server_jar=None):
-    """Same build CI runs: mods, configs and a complete server tree."""
+    """Same build CI runs: mods, configs and a complete server tree.
+
+    The pack root is the dedicated checkout; lobby sources come from the
+    gameplay checkout beside it (`just server-checkout` materializes both).
+    """
     ensure_localmods()
     if client_pack is None:
         fetch_mod_jars(modpack)
     else:
         fetch_mod_jars(modpack, client_pack)
     seed = fetch_world_seed(modpack)
-    jar = resolve_server_jar(server_jar)
+    jar = resolve_server_jar(server_jar, modpack)
+    source = GAMEPLAY / "server"
+    if not (source / "blockfield").is_dir():
+        die(
+            f"gameplay lobby sources not found in {source}: run `just server-checkout`"
+            " first (needs access to the private gameplay repo)"
+        )
     out = HOME / "dist"
     shutil.rmtree(out, ignore_errors=True)
     HOME.mkdir(parents=True, exist_ok=True)
@@ -739,15 +809,19 @@ def build_distribution(modpack, client_pack=None, server_jar=None):
         "--out",
         out,
         "--server-source",
-        modpack.resolve() / "server",
+        source.resolve(),
         "--world-seed",
         seed,
         "--build-id",
         "dev",
     ]
-    # The game image jar is built from mod-server, never downloaded; older
-    # build-distribution.py ignores the extra namespace entries.
+    # The game image jar is built from gameplay sources and pinned by the
+    # dedicated checkout's gameplay lock; the build verifies it against the
+    # lock when present. Older build-distribution.py ignores the extra entry.
     pack_args += ["--server-jar", jar]
+    lock = Path(modpack) / "distribution" / "gameplay.lock.json"
+    if lock.is_file():
+        pack_args += ["--gameplay-lock", lock]
     run_pack_build(
         pack_args,
         cwd=modpack,
@@ -994,6 +1068,7 @@ def setup(args):
         for sub in [
             ROOT,
             ROOT / "server",
+            ROOT / "gameplay",
             ROOT / "client",
             *(LOCALMODS.iterdir() if LOCALMODS.is_dir() else []),
         ]
@@ -2638,7 +2713,8 @@ def stand(args):
     Same work as `just setup` + `just server start` + `just play`, in one
     process: no agent roundtrips between phases, one log stream per phase.
     The server jar still comes from `--server-jar` (Boat/CI `:server:remapJar`
-    output) or the localmods/ build, exactly like `just setup`.
+    output), the localmods/ build, or the pinned gameplay release,
+    exactly like `just setup`.
     """
     clients = int(getattr(args, "clients", 1) or 1)
     if getattr(args, "game_dir", None) and clients != 1:
@@ -3114,8 +3190,8 @@ def main():
         default=None,
         metavar="JAR",
         help="Boat/CI-built blockfield-server jar (:server:remapJar output) for the stand"
-        " (default: the localmods/ build; never downloaded; an explicit jar that"
-        " differs from the installed one rebuilds the stand)",
+        " (default: the localmods/ build, else the pinned gameplay release;"
+        " an explicit jar that differs from the installed one rebuilds the stand)",
     )
     p.set_defaults(func=setup)
 
@@ -3312,7 +3388,8 @@ def main():
         "--server-jar",
         default=None,
         metavar="JAR",
-        help="Boat/CI-built blockfield-server jar (:server:remapJar output) for the stand",
+        help="Boat/CI-built blockfield-server jar (:server:remapJar output) for the stand"
+        " (default: the localmods/ build, else the pinned gameplay release)",
     )
     p.add_argument(
         "--clients",

@@ -195,34 +195,43 @@ def local_repo_present(rel):
     return (ROOT / rel / ".git").exists() if rel else True
 
 
-def pinned_server_sha(ws_commit=None):
-    """Pinned server SHA for the wanted workspace commit.
+# The pack root (dedicated, in server/) and the lobby source (gameplay) are
+# git-ignored, not submodules, so neither ls-tree nor submodule status lists
+# them (a public repo cannot track the private gameplay repo). Their pins
+# live in pins/dedicated.sha and pins/gameplay.sha.
+PINS = {
+    "server": "pins/dedicated.sha",
+    "gameplay": "pins/gameplay.sha",
+}
 
-    The private server is not a submodule (a public repo cannot track a
-    private one): its pin lives in pins/server.sha. Prefer the pin recorded
-    at the wanted workspace commit (so --branch/--workspace-sha transfer the
-    pin they point at). A missing or empty pin at the requested commit fails
-    loudly: falling back to the worktree file would silently test an
-    unrelated server revision. Without a commit, read the worktree file,
-    which fails loudly when missing or empty.
+
+def pinned_sha(ws_commit, pin):
+    """Pinned checkout SHA for the wanted workspace commit.
+
+    Prefer the pin recorded at the wanted workspace commit (so
+    --branch/--workspace-sha transfer the pin they point at). A missing or
+    empty pin at the requested commit fails loudly: falling back to the
+    worktree file would silently test an unrelated checkout revision.
+    Without a commit, read the worktree file, which fails loudly when
+    missing or empty.
     """
     if ws_commit:
-        out = run_git("show", f"{ws_commit}:pins/server.sha", cwd=ROOT, check=False)
+        out = run_git("show", f"{ws_commit}:{pin}", cwd=ROOT, check=False)
         if out.returncode != 0:
             raise SystemExit(
-                f"no pins/server.sha at {ws_commit}: refusing to fall back to "
-                "the worktree pin (it would test an unrelated server revision)"
+                f"no {pin} at {ws_commit}: refusing to fall back to "
+                "the worktree pin (it would test an unrelated checkout revision)"
             )
         if not out.stdout.strip():
             raise SystemExit(
-                f"pins/server.sha at {ws_commit} is empty: refusing to fall "
+                f"{pin} at {ws_commit} is empty: refusing to fall "
                 "back to the worktree pin (it would test an unrelated revision)"
             )
         return out.stdout.strip()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import server_checkout
 
-    return server_checkout.pinned_sha(ROOT)
+    return server_checkout.pinned_sha(ROOT, pin)
 
 
 def local_shas(args):
@@ -251,31 +260,34 @@ def local_shas(args):
             if line:
                 sha, name = line.split()[:2]
                 wanted[name] = sha
-    # The server is git-ignored, not a submodule, so neither ls-tree nor
-    # submodule status lists it: without this the VM keeps the golden's
-    # stale server checkout while the task tests pinned server code.
-    wanted["server"] = pinned_server_sha(wanted[""])
+    # The server and gameplay checkouts are git-ignored, not submodules, so
+    # neither ls-tree nor submodule status lists them: without this the VM
+    # keeps the golden's stale checkouts while the task tests pinned code.
+    for name, pin in PINS.items():
+        wanted[name] = pinned_sha(wanted[""], pin)
     if args.with_worktree:
         head = run_git("rev-parse", "HEAD", cwd=ROOT, check=False)
         if head.returncode == 0 and head.stdout.strip() == wanted[""]:
             # The workspace patch (if any) applies onto wanted[""], so the
-            # pin that lands on the VM is the worktree file: an uncommitted
-            # pins/server.sha change must win over the committed pin.
-            # (Otherwise the patch installs the new pin while the server
-            # stays at the old SHA.) Fails loudly when the worktree pin is
+            # pins that land on the VM are the worktree files: an uncommitted
+            # pin change must win over the committed pins.
+            # (Otherwise the patch installs the new pins while the checkouts
+            # stay at the old SHAs.) Fails loudly when a worktree pin is
             # missing or empty.
-            wanted["server"] = pinned_server_sha()
+            for name, pin in PINS.items():
+                wanted[name] = pinned_sha(None, pin)
     for item in args.submodule:
         name, _, sha = item.partition("=")
         if not name or not sha:
             raise SystemExit(f"bad --submodule {item!r}, want PATH=SHA")
         repo = ROOT / name
         if not local_repo_present(name):
-            hint = (
-                "`just server-checkout` first (needs access to the private server repo)"
-                if name == "server"
-                else f"`git submodule update --init {name}` first"
-            )
+            if name == "server":
+                hint = "`just server-checkout` first (the dedicated checkout is public)"
+            elif name == "gameplay":
+                hint = "`just server-checkout` first (needs access to the private gameplay repo)"
+            else:
+                hint = f"`git submodule update --init {name}` first"
             raise SystemExit(
                 f"bad --submodule {item!r}: no initialized checkout at {name}; "
                 f"run {hint}"
@@ -803,19 +815,27 @@ GH_CREDENTIAL = "credential.https://github.com.helper=!gh auth git-credential"
 def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
     """Check out the exact commit on the VM, transferring objects if needed."""
     remote = f"{remote_root}/{rel}".rstrip("/")
-    if rel == "server":
-        # Not a submodule (no .gitmodules entry): clone the private server
-        # repo directly. Boat puts the GitHub token only into its own clones
+    if rel in ("server", "gameplay"):
+        # Not a submodule (no .gitmodules entry): server/ holds the public
+        # dedicated checkout, gameplay/ the private gameplay checkout. Clone
+        # directly; Boat puts the GitHub token only into its own clones
         # and gh, not into git's global config.
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import server_checkout
 
-        url = server_checkout.SERVER_URL
+        url = {
+            "server": server_checkout.DEDICATED_URL,
+            "gameplay": server_checkout.GAMEPLAY_URL,
+        }[rel]
         rc, out = vm_exec(
             vm_id,
             f"test -e {shlex.quote(remote + '/.git')} || {{ "
             f"{{ git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)} || "
             f"git clone -q -c {shlex.quote(GH_CREDENTIAL)} {shlex.quote(url)} {shlex.quote(remote)}; }}; }} && "
+            # Golden VMs predate the dedicated/gameplay split: their server/
+            # origin is still the archived blockfield-server repo, which never
+            # contains the dedicated pin. Repoint before fetching.
+            f"git -C {shlex.quote(remote)} remote set-url origin {shlex.quote(url)} && "
             # A fresh clone starts with hooks unwired: point it at the versioned
             # hooks when they exist and no explicit choice was made (best-effort).
             f"{{ test -d {shlex.quote(remote + '/.githooks')} && "
@@ -824,7 +844,7 @@ def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
             f"git -C {shlex.quote(remote)} config core.hooksPath .githooks || true; }}",
         )
         if rc != 0:
-            raise RuntimeError(f"cannot initialize server checkout:\n{out}")
+            raise RuntimeError(f"cannot initialize {rel} checkout:\n{out}")
     elif rel:
         rc, out = vm_exec(
             vm_id,
@@ -868,11 +888,12 @@ def ensure_repo(vm_id, remote_root, home, rel, want, stage_dir):
     if not (rc == 0 and out.strip() == want):
         # Local-only commits: ship the delta as a bundle (never via origin).
         if not local_repo_present(rel):
-            hint = (
-                "`just server-checkout` first (needs access to the private server repo)"
-                if rel == "server"
-                else f"`git submodule update --init {rel}` first"
-            )
+            if rel == "server":
+                hint = "`just server-checkout` first (the dedicated checkout is public)"
+            elif rel == "gameplay":
+                hint = "`just server-checkout` first (needs access to the private gameplay repo)"
+            else:
+                hint = f"`git submodule update --init {rel}` first"
             raise RuntimeError(
                 f"want {want} in {rel or 'workspace'} is not on the VM and the "
                 f"local checkout of {rel} is not initialized; run {hint}"
@@ -1140,17 +1161,17 @@ def wait_state(vm_id, want=("stopped",), timeout=240):
 BOAT_APPLIED_PATHS = ".git/boat-applied-paths"
 
 
-def reset_stale_server(vm_id, remote_root, want):
-    """Reset a dirty remote server tree to the pin when no patch ships.
+def reset_stale_checkout(vm_id, remote_root, rel, want):
+    """Reset a dirty remote checkout tree to the pin when no patch ships.
 
-    A reused warm VM still carries the previous run's applied server patch
+    A reused warm VM still carries the previous run's applied patch
     while remote_shas reports a matching HEAD, so without this the run
-    tests stale server edits despite a clean local server. ensure_worktree
+    tests stale edits despite a clean local tree. ensure_worktree
     records every applied path in .git/boat-applied-paths; any recorded path
     the pin does not track is removed explicitly (plain `clean -fd` keeps
     ignored files, while `-x` would wipe build caches).
     """
-    remote = f"{remote_root}/server"
+    remote = f"{remote_root}/{rel}"
     marker = f"{remote}/{BOAT_APPLIED_PATHS}"
     mrc, applied = vm_exec(vm_id, f"cat {shlex.quote(marker)} 2>/dev/null")
     recorded = applied if mrc == 0 and applied.strip() else ""
@@ -1204,19 +1225,21 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             name = f"{(rel or 'workspace').replace('/', '_')}.patch"
             (stage_dir / name).write_bytes(patch)
             patches[rel] = name
-    if "server" in wanted and "server" not in patches:
-        reset_stale_server(vm_id, remote_root, wanted["server"])
+    if "server" in wanted or "gameplay" in wanted:
+        for rel in ("server", "gameplay"):
+            if rel in wanted and rel not in patches:
+                reset_stale_checkout(vm_id, remote_root, rel, wanted[rel])
     if not patches:
         return 0
     run_boat("push", vm_id, str(stage_dir))
     for rel, name in patches.items():
         remote = f"{remote_root}/{rel}".rstrip("/")
         guest = f"{home}/{stage_dir.name}/{name}"
-        if rel == "server":
+        if rel in ("server", "gameplay"):
             # A reused warm VM still carries the previous run's applied patch,
             # including ignored files `git status` cannot see: the recorded
             # applied paths drive their removal.
-            reset_stale_server(vm_id, remote_root, wanted[rel])
+            reset_stale_checkout(vm_id, remote_root, rel, wanted[rel])
         else:
             # A reused warm VM still carries the previous run's applied patch,
             # so apply --check would fail on the leftovers: reset to want
@@ -1250,7 +1273,7 @@ def ensure_worktree(vm_id, remote_root, home, wanted, stage_dir):
             raise RuntimeError(
                 f"worktree patch apply failed for {rel or 'workspace'}:\n{out}"
             )
-        if rel == "server":
+        if rel in ("server", "gameplay"):
             # Record every applied path so a later clean run can remove stale
             # leftovers the status probe cannot see (e.g. ignored files).
             marker = f"{remote}/{BOAT_APPLIED_PATHS}"
@@ -1570,10 +1593,11 @@ def main(argv=None):
             patched = ensure_worktree(vm_id, remote_root, home, wanted, stage_dir)
         else:
             patched = 0
-            if "server" in wanted:
-                # --no-worktree ships no patch, so a previous run's server
-                # patch must still be dropped.
-                reset_stale_server(vm_id, remote_root, wanted["server"])
+            for rel in ("server", "gameplay"):
+                if rel in wanted:
+                    # --no-worktree ships no patch, so a previous run's patch
+                    # must still be dropped.
+                    reset_stale_checkout(vm_id, remote_root, rel, wanted[rel])
         env_file = write_env(vm_id, remote_root, args.task)
         bf_home = f"{remote_root}/.dev/{args.task}"
         installed = []

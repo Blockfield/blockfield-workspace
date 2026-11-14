@@ -709,7 +709,7 @@ class PortablemcEnvironment(unittest.TestCase):
             devstack.process_runtime_matches({**record, "pid": 2147483647}, cwd)
         )
 
-    def test_distribution_uses_the_server_checkout_as_lobby_source(self):
+    def test_distribution_uses_the_gameplay_checkout_as_lobby_source(self):
         sys.path.insert(0, str(bf.ROOT / "scripts/dev"))
         import devstack
 
@@ -730,11 +730,14 @@ class PortablemcEnvironment(unittest.TestCase):
         ):
             checkout = Path(tmp) / "server checkout"
             checkout.mkdir()
-            devstack.build_distribution(checkout)
+            gameplay = Path(tmp) / "gameplay"
+            (gameplay / "server" / "blockfield").mkdir(parents=True)
+            with patch.object(devstack, "GAMEPLAY", gameplay):
+                devstack.build_distribution(checkout)
             command = build.call_args.args[0]
             self.assertEqual(
                 command[command.index("--server-source") + 1],
-                checkout.resolve() / "server",
+                gameplay / "server",
             )
             self.assertEqual(build.call_args.kwargs["cwd"], checkout)
             self.assertEqual(

@@ -194,7 +194,8 @@ def main(argv=None):
             args.timeout,
         )
         print(out.strip())
-        # Private server is not a submodule: materialize at the pin when access exists.
+        # Dedicated (pack root) and gameplay (lobby source) are not submodules:
+        # materialize both at the pins when access exists.
         step(
             vm_id,
             timings,
@@ -202,7 +203,9 @@ def main(argv=None):
             f"cd {remote_root} && (just server-checkout || "
             "python3 scripts/dev/server_checkout.py || echo NO-SERVER-ACCESS) && "
             "if [ -d server/.git ]; then git -C server rev-parse HEAD; else "
-            "echo NO-SERVER-ACCESS; fi",
+            "echo NO-SERVER-ACCESS; fi && "
+            "if [ -d gameplay/.git ]; then git -C gameplay rev-parse HEAD; else "
+            "echo NO-GAMEPLAY-ACCESS; fi",
             args.timeout,
             check=False,
         )

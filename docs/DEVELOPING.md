@@ -342,12 +342,13 @@ Carpet не входит. Чтобы добавить его в существу
 Переменные `BF_MODPACK` и `BF_CLIENT_MODPACK` задают отдельные fallback-пути серверного и клиентского паков.
 Сборка всех исходников `localmods/` выполняется отдельно через `just build-mods`: setup использует
 уже собранные локальные JAR, а для остальных модов — опубликованные пины.
-Серверный JAR мода — исключение: он не скачивается. Стенд берёт его из локальной
-сборки `blockfield-mod` (`just build-mods blockfield-mod`; Gradle — только на Boat VM)
-или из `--server-jar`/`BF_SERVER_JAR` (Boat/CI-сборка `:server:remapJar`, входит
-в дистрибутив через `--server-jar` серверного `build-distribution.py`), а версию
-сверяет с `server/distribution/gameplay.lock.json` (когда лока нет —
-с `mod_version` из `server/mod-server/gradle.properties`). Явно указанный
+Серверный JAR мода — исключение: он не входит в пак. Стенд берёт его из локальной
+сборки `blockfield-mod` (`just build-mods blockfield-mod`; Gradle — только на Boat VM),
+из `--server-jar`/`BF_SERVER_JAR` (Boat/CI-сборка `:server:remapJar`, входит
+в дистрибутив через `--server-jar` серверного `build-distribution.py`),
+а без них скачивает выпуск, запиненный в `server/distribution/gameplay.lock.json`
+(сборка сверяет его checksum; версия мода — из того же лока, запасной вариант —
+`mod_version` из `gameplay/mod-server/gradle.properties`). Явно указанный
 JAR (`--server-jar`/`BF_SERVER_JAR`) тоже решает, пересобирать ли стенд: байты
 установленного JAR сравниваются с запрошенными, расхождение пересобирает runtime.
 Для каждого мода стенд сравнивает checkout с пином из metafile (`.../releases/download/<tag>/...`):
@@ -580,8 +581,7 @@ just scenario rc [--map hamburg] [--hitreg-shots 10]
 Батарея релиз-кандидата: сначала сверяет загруженный мод (`bf version`, логи
 клиента/сервера) с пином `client/mods/blockfield-client.pw.toml` и
 `server/distribution/gameplay.lock.json` (когда лока нет — с `mod_version`
-из `server/mod-server/gradle.properties`; пин скачиваемого
-серверного JAR удалён: Game-образ собирает JAR из `mod-server`) —
+из `gameplay/mod-server/gradle.properties`) —
 расхождение останавливает прогон;
 дальше идут first-shot после деплоя, планшет в лобби, килл на дистанции,
 смерть/респаун TDM на `spawn:BASE`, дым hitreg, скан логов и `save-all`.

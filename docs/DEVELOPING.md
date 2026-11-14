@@ -346,7 +346,8 @@ Carpet не входит. Чтобы добавить его в существу
 сборки `blockfield-mod` (`just build-mods blockfield-mod`; Gradle — только на Boat VM)
 или из `--server-jar`/`BF_SERVER_JAR` (Boat/CI-сборка `:server:remapJar`, входит
 в дистрибутив через `--server-jar` серверного `build-distribution.py`), а версию
-сверяет с `mod_version` из `server/mod-server/gradle.properties`. Явно указанный
+сверяет с `server/distribution/gameplay.lock.json` (когда лока нет —
+с `mod_version` из `server/mod-server/gradle.properties`). Явно указанный
 JAR (`--server-jar`/`BF_SERVER_JAR`) тоже решает, пересобирать ли стенд: байты
 установленного JAR сравниваются с запрошенными, расхождение пересобирает runtime.
 Для каждого мода стенд сравнивает checkout с пином из metafile (`.../releases/download/<tag>/...`):
@@ -578,7 +579,8 @@ just scenario rc [--map hamburg] [--hitreg-shots 10]
 
 Батарея релиз-кандидата: сначала сверяет загруженный мод (`bf version`, логи
 клиента/сервера) с пином `client/mods/blockfield-client.pw.toml` и
-`mod_version` из `server/mod-server/gradle.properties` (пин скачиваемого
+`server/distribution/gameplay.lock.json` (когда лока нет — с `mod_version`
+из `server/mod-server/gradle.properties`; пин скачиваемого
 серверного JAR удалён: Game-образ собирает JAR из `mod-server`) —
 расхождение останавливает прогон;
 дальше идут first-shot после деплоя, планшет в лобби, килл на дистанции,

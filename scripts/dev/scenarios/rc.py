@@ -120,13 +120,48 @@ def pin_version(text):
     return match.group(1)
 
 
-def server_mod_source(server_root):
-    """(mod_version, upstreamCommit) from the server checkout's mod-server sources.
+# Game jar asset in distribution/gameplay.lock.json (server PR #475):
+# blockfield-server-<mod_version>+mc<mc>.jar carries the gameplay version.
+LOCK_ASSET_RE = re.compile(
+    r"blockfield-server-(\d+\.\d+\.\d+)(?:\+mc\d+\.\d+\.\d+)?\.jar"
+)
 
-    The download pin (server/mods/blockfield-server.pw.toml) is gone: the Game
-    image jar is built from mod-server (:server:remapJar), so gradle.properties
-    mod_version and upstream.properties upstreamCommit are the source of truth.
+
+def lock_mod_version(server_root):
+    """Gameplay version from distribution/gameplay.lock.json, None when absent.
+
+    Fail-closed on a present-but-invalid lock; a valid lock without the game
+    jar asset also returns None so the caller falls back to gradle.properties.
     """
+    path = Path(server_root) / "distribution" / "gameplay.lock.json"
+    if not path.is_file():
+        return None
+    try:
+        pin = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"gameplay lock unreadable: {error}") from error
+    files = pin.get("files") if isinstance(pin, dict) else None
+    if not isinstance(files, dict):
+        raise ValueError(f"invalid gameplay lock: {path}")
+    for name in files:
+        match = LOCK_ASSET_RE.fullmatch(name or "")
+        if match:
+            return match.group(1)
+    return None
+
+
+def server_mod_source(server_root):
+    """(mod_version, upstreamCommit) from the server checkout.
+
+    Reads distribution/gameplay.lock.json when present (the game jar
+    filename carries the version); otherwise mod-server/gradle.properties
+    mod_version and upstream.properties upstreamCommit are the source of
+    truth. The download pin (server/mods/blockfield-server.pw.toml) is gone:
+    the Game image jar is built from mod-server (:server:remapJar).
+    """
+    locked = lock_mod_version(server_root)
+    if locked is not None:
+        return locked, None
     server_root = Path(server_root)
     try:
         props = (server_root / "mod-server" / "gradle.properties").read_text(
@@ -229,8 +264,9 @@ def version_gate(rcon, server_log, client_log, client_pin, server_root):
     """First RC step: loaded server/client mod must equal the workspace pins.
 
     client_pin is the client metafile path; server_root is the server checkout
-    dir, whose mod-server sources carry the expected mod_version (the download
-    pin is gone, never a download).
+    dir, whose gameplay lock (mod-server sources when the lock is absent)
+    carries the expected mod_version (the download pin is gone, never a
+    download).
     """
     out = []
     try:

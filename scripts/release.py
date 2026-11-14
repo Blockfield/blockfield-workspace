@@ -376,7 +376,9 @@ def build(side, tree, tag, manifest=None):
                 "sources/world-seed.zip",
                 # Contract-only preflight without Gradle (owner rule: no local
                 # Gradle): the Game image jar is built from mod-server in CI
-                # (:server:remapJar, wired in with --server-jar there).
+                # (:server:remapJar, wired in with --server-jar there; the
+                # gameplay version reads distribution/gameplay.lock.json
+                # when present, else mod-server/gradle.properties).
                 "--no-server-jar",
             ]
             final += [

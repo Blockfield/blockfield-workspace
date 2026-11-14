@@ -1225,6 +1225,80 @@ class RcBattery(unittest.TestCase):
             with self.assertRaises(ValueError):
                 rc.server_mod_source(Path(tmp))
 
+    def test_server_mod_source_reads_gameplay_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "distribution"
+            dist.mkdir()
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps(
+                    {
+                        "repository": "Blockfield/blockfield-server",
+                        "tag": "v2.82.0",
+                        "files": {"blockfield-server-1.57.0+mc1.21.1.jar": "b" * 64},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(rc.server_mod_source(Path(tmp)), ("1.57.0", None))
+
+    def test_server_mod_source_prefers_lock_over_gradle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "distribution"
+            dist.mkdir()
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps(
+                    {
+                        "repository": "Blockfield/blockfield-server",
+                        "tag": "v2.82.0",
+                        "files": {"blockfield-server-1.58.0+mc1.21.1.jar": "b" * 64},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            props = Path(tmp) / "mod-server"
+            props.mkdir()
+            (props / "gradle.properties").write_text(
+                "mod_version=1.57.0\n", encoding="utf-8"
+            )
+            self.assertEqual(rc.server_mod_source(Path(tmp)), ("1.58.0", None))
+
+    def test_server_mod_source_falls_back_without_lock_game_asset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "distribution"
+            dist.mkdir()
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps(
+                    {
+                        "repository": "Blockfield/blockfield-server",
+                        "tag": "v2.82.0",
+                        "files": {"blockfield-workshop-1.58.0+mc1.21.1.jar": "b" * 64},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            props = Path(tmp) / "mod-server"
+            props.mkdir()
+            (props / "gradle.properties").write_text(
+                "mod_version=1.57.0\n", encoding="utf-8"
+            )
+            self.assertEqual(rc.server_mod_source(Path(tmp)), ("1.57.0", None))
+
+    def test_server_mod_source_rejects_invalid_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "distribution"
+            dist.mkdir()
+            (dist / "gameplay.lock.json").write_text("{no json", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                rc.server_mod_source(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "distribution"
+            dist.mkdir()
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps({"files": ["not-a-dict"]}), encoding="utf-8"
+            )
+            with self.assertRaises(ValueError):
+                rc.server_mod_source(Path(tmp))
+
     def test_loaded_version_prefers_commit_pair(self):
         self.assertEqual(
             rc.loaded_version("§7[BlockField] 1.55.3 commit abc123"), "1.55.3"
@@ -1778,6 +1852,34 @@ class RcBattery(unittest.TestCase):
             )
         self.assertTrue(stop)
         self.assertTrue(any(not ok for _, ok, _ in rows))
+
+    def test_version_gate_prefers_gameplay_lock(self):
+        class Rcon:
+            def cmd(self, command):
+                return "§7[BlockField] 1.55.3 commit abc"
+
+        pin = 'filename = "blockfield-client-1.55.3+mc1.21.1.jar"'
+        with tempfile.TemporaryDirectory() as tmp:
+            client = Path(tmp) / "c.toml"
+            client.write_text(pin)
+            server = Path(tmp) / "server"
+            dist = server / "distribution"
+            dist.mkdir(parents=True)
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps(
+                    {
+                        "repository": "Blockfield/blockfield-server",
+                        "tag": "v2.82.0",
+                        "files": {"blockfield-server-1.55.3+mc1.21.1.jar": "b" * 64},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rows, stop = rc.version_gate(
+                Rcon(), "1.55.3 commit abc", "- blockfield 1.55.3", client, server
+            )
+        self.assertFalse(stop)
+        self.assertTrue(all(ok for _, ok, _ in rows))
 
     def test_has_gun_reads_held_then_inventory(self):
         rcon = FakeRcon()
@@ -4576,6 +4678,37 @@ class SeamCheckList(unittest.TestCase):
             )
             (props / "upstream.properties").write_text(
                 "upstreamCommit=abc123def456\n", encoding="utf-8"
+            )
+            args = SimpleNamespace(
+                rcon_host="127.0.0.1",
+                rcon_port=1,
+                rcon_password="pw",
+                tag_prod=None,
+            )
+
+            class Rcon:
+                def cmd(self, command):
+                    return "1.57.0 commit abc"
+
+            with patch.object(seam, "public_json", return_value={"build": "v9.9.9"}):
+                rows = seam.version_rows(args, root, lambda *a: Rcon())
+        self.assertTrue(rows[0][1], rows)
+        self.assertIn("1.57.0", rows[0][2])
+
+    def test_version_matches_gameplay_lock(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            dist = root / "server" / "distribution"
+            dist.mkdir(parents=True)
+            (dist / "gameplay.lock.json").write_text(
+                json.dumps(
+                    {
+                        "repository": "Blockfield/blockfield-server",
+                        "tag": "v2.82.0",
+                        "files": {"blockfield-server-1.57.0+mc1.21.1.jar": "b" * 64},
+                    }
+                ),
+                encoding="utf-8",
             )
             args = SimpleNamespace(
                 rcon_host="127.0.0.1",

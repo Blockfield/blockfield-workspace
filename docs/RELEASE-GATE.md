@@ -5,15 +5,15 @@ gates in the same message — bypassing looks different from passing afterwards.
 
 ## Gates (from audit-275-E §8)
 
-| Gate                  | What must be green                                                                                                               | Command                                                       |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| G0 identity           | `bf version` + client log vs `client/mods/blockfield-client.pw.toml` + server `mod-server` `mod_version`; mismatch = FAIL + stop | `just scenario rc` (version gate runs first)                  |
-| G1 unit               | `just check` + `java-check` + `oracleTest` WITHOUT `BF_SKIP_ORACLE`; `:server:test` + GameTests 18/18; client boot               | Boat VM per `common-rules.txt` TESTS BEFORE PUSH              |
-| G2 wire/compat        | U10 + wire-gate, all cohorts within bounds; protocol/pin bump checklist                                                          | `dev/anim_sync_report.py`, `run_anim_sync_wire_matrix.sh`     |
-| G3 RC stand ≤60 min   | full `just scenario rc` battery on a Boat large VM; 2-real-client pass for pair releases                                         | `just scenario rc [--record rc.json]`                         |
-| G4 deploy dry-run     | export-e2e vs real data incl. controller-phase matrix; `move-approved-tag` + preflights green                                    | server `export-e2e` harness + `scripts/deploy-webhooks.py`    |
-| G5 post-deploy probes | `/api/rooms` build; `build.json` contract; Game-only entry probe; proxy `gate.json` Game leg; Game join probe                    | automatic in `just release ship`; REQUIRED lines need a human |
-| G6 perf               | 15-bot normal-arena TPS 20.0, MSPT mean ≤25 ms p95 <50 ms; client FPS floor via pre-cohort gate                                  | U11-SCALE rule, `env-fps-gate` (ws#135)                       |
+| Gate                  | What must be green                                                                                                                                                                           | Command                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| G0 identity           | `bf version` + client log vs `client/mods/blockfield-client.pw.toml` + server `distribution/gameplay.lock.json` (`mod-server` `mod_version` when the lock is absent); mismatch = FAIL + stop | `just scenario rc` (version gate runs first)                  |
+| G1 unit               | `just check` + `java-check` + `oracleTest` WITHOUT `BF_SKIP_ORACLE`; `:server:test` + GameTests 18/18; client boot                                                                           | Boat VM per `common-rules.txt` TESTS BEFORE PUSH              |
+| G2 wire/compat        | U10 + wire-gate, all cohorts within bounds; protocol/pin bump checklist                                                                                                                      | `dev/anim_sync_report.py`, `run_anim_sync_wire_matrix.sh`     |
+| G3 RC stand ≤60 min   | full `just scenario rc` battery on a Boat large VM; 2-real-client pass for pair releases                                                                                                     | `just scenario rc [--record rc.json]`                         |
+| G4 deploy dry-run     | export-e2e vs real data incl. controller-phase matrix; `move-approved-tag` + preflights green                                                                                                | server `export-e2e` harness + `scripts/deploy-webhooks.py`    |
+| G5 post-deploy probes | `/api/rooms` build; `build.json` contract; Game-only entry probe; proxy `gate.json` Game leg; Game join probe                                                                                | automatic in `just release ship`; REQUIRED lines need a human |
+| G6 perf               | 15-bot normal-arena TPS 20.0, MSPT mean ≤25 ms p95 <50 ms; client FPS floor via pre-cohort gate                                                                                              | U11-SCALE rule, `env-fps-gate` (ws#135)                       |
 
 ## G0 enforcement (`scripts/release.py`)
 

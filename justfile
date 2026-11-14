@@ -81,8 +81,8 @@ pr-ship repo branch *args:
 
 assets *args:
     import runpy, sys
-    sys.argv = ["server/scripts/toolchain.py", "server/scripts/publish-assets.py", *sys.argv[1:]]
-    runpy.run_path("server/scripts/toolchain.py", run_name="__main__")
+    sys.argv = ["scripts/toolchain.py", "scripts/assets/publish-assets.py", *sys.argv[1:]]
+    runpy.run_path("scripts/toolchain.py", run_name="__main__")
 
 dev *args:
     import runpy, sys

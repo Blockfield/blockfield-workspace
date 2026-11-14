@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 HERE = Path(__file__).resolve().parent
 WORKSPACE_ROOT = HERE.parents[1]
 FETCH = runpy.run_path(str(HERE / "fetch-world-seed.py"))["fetch"]
-PUBLISH = runpy.run_path(str(HERE / "publish-assets.py"))["publish"]
+_PUBLISHER = runpy.run_path(str(HERE / "publish-assets.py"))
+PUBLISH = _PUBLISHER["publish"]
 
 sys.path.insert(0, str(WORKSPACE_ROOT / "scripts"))
 from toolchain import tool  # noqa: E402
@@ -181,3 +182,12 @@ class StrictSumsTests(unittest.TestCase):
         digest = hashlib.sha256(b"a").hexdigest()
         with self.assertRaisesRegex(ValueError, "SHA256SUMS"):
             StrictSumsTests.PARSE(f"{digest}  a.zip\n{digest}  a.zip\n")
+
+
+class ArtifactNameTests(unittest.TestCase):
+    def test_whitespace_in_an_artifact_name_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "foo  bar.zip").write_bytes(b"x")
+            with self.assertRaisesRegex(ValueError, "whitespace"):
+                _PUBLISHER["write_sums"](Path(tmp))
+            self.assertFalse((Path(tmp) / "SHA256SUMS").exists())

@@ -49,6 +49,10 @@ def write_sums(directory):
     artifacts = [path for path in files if path.suffix in {".zip", ".jar"}]
     if not artifacts:
         raise ValueError("No resource artifact to publish")
+    # SHA256SUMS consumers split on whitespace, so a name with any would break them.
+    bad = [path.name for path in artifacts if any(ch.isspace() for ch in path.name)]
+    if bad:
+        raise ValueError(f"Artifact names must not contain whitespace: {bad}")
     sums = directory / "SHA256SUMS"
     sums.write_text(
         "".join(

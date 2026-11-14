@@ -61,12 +61,18 @@ COLOR_RELEASE, COLOR_PATCH = "5865F2", "2ECC71"
 # Бот анонсирует только клиентские релизы, поэтому клиентский выпуск несёт и сервер.
 ANNOUNCED_KINDS = ("client",)
 SERVER_REPOSITORY = "Blockfield/blockfield-server"
+SERVER_REPOSITORIES = (
+    SERVER_REPOSITORY,
+    "Blockfield/blockfield-dedicated",
+    "Blockfield/blockfield-gameplay",
+)
 SERVER_NAME = "blockfield-server"
 # Теги старше первой публичной ревизии живут только в приватном источнике
 # (клиент: blockfield-client-private). Без их пинов diff пропускал главное
 # изменение выпуска (v2.79.3: мод 1.59.2 → 1.60.1).
 PRIVATE_SOURCE = {
     "Blockfield/blockfield-client": "Blockfield/blockfield-client-private",
+    "Blockfield/blockfield-dedicated": "Blockfield/blockfield-server",
 }
 PR_BODY_CHARS = 2500
 PIN_PR_BODY_CHARS = 1200
@@ -348,22 +354,29 @@ def pin_evidence(change, old, new, gaps):
     return notes, []
 
 
-def server_pin(previous_release, gaps):
+def _validated_server_repository(repository):
+    if repository not in SERVER_REPOSITORIES:
+        raise ValueError(f"unsupported server repository: {repository}")
+    return repository
+
+
+def server_pin(previous_release, gaps, repository=SERVER_REPOSITORY):
     """PR сервера, слитые в main после прошлого клиентского релиза, как пин `blockfield-server`.
 
     База - коммит main на момент того релиза, а не серверный тег: в парном выпуске тег клиента
     ставится раньше серверного, и изменения сервера уже лежат в main.
     """
+    repository = _validated_server_repository(repository)
     since = previous_release["published_at"]
     # Только PR самого сервера: его release-notes пересказывают мод, который клиент уже описал своим пином.
     try:
         base = json.loads(
             gh(
                 "api",
-                f"repos/{SERVER_REPOSITORY}/commits?sha=main&until={since}&per_page=1",
+                f"repos/{repository}/commits?sha=main&until={since}&per_page=1",
             )
         )[0]["sha"]
-        prs = merged_prs(SERVER_REPOSITORY, base, "main", gaps, PIN_PR_BODY_CHARS)
+        prs = merged_prs(repository, base, "main", gaps, PIN_PR_BODY_CHARS)
     except Exception as exc:
         gaps.append(f"изменения сервера не собраны ({describe(exc)})")
         return None
@@ -392,15 +405,16 @@ def server_range(server_releases, since):
     return (max(before)[1] if before else None), newest
 
 
-def launcher_server_pin(previous_release, gaps):
+def launcher_server_pin(previous_release, gaps, repository=SERVER_REPOSITORY):
     """Изменения сервера после прошлого релиза лаунчера, как пин `blockfield-server`.
 
     Окно — по серверным тегам (server_range), а не по коммитам main: у лаунчера нет
     парного выпуска, и релизы сервера идут своей линией.
     """
+    repository = _validated_server_repository(repository)
     try:
         old, new = server_range(
-            published_releases(SERVER_REPOSITORY), previous_release["published_at"]
+            published_releases(repository), previous_release["published_at"]
         )
     except Exception as exc:
         gaps.append(f"изменения сервера не собраны ({describe(exc)})")
@@ -412,7 +426,7 @@ def launcher_server_pin(previous_release, gaps):
         return None
     # Только PR самого сервера: его release-notes пересказывают мод, который клиент уже описал своим пином.
     try:
-        prs = merged_prs(SERVER_REPOSITORY, old, new, gaps, PIN_PR_BODY_CHARS)
+        prs = merged_prs(repository, old, new, gaps, PIN_PR_BODY_CHARS)
     except Exception as exc:
         gaps.append(f"{SERVER_NAME}: слитые PR не получены ({describe(exc)})")
         prs = []
@@ -523,15 +537,25 @@ def collect_facts(a, releases):
                     "pull_requests": prs,
                 }
             )
+    raw_server_repo = getattr(a, "server_repository", None)
+    server_repo = (
+        raw_server_repo
+        if isinstance(raw_server_repo, str) and raw_server_repo
+        else SERVER_REPOSITORY
+    )
     if a.kind == "client":
         server = server_pin(
-            next(r for r in releases if r["tag_name"] == previous), gaps
+            next(r for r in releases if r["tag_name"] == previous),
+            gaps,
+            server_repo,
         )
         if server:
             facts["pins"].append(server)
     elif a.kind == "launcher":
         server = launcher_server_pin(
-            next(r for r in releases if r["tag_name"] == previous), gaps
+            next(r for r in releases if r["tag_name"] == previous),
+            gaps,
+            server_repo,
         )
         if server:
             facts["pins"].append(server)
@@ -1360,6 +1384,12 @@ def main(argv=None):
     r.add_argument("--kind", required=True, choices=sorted(FRONT_KIND))
     r.add_argument("--out-dir", required=True)
     r.add_argument("--source-repository")
+    r.add_argument(
+        "--server-repository",
+        default=SERVER_REPOSITORY,
+        choices=SERVER_REPOSITORIES,
+        help="репозиторий сервера для серверного пина в клиентском и лаунчерном релизе",
+    )
     r.add_argument("--repo-root", default=".")
     r.add_argument("--build-json")
     r.add_argument(

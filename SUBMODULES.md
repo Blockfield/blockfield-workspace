@@ -14,6 +14,11 @@ Developers with access to the private server repo materialize it with
 idempotent; without access the clone fails loudly. `server/` is git-ignored —
 never commit it.
 
+At the planned server split cutover, `Blockfield/blockfield-server` becomes a
+frozen private archive, and `Blockfield/blockfield-dedicated` and
+`Blockfield/blockfield-gameplay` take over. Until that cutover, `pins/server.sha`
+and `just server-checkout` continue to use `Blockfield/blockfield-server`.
+
 Paths that remain private-only checkouts in the private workspace:
 
 - `localmods/blockfield-decor/`

@@ -24,6 +24,8 @@
 | `blockfield-releases` (отдельный репозиторий)                                                                                            | Публичные клиентские артефакты                                                 | [README](https://github.com/Blockfield/blockfield-releases/blob/main/README.md)                                                                                                 |
 | `blockfield-proxy`, `blockfield-workshop`, `blockfield-site`, `blockfield-bot`, `blockfield-errors`, `blockfield-distribution` (private) | Proxy/Limbo, мастерская карт, сайт, Discord-бот, страницы ошибок, раздача пака | Документация в соответствующих приватных репозиториях                                                                                                                           |
 
+При разделении сервера `blockfield-server` станет замороженным приватным архивом, а его роль разделят публичный `blockfield-dedicated` для сборки образа, упаковки и выпусков и приватный `blockfield-gameplay` для игровых JAR и деплоя. До переключения основным источником остаётся `blockfield-server`.
+
 ## Юниты и владельцы данных
 
 ```mermaid

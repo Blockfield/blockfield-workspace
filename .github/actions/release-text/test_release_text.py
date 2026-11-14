@@ -687,6 +687,33 @@ class Server(unittest.TestCase):
         got, gaps, _, _ = self.server_pin([])
         self.assertEqual((got, gaps), (None, []))
 
+    def test_accepts_dedicated_and_gameplay_server_repositories(self):
+        prs = [{"number": 12, "title": "Сплит сервера", "body": ""}]
+        for repo in (
+            "Blockfield/blockfield-dedicated",
+            "Blockfield/blockfield-gameplay",
+        ):
+            gaps = []
+            with (
+                mock.patch.object(
+                    rt, "gh", return_value=json.dumps([{"sha": "def5678"}])
+                ) as gh,
+                mock.patch.object(rt, "merged_prs", return_value=prs) as fetch,
+            ):
+                got = rt.server_pin(self.PREVIOUS, gaps, repository=repo)
+            self.assertEqual(
+                gh.call_args.args[1],
+                f"repos/{repo}/commits?sha=main&until=2026-10-02T20:17:39Z&per_page=1",
+            )
+            self.assertEqual(fetch.call_args.args[:3], (repo, "def5678", "main"))
+            self.assertEqual(
+                (got["name"], got["pull_requests"], gaps), (rt.SERVER_NAME, prs, [])
+            )
+
+    def test_rejects_unknown_server_repository(self):
+        with self.assertRaises(ValueError):
+            rt.server_pin(self.PREVIOUS, [], repository="other/repo")
+
 
 class PinEvidence(unittest.TestCase):
     OLD = pin("v1.41.0", "a", "Blockfield/m")
@@ -792,6 +819,23 @@ class PreviousPins(unittest.TestCase):
         rows = rn.pin_diff(got, {"x": self.NEW})
         self.assertEqual([row[1] for row in rows], ["update"])
         self.assertTrue(any("v1.41.0" in gap for gap in gaps), gaps)
+
+    def test_dedicated_missing_tag_falls_back_to_server_archive(self):
+        gaps = []
+        with (
+            mock.patch.object(
+                rn, "read_pins", side_effect=[self.MISSING, {"x": self.OLD}]
+            ),
+            mock.patch("subprocess.check_output") as fetch,
+            mock.patch.dict("os.environ", {"GH_TOKEN": "secret-token"}),
+        ):
+            got = rt.previous_pins(
+                "/root", "Blockfield/blockfield-dedicated", "v2.80.0", gaps
+            )
+        argv = fetch.call_args.args[0]
+        self.assertIn("Blockfield/blockfield-server.git", " ".join(argv))
+        self.assertEqual(got, {"x": self.OLD})
+        self.assertTrue(any("v2.80.0" in gap for gap in gaps), gaps)
 
     def test_unreachable_tag_fails_loud_in_collect_facts(self):
         root = Path(tempfile.mkdtemp())
@@ -1323,6 +1367,51 @@ class LauncherKind(unittest.TestCase):
                 "launcher-v2.0.0",
             ),
             [],
+        )
+
+    def test_launcher_pin_accepts_dedicated_repository(self):
+        prs = [{"number": 10, "title": "Образ сервера", "body": ""}]
+        gaps = []
+        with (
+            mock.patch.object(
+                rt, "published_releases", return_value=self.server_releases()
+            ) as releases,
+            mock.patch.object(rt, "merged_prs", return_value=prs) as fetch,
+        ):
+            pin = rt.launcher_server_pin(
+                {"published_at": "2026-09-01T00:00:00Z"},
+                gaps,
+                repository="Blockfield/blockfield-dedicated",
+            )
+        self.assertEqual(releases.call_args.args, ("Blockfield/blockfield-dedicated",))
+        self.assertIn(
+            ("Blockfield/blockfield-dedicated", "v2.0.0", "v3.0.0"),
+            [c.args[:3] for c in fetch.call_args_list],
+        )
+        self.assertEqual(pin["text"], "blockfield-server: v2.0.0 → v3.0.0")
+        self.assertEqual(gaps, [])
+
+    def test_cli_passes_server_repository_override(self):
+        out_dir = tempfile.mkdtemp()
+        with mock.patch.object(rt, "run_release") as run_release:
+            rt.main(
+                [
+                    "release",
+                    "--repository",
+                    "Blockfield/blockfield-releases",
+                    "--version",
+                    "v2.81.0",
+                    "--kind",
+                    "client",
+                    "--out-dir",
+                    out_dir,
+                    "--server-repository",
+                    "Blockfield/blockfield-dedicated",
+                ]
+            )
+        self.assertEqual(
+            run_release.call_args.args[0].server_repository,
+            "Blockfield/blockfield-dedicated",
         )
 
     def write(self, facts):

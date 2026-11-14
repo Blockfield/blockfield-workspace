@@ -191,3 +191,8 @@ class ArtifactNameTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "whitespace"):
                 _PUBLISHER["write_sums"](Path(tmp))
             self.assertFalse((Path(tmp) / "SHA256SUMS").exists())
+
+    def test_supplied_sums_with_a_whitespace_name_are_rejected(self):
+        line = "0" * 64 + "  foo bar.zip\n"
+        with self.assertRaisesRegex(ValueError, "Invalid"):
+            _PUBLISHER["parse_sums"](line)

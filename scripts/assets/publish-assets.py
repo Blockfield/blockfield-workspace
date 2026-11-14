@@ -32,6 +32,7 @@ def parse_sums(text):
             not sep
             or not re.fullmatch(r"[0-9a-f]{64}", checksum)
             or not name
+            or any(ch.isspace() for ch in name)
             or name in expected
         ):
             raise ValueError(f"Invalid or duplicate SHA256SUMS entry: {line!r}")

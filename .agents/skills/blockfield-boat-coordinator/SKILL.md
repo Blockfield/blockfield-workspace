@@ -5,7 +5,8 @@ description: "Coordinate opted-in Boat overflow for Blockfield: prefer local sta
 
 # Blockfield Boat Coordinator
 
-Use with [blockfield-boat](../blockfield-boat/SKILL.md). Read `docs/BOAT.md` in the
+Add-on to the generic `coordinator` skill (coordination method); this one covers only
+Boat budget and VM cleanup. Use with [blockfield-boat](../blockfield-boat/SKILL.md). Read `docs/BOAT.md` in the
 workspace for the shared policy. This adds quota and resource accounting, not
 permission to stop another session's process or delegate outside T3 routing.
 

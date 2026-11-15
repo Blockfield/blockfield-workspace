@@ -60,11 +60,11 @@ ANNOUNCEMENT_ATTEMPTS = 3
 COLOR_RELEASE, COLOR_PATCH = "5865F2", "2ECC71"
 # Бот анонсирует только клиентские релизы, поэтому клиентский выпуск несёт и сервер.
 ANNOUNCED_KINDS = ("client",)
-SERVER_REPOSITORY = "Blockfield/blockfield-server"
-ARCHIVE_REPOSITORY = SERVER_REPOSITORY
+SERVER_REPOSITORY = "Blockfield/blockfield-dedicated"
+ARCHIVE_REPOSITORY = "Blockfield/blockfield-server"
 SERVER_REPOSITORIES = (
+    ARCHIVE_REPOSITORY,
     SERVER_REPOSITORY,
-    "Blockfield/blockfield-dedicated",
     "Blockfield/blockfield-gameplay",
 )
 SERVER_NAME = "blockfield-server"

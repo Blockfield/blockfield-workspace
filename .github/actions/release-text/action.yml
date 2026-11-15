@@ -19,7 +19,7 @@ inputs:
     default: ${{ github.repository }}
   server-repository:
     description: Repository used for the server pin on client and launcher releases
-    default: Blockfield/blockfield-server
+    default: Blockfield/blockfield-dedicated
   build-json:
     description: Path to this build's build.json for the client-fingerprint check (client)
     default: ""

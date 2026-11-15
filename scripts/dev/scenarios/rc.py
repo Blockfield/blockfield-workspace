@@ -122,7 +122,9 @@ def pin_version(text):
 
 # Game jar asset in distribution/gameplay.lock.json (server PR #475):
 # blockfield-server-<mod_version>+mc<mc>.jar carries the gameplay version.
-LOCK_ENTRY_RE = re.compile(r"blockfield-(server|workshop)-[^/\s]+\.jar")
+LOCK_ENTRY_RE = re.compile(
+    r"blockfield-(server|workshop)-[^/\s]+\.jar|pinned-mods\.json"
+)
 LOCK_ASSET_RE = re.compile(
     r"blockfield-server-(\d+\.\d+\.\d+)(?:\+mc\d+\.\d+\.\d+)?\.jar"
 )

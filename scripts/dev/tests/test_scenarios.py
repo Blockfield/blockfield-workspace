@@ -1234,7 +1234,11 @@ class RcBattery(unittest.TestCase):
                     {
                         "repository": "Blockfield/blockfield-server",
                         "tag": "v2.82.0",
-                        "files": {"blockfield-server-1.57.0+mc1.21.1.jar": "b" * 64},
+                        "files": {
+                            "blockfield-server-1.57.0+mc1.21.1.jar": "b" * 64,
+                            "blockfield-workshop-1.57.0+mc1.21.1.jar": "c" * 64,
+                            "pinned-mods.json": "d" * 64,
+                        },
                     }
                 ),
                 encoding="utf-8",

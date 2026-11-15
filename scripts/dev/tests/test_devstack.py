@@ -985,7 +985,7 @@ class ServerJar(unittest.TestCase):
             modpack = home / "pack"
             (modpack / "server").mkdir(parents=True)
             gameplay = home / "gameplay"
-            (gameplay / "server" / "blockfield").mkdir(parents=True)
+            (gameplay / "server" / "lobby" / "blockfield").mkdir(parents=True)
             jar = home / "blockfield-server-1.57.0+mc1.21.1.jar"
             jar.write_bytes(b"PK")
             seed = home / "seed.zip"
@@ -1014,7 +1014,7 @@ class ServerJar(unittest.TestCase):
             dist.mkdir(parents=True)
             (dist / "gameplay.lock.json").write_text("{}")
             gameplay = home / "gameplay"
-            (gameplay / "server" / "blockfield").mkdir(parents=True)
+            (gameplay / "server" / "lobby" / "blockfield").mkdir(parents=True)
             jar = home / "blockfield-server-1.57.0+mc1.21.1.jar"
             jar.write_bytes(b"PK")
             seed = home / "seed.zip"

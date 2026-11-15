@@ -795,7 +795,7 @@ def build_distribution(modpack, client_pack=None, server_jar=None):
     seed = fetch_world_seed(modpack)
     jar = resolve_server_jar(server_jar, modpack)
     source = GAMEPLAY / "server"
-    if not (source / "blockfield").is_dir():
+    if not (source / "lobby" / "blockfield").is_dir():
         die(
             f"gameplay lobby sources not found in {source}: run `just server-checkout`"
             " first (needs access to the private gameplay repo)"

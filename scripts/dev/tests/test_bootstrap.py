@@ -731,7 +731,7 @@ class PortablemcEnvironment(unittest.TestCase):
             checkout = Path(tmp) / "server checkout"
             checkout.mkdir()
             gameplay = Path(tmp) / "gameplay"
-            (gameplay / "server" / "blockfield").mkdir(parents=True)
+            (gameplay / "server" / "lobby" / "blockfield").mkdir(parents=True)
             with patch.object(devstack, "GAMEPLAY", gameplay):
                 devstack.build_distribution(checkout)
             command = build.call_args.args[0]

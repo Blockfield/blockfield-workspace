@@ -104,8 +104,8 @@ personal opt-in: the Boat parts below apply only when the task owner opted in
   prove nothing of yours remains: no processes with your session env, no FUSE mounts
   under your temp `HOME` (`mount | grep <tmp-home>`).
 
-## Coordinator backlog repos
+## Coordinator backlog
 
-Backlog issues (`coordinator-backlog`) live in the public Blockfield/blockfield-workspace for
-workspace, tools, stand, CI, client, launcher and process items, and in the private server, proxy,
-control-plane and workshop repos for server code, deploy and prod state.
+The coordinator backlog lives in agentdeck, project `blockfield` (`backlog_*` MCP tools of the
+`coordinator` plugin); cite items as `backlog:blockfield#<n>`. Children report findings in their final
+response; the coordinator files them. User-facing bugs and tasks stay in the product repos' issues.

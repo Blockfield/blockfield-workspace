@@ -108,8 +108,8 @@ def verified(tag, name, data, expected):
     return jar
 
 
-def fetch(repo, tag):
-    """The one mod JAR of release tag, verified (needs gh read access to repo)."""
+def download(repo, tag):
+    """(name, data, expected checks) of the one mod JAR of release tag."""
     meta = json.loads(release.gh("api", f"repos/{repo}/releases/tags/{tag}"))
     assets = {asset["name"]: asset for asset in meta["assets"]}
     jars = [n for n in assets if n.endswith(".jar") and not n.endswith("-sources.jar")]
@@ -139,6 +139,12 @@ def fetch(repo, tag):
         expected += [("sha256", h, "BUILD-SHA256SUMS") for h in sums_for(text, name)]
     elif "404" not in build.stderr:
         raise BumpError(f"{repo} {tag}: BUILD-SHA256SUMS: {build.stderr.strip()}")
+    return name, data, expected
+
+
+def fetch(repo, tag):
+    """The one mod JAR of release tag, verified (needs gh read access to repo)."""
+    name, data, expected = download(repo, tag)
     return verified(tag, name, data, expected)
 
 
@@ -210,7 +216,7 @@ def leftovers(tree, hashes):
 
 
 def plan(mod, tag, trees, fetch):
-    """{(tree, path): new text} for the holders that change; raises before any write."""
+    """(edits, new jar) for the holders that change; raises before any write."""
     repo = f"{release.ORG}/{mod}"
     texts, jars = scan(mod, trees, fetch)
     new = next((jar for jar in jars if jar.tag == tag), None) or fetch(repo, tag)
@@ -235,7 +241,7 @@ def plan(mod, tag, trees, fetch):
                 )
     if errors:
         raise BumpError("\n".join(errors))
-    return edits
+    return edits, new
 
 
 def main(argv=None):
@@ -262,10 +268,18 @@ def main(argv=None):
             return 0
         if not args.tag:
             parser.error("tag is required without --check")
-        edits = plan(args.mod, args.tag, trees, fetch)
+        edits, new = plan(args.mod, args.tag, trees, fetch)
     except (BumpError, RuntimeError) as error:
         print(f"bump-mod-jar: {error}", file=sys.stderr)
         return 1
+    if not args.dry_run:
+        import mirror_mod_jar as mirror  # lazy: mirror imports this module
+
+        try:
+            mirror.require_mirrored(args.mod, args.tag, new)
+        except (mirror.MirrorError, BumpError, RuntimeError) as error:
+            print(f"bump-mod-jar: {error}", file=sys.stderr)
+            return 1
     for side, path in edits:
         print(f"{'would change' if args.dry_run else 'changed'} {side} {path}")
     if not edits:

@@ -174,6 +174,11 @@ bump-mod-jar *args:
     sys.argv = ["scripts/bump_mod_jar.py", *sys.argv[1:]]
     runpy.run_path("scripts/bump_mod_jar.py", run_name="__main__")
 
+mirror-mod-jar *args:
+    import runpy, sys
+    sys.argv = ["scripts/mirror_mod_jar.py", *sys.argv[1:]]
+    runpy.run_path("scripts/mirror_mod_jar.py", run_name="__main__")
+
 mod *args:
     import runpy, sys
     sys.argv = ["bf.py", *["mod", *sys.argv[1:]]]

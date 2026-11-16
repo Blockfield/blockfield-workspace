@@ -68,17 +68,17 @@ class Bump(unittest.TestCase):
             subprocess.run(["git", "-C", tree, "add", "-A"], check=True)
 
     def test_old_pin_in_every_holder_becomes_the_new_one(self):
-        edits = bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        edits, _ = bump.plan(MOD, "bf7", self.trees, fake_fetch)
         holders = {(s, p) for s, paths in bump.MODS[MOD][1].items() for p in paths}
         self.assertEqual(set(edits), holders)
         for (side, path), text in edits.items():
             self.assertEqual(text, holder(path, JARS["bf7"]), path)
-        self.assertEqual(bump.plan(MOD, "bf6", self.trees, fake_fetch), {})
+        self.assertEqual(bump.plan(MOD, "bf6", self.trees, fake_fetch)[0], {})
 
     def test_holders_lagging_on_different_releases_all_move(self):
         path = bump.MODS[MOD][1]["client"][0]
         self.write("client", path, holder(path, JARS["bf7"]))
-        edits = bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        edits, _ = bump.plan(MOD, "bf7", self.trees, fake_fetch)
         self.assertNotIn(("client", path), edits)
         self.assertEqual(len(edits), 7)
 
@@ -86,7 +86,7 @@ class Bump(unittest.TestCase):
         path = bump.MODS[MOD][1]["mod"][1]
         guard = f'assertFalse(snapshot.contains("{jar("bf5").name}"));\n'
         self.write("mod", path, holder(path, JARS["bf6"]) + guard)
-        edits = bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        edits, _ = bump.plan(MOD, "bf7", self.trees, fake_fetch)
         self.assertEqual(edits["mod", path], holder(path, JARS["bf7"]) + guard)
 
     def test_missing_holder_is_an_error(self):
@@ -122,6 +122,9 @@ class Bump(unittest.TestCase):
         patch = mock.patch.object(bump, "fetch", fake_fetch)
         patch.start()
         self.addCleanup(patch.stop)
+        gate = mock.patch("mirror_mod_jar.require_mirrored")
+        gate.start()
+        self.addCleanup(gate.stop)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         flags = [
             arg for side, tree in self.trees.items() for arg in (f"--{side}", str(tree))

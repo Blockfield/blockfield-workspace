@@ -2623,6 +2623,239 @@ def cmd_ship(args):
     return True
 
 
+# `just release hotfix` repos: the fix-PR repo and the prepare --only side.
+HOTFIX_REPOS = {
+    "gameplay": ("server", REPO["gameplay"]),
+    "dedicated": ("server", REPO["server"]),
+    "client": ("client", REPO["client"]),
+}
+
+
+def hotfix_cmd(args):
+    """The exact command that reruns this hotfix (pre-push legs are idempotent)."""
+    parts = ["just", "release", "hotfix", args.repo, str(args.pr), "--mod", args.mod]
+    if args.decor:
+        parts += ["--decor", args.decor]
+    if args.bump != "patch":
+        parts += ["--bump", args.bump]
+    if args.timeout != 1800:
+        parts += ["--timeout", str(args.timeout)]
+    if args.interval != 5:
+        parts += ["--interval", str(args.interval)]
+    if args.rc_record:
+        parts += ["--rc-record", args.rc_record]
+    if args.gate_waiver:
+        parts += ["--gate-waiver", args.gate_waiver]
+    return shlex.join([*parts, "--yes"])
+
+
+def hotfix_fix_gate(repo, number, timeout_s, interval_s):
+    """The fix PR must be merged into next with green CI. Returns its head SHA. Read-only."""
+    try:
+        data = json.loads(
+            gh(
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "number,state,baseRefName,headRefName,headRefOid,url",
+            )
+        )
+    except RuntimeError as error:
+        raise SystemExit(
+            f"hotfix stopped: cannot read fix PR #{number} on {repo}: {error}"
+        ) from None
+    if data.get("state") != "MERGED" or data.get("baseRefName") != "next":
+        raise SystemExit(
+            f"hotfix stopped: fix PR {repo}#{number} is not merged into next "
+            f"(state={data.get('state')}, base={data.get('baseRefName')}). "
+            "Merge it into next and wait for green CI, then re-run."
+        )
+    head = data.get("headRefOid")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise SystemExit(f"hotfix stopped: invalid fix PR head for {repo}#{number}")
+
+    def ready():
+        state = pr_checks(repo, number, head)
+        if state == "red":
+            raise RuntimeError(
+                f"checks are red on {repo} fix PR #{number}: fix before hotfix"
+            )
+        return state == "green"
+
+    wait_until(f"green checks on {repo} fix PR #{number}", timeout_s, interval_s, ready)
+    return head
+
+
+def hotfix_resume(args, rside, raction, tags, order, branch, ref=None):
+    """Exact manual continuation after a mid-chain stop. Read-only queries only."""
+    if raction in ("fix", "prepare", "gate", "reprepare"):
+        extra = (
+            " (delete a leftover release/* branch first if one is named)"
+            if raction in ("prepare", "reprepare", "gate")
+            else ""
+        )
+        return f"resume: {hotfix_cmd(args)}{extra}"
+    repo = REPO[rside]
+    rbranch = pr_branch(rside, tags[rside])
+    if raction == "deploy":
+        if ref is not None:
+            line = shlex.join(deploy_command(rside, ref))
+        else:
+            line = deploy_line(rside, tags[rside])
+        return f"resume: {line}  # wait for this new dispatch run to succeed"
+    lines = []
+    try:
+        number = pr_number(repo, rbranch)
+        head = (
+            json.loads(
+                gh(
+                    "pr",
+                    "view",
+                    str(number),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "headRefOid",
+                )
+            ).get("headRefOid")
+            if number is not None
+            else None
+        )
+    except (RuntimeError, ValueError):
+        number, head = None, None
+    lines.append(f"release PR branch: {rbranch} ({repo}#{number or 'merged/closed'})")
+    if number is not None:
+        merge = (
+            "gh",
+            "pr",
+            "merge",
+            str(number),
+            "--repo",
+            repo,
+            "--merge",
+            "--delete-branch",
+            *(
+                ["--match-head-commit", head]
+                if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head)
+                else []
+            ),
+        )
+        lines.append(shlex.join(merge))
+    if rside == "gameplay":
+        remaining, tail = (
+            [("tag-gameplay", "server")],
+            ["then re-run prepare for the dedicated pin PR, tag and deploy"],
+        )
+    else:
+        step = ("tag", rside)
+        remaining = order[order.index(step) :] if step in order else order
+        tail = []
+    lines += tag_lines(remaining, tags, branch)
+    return "resume:\n  " + "\n  ".join([*lines, *tail])
+
+
+def cmd_hotfix(args):
+    """One-command hotfix: fix PR merged into next, release PR, tag, deploy.
+
+    Thin driver over the existing legs: prepare_all opens the release PR(s),
+    ship_tag_side merges and tags, dispatch_deploy deploys. No workspace pin,
+    no probes, no pair: those stay with `ship`. Without --yes this runs as a
+    dry run and prints the plan.
+    """
+    only, repo = HOTFIX_REPOS[args.repo]
+    timeout_s, interval_s = args.timeout, args.interval
+    dry = args.dry_run or not args.yes
+    if not args.yes and not args.dry_run:
+        say("no --yes: dry run, nothing is pushed, merged, tagged or deployed")
+    ship_args = argparse.Namespace(
+        mod=args.mod,
+        decor=args.decor,
+        bump=args.bump,
+        only=only,
+        server_merge=None,
+        dry_run=dry,
+        rc_record=args.rc_record,
+        gate_waiver=args.gate_waiver,
+    )
+    raction, rside = "fix", None
+    try:
+        hotfix_fix_gate(repo, args.pr, timeout_s, interval_s)
+        raction = "prepare"
+        tags, kind, order, branch = prepare_all(ship_args)
+    except (RuntimeError, SystemExit) as error:
+        raise SystemExit(
+            f"hotfix stopped at {raction}: {error}\n"
+            f"{hotfix_resume(args, rside, raction, {}, [], '', None)}"
+        ) from None
+    if kind == "pair":
+        raise SystemExit(
+            "hotfix stopped: pair release (contract moved on both sides): "
+            f"drive it with `just release ship --mod {args.mod} --confirmed-by-owner`"
+        )
+    if kind not in ("server-only", "client-only", "deferred"):
+        raise SystemExit(f"hotfix stopped: release kind is {kind}; nothing to drive")
+    say(f"\nrelease kind: {kind}")
+    if kind == "deferred":
+        lines = [
+            *tag_lines([("tag-gameplay", "server")], tags, branch),
+            f"re-run prepare: it opens the dedicated pin PR against gameplay {tags['gameplay']}; "
+            "then the dedicated tag and the digest dispatch of the Game deploy",
+        ]
+    else:
+        lines = tag_lines(order, tags, branch)
+    for number, line in enumerate(lines, 1):
+        say(f"  {number}. {line}")
+    if dry:
+        say(
+            "dry run: prepare pushed nothing, so no leg above is executed; "
+            "re-run with --yes after the owner confirms this hotfix explicitly in the conversation"
+        )
+        return True
+    done = []
+    ref = None
+    try:
+        side_tags = {s: tags[s] for s in SIDES if s in tags}
+        raction = "gate"
+        require_rc_gate(side_tags, args.rc_record, args.gate_waiver)
+        if kind == "deferred":
+            rside, raction = "gameplay", "tag"
+            ship_tag_side(
+                ship_args, "gameplay", tags["gameplay"], timeout_s, interval_s
+            )
+            done.append(f"gameplay {tags['gameplay']}")
+            rside, raction = "server", "reprepare"
+            tags, kind, order, branch = prepare_all(ship_args)
+            if kind != "server-only" or "server" not in tags:
+                raise SystemExit(
+                    f"re-prepare after the gameplay tag says {kind}: "
+                    "the dedicated pin PR is missing"
+                )
+            side_tags = {s: tags[s] for s in SIDES if s in tags}
+            say(f"\nrelease kind: {kind}")
+            for number, line in enumerate(tag_lines(order, tags, branch), 1):
+                say(f"  {number}. {line}")
+        side = "server" if "server" in side_tags else "client"
+        rside, raction = side, "tag"
+        ship_tag_side(
+            ship_args, side, tags[side], timeout_s, interval_s, release_tags=side_tags
+        )
+        done.append(f"{side} {tags[side]}")
+        rside, raction = side, "deploy"
+        ref = image_digest(tags["server"]) if side == "server" else tags["client"]
+        dispatch_deploy(side, ref, timeout_s, interval_s)
+        done.append(f"deploy {side}")
+    except (RuntimeError, SystemExit) as error:
+        raise SystemExit(
+            f"hotfix stopped at {raction} {rside or ''}: {error}\n".rstrip()
+            + f"\n{hotfix_resume(args, rside, raction, tags, order, branch, ref)}"
+        ) from None
+    say(f"\nhotfixed: {', '.join(done)}")
+    return True
+
+
 def cmd_rollback_client(args):
     """Roll the served client back to an older tag via the gameplay deploy-client workflow."""
     if not args.confirmed_by_owner and not args.dry_run:
@@ -2755,6 +2988,45 @@ def parser():
         help="seconds between status polls (default 5)",
     )
     s.set_defaults(run=cmd_rollback_client)
+    s = sub.add_parser(
+        "hotfix",
+        help="one-command hotfix: fix PR merged into next, release PR, tag, deploy",
+    )
+    s.add_argument("repo", choices=sorted(HOTFIX_REPOS))
+    s.add_argument("pr", type=int, help="fix PR number merged into next")
+    s.add_argument(
+        "--mod", required=True, metavar="vX.Y.Z", help="blockfield-mod release"
+    )
+    s.add_argument("--decor", metavar="vX.Y.Z", help="blockfield-decor release")
+    s.add_argument("--bump", choices=("patch", "minor"), default="patch")
+    s.add_argument(
+        "--yes",
+        action="store_true",
+        help="the owner confirmed this hotfix explicitly in the conversation (without it: dry run with the plan)",
+    )
+    s.add_argument(
+        "--timeout",
+        type=int,
+        default=1800,
+        help="seconds per wait: fix checks, PR checks, runs, deploy gate (default 1800)",
+    )
+    s.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="seconds between status polls (default 5)",
+    )
+    s.add_argument(
+        "--rc-record",
+        metavar="PATH",
+        help="RC record JSON from `just scenario rc` covering exactly the release builds",
+    )
+    s.add_argument(
+        "--gate-waiver",
+        metavar='"reason"',
+        help="waive the release gate visibly; recorded in the log and the PR body",
+    )
+    s.set_defaults(run=cmd_hotfix)
     for name in ("prepare", "ship"):
         sub.choices[name].add_argument(
             "--server-merge",
@@ -2762,7 +3034,7 @@ def parser():
             help="merge origin server branch(es) into current main in the release PR "
             "before preflight, comma-separated in merge order (includes all their changes)",
         )
-    for name in ("prepare", "candidate", "pin", "ship", "rollback-client"):
+    for name in ("prepare", "candidate", "pin", "ship", "rollback-client", "hotfix"):
         sub.choices[name].add_argument(
             "--dry-run", action="store_true", help="print push/PR commands, run none"
         )

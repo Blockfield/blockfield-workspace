@@ -1137,6 +1137,7 @@ Product-репозитории работают через интеграцио�
 | `just release candidate vC --branch release/server-X.Y.Z [--dry-run]`                              | Пин опубликованного клиента в `client_candidate` сервера, preflight, коммит в ветку PR                                                                                                                                                                                    |
 | `just release pin [--dry-run]`                                                                     | После выпуска переводит submodules `client`, `server` и их моды на то, что работает на проде, и открывает PR «Pin released ...»                                                                                                                                           |
 | `just release ship --mod vX --confirmed-by-owner [--only ...] [--server-merge BRANCH] [--dry-run]` | Сквозной выпуск после подтверждения владельца: ждёт публикации мода, `prepare`, слияние PR, теги, ожидание запусков, `pin` и слияние pin-PR                                                                                                                               |
+| `just release hotfix gameplay\|dedicated\|client <PR> --mod vX --yes [--dry-run]`                  | Фикс из `next` в прод одной командой: gate fix-PR (merged в `next`, зелёный CI), release PR, тег, dedicated pin PR + релиз при изменении gameplay, dispatch Deploy; стоп на первом красном гейте с командой resume                                                        |
 | `just release rollback-client vX.Y.Z [--dry-run]`                                                  | Откат раздаваемого клиента на более старый тег через workflow `deploy-client.yml` в `blockfield-gameplay` (тот же вызов, что делает `ship` для клиента)                                                                                                                   |
 
 `status` и `prepare` также показывают открытые client/server issues с меткой
@@ -1230,6 +1231,18 @@ URL запусков остаются в выводе. Допускается т
 В результате задачи отдельно укажите: **слито / опубликовано / развёрнуто /
 проверено в игре**. Исходники в main и успешная сборка не означают выпуск или
 игровую приёмку. Указывайте реальные команды/хеши и оставшиеся ограничения.
+
+### `just release hotfix`
+
+`just release hotfix gameplay|dedicated|client <PR> --mod vX --yes` ведёт уже
+влитый в `next` фикс до прода без пауз координатора: gate fix-PR (merged в `next`,
+зелёный CI на head), `prepare`, слияние release PR (merge commit, не squash), тег,
+при изменении gameplay — dedicated pin PR и релиз, затем dispatch Deploy (Game —
+по `digest` образа тега, клиент — по тегу). Без `--yes` печатает план и ничего не
+трогает (`--dry-run` — то же самое явно). Пара (смена контракта с двух сторон),
+workspace pin и post-deploy probes остаются за `ship`. Первый красный гейт
+останавливает цепочку: до первого пуша resume — та же команда, дальше — точные
+ручные команды из вывода (`gh pr merge`, `git tag/push`, dispatch).
 
 ## Диагностика и завершение работы
 

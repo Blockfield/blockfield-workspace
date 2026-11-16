@@ -3567,5 +3567,286 @@ class DryRunLegs(unittest.TestCase):
                 self.assertEqual(gameplay, "v2.83.0" if opened else expected)
 
 
+class Hotfix(unittest.TestCase):
+    """`release hotfix`: fix-PR gate, then the existing legs in order."""
+
+    def hotfix_args(self, **kw):
+        base = dict(
+            repo="dedicated",
+            pr=11,
+            mod="v1.54.0",
+            decor=None,
+            bump="patch",
+            yes=True,
+            dry_run=False,
+            timeout=60,
+            interval=0,
+            rc_record=None,
+            gate_waiver=None,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def fix_view(self, state="MERGED", base="next"):
+        return {
+            "number": 11,
+            "state": state,
+            "baseRefName": base,
+            "headRefName": "fix-x",
+            "headRefOid": "a" * 40,
+            "url": "https://example.com/p/11",
+        }
+
+    def fake_gh(self, view, head="b" * 40):
+        def run_gh(*args):
+            if any("number,state,baseRefName" in a for a in args):
+                return json.dumps(view)
+            if any("headRefOid" in a for a in args) and not any(
+                "statusCheckRollup" in a for a in args
+            ):
+                return json.dumps({"headRefOid": head})
+            raise AssertionError(args)
+
+        return run_gh
+
+    def prepared(self, tags, kind, order, branch="release/dedicated-2.83.1"):
+        return (tags, kind, order, branch)
+
+    def test_dry_run_without_yes_prints_plan_and_drives_nothing(self):
+        said = []
+        args = self.hotfix_args(yes=False, dry_run=False)
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="green"),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=self.prepared(
+                    {"server": "v2.83.1"},
+                    "server-only",
+                    [("tag", "server"), ("deploy", "server")],
+                ),
+            ) as prepare,
+            mock.patch.object(release, "say", side_effect=said.append),
+            mock.patch.object(
+                release, "ship_tag_side", side_effect=AssertionError("no tag")
+            ),
+            mock.patch.object(
+                release, "dispatch_deploy", side_effect=AssertionError("no deploy")
+            ),
+        ):
+            self.assertTrue(release.cmd_hotfix(args))
+        prepare.assert_called_once()
+        self.assertTrue(prepare.call_args.args[0].dry_run)
+        text = "\n".join(said)
+        self.assertIn("release kind: server-only", text)
+        self.assertIn("dedicated v2.83.1", text)
+        self.assertIn("--yes", text)
+
+    def test_fix_red_stops_before_prepare(self):
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="red"),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                side_effect=AssertionError("no prepare"),
+            ),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                release.cmd_hotfix(self.hotfix_args())
+        self.assertIn("red", str(ctx.exception))
+        self.assertIn("just release hotfix dedicated 11", str(ctx.exception))
+
+    def test_fix_not_merged_into_next_stops(self):
+        with (
+            mock.patch.object(
+                release, "gh", side_effect=self.fake_gh(self.fix_view(state="OPEN"))
+            ),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                side_effect=AssertionError("no prepare"),
+            ),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                release.cmd_hotfix(self.hotfix_args())
+        self.assertIn("not merged into next", str(ctx.exception))
+
+    def test_middle_leg_red_prints_exact_resume(self):
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="green"),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=self.prepared(
+                    {"server": "v2.83.1"},
+                    "server-only",
+                    [("tag", "server"), ("deploy", "server")],
+                ),
+            ),
+            mock.patch.object(release, "say"),
+            mock.patch.object(release, "say_held"),
+            mock.patch.object(
+                release, "require_rc_gate", side_effect=lambda tags, *a, **k: True
+            ),
+            mock.patch.object(
+                release, "ship_tag_side", side_effect=RuntimeError("boom")
+            ),
+            mock.patch.object(
+                release, "dispatch_deploy", side_effect=AssertionError("no deploy")
+            ),
+            mock.patch.object(
+                release, "image_digest", side_effect=AssertionError("no digest")
+            ),
+            mock.patch.object(release, "pr_number", return_value=7),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                release.cmd_hotfix(self.hotfix_args())
+        text = str(ctx.exception)
+        self.assertIn("gh pr merge 7", text)
+        self.assertIn("--match-head-commit", text)
+        self.assertIn("release/dedicated-2.83.1", text)
+        self.assertIn("v2.83.1", text)
+
+    def test_gameplay_leg_resume_points_at_gameplay_repo(self):
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="green"),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=self.prepared({"gameplay": "v2.83.0"}, "deferred", [], ""),
+            ),
+            mock.patch.object(release, "say"),
+            mock.patch.object(release, "say_held"),
+            mock.patch.object(
+                release, "require_rc_gate", side_effect=lambda tags, *a, **k: True
+            ),
+            mock.patch.object(
+                release, "ship_tag_side", side_effect=RuntimeError("boom")
+            ),
+            mock.patch.object(
+                release, "dispatch_deploy", side_effect=AssertionError("no deploy")
+            ),
+            mock.patch.object(release, "pr_number", return_value=9),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                release.cmd_hotfix(self.hotfix_args(repo="gameplay", pr=12))
+        text = str(ctx.exception)
+        self.assertIn("blockfield-gameplay", text)
+        self.assertIn("release/gameplay-2.83.0", text)
+        self.assertNotIn("blockfield-dedicated", text)
+
+    def test_pair_and_mismatch_are_refused(self):
+        for kind in ("pair", "mismatch", "none"):
+            with (
+                self.subTest(kind=kind),
+                mock.patch.object(
+                    release, "gh", side_effect=self.fake_gh(self.fix_view())
+                ),
+                mock.patch.object(release, "pr_checks", return_value="green"),
+                mock.patch.object(
+                    release,
+                    "prepare_all",
+                    return_value=self.prepared({"server": "v2.83.1"}, kind, []),
+                ),
+                mock.patch.object(release, "say"),
+                mock.patch.object(
+                    release,
+                    "ship_tag_side",
+                    side_effect=AssertionError("no tag"),
+                ),
+            ):
+                with self.assertRaises(SystemExit):
+                    release.cmd_hotfix(self.hotfix_args())
+
+    def test_live_deferred_gameplay_chain(self):
+        calls = []
+        deferred = self.prepared({"gameplay": "v2.83.0"}, "deferred", [], "")
+        shipped = self.prepared(
+            {"server": "v2.83.1"},
+            "server-only",
+            [("tag", "server"), ("deploy", "server")],
+        )
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="green"),
+            mock.patch.object(release, "prepare_all", side_effect=[deferred, shipped]),
+            mock.patch.object(release, "say"),
+            mock.patch.object(release, "say_held"),
+            mock.patch.object(
+                release, "require_rc_gate", side_effect=lambda tags, *a, **k: True
+            ),
+            mock.patch.object(
+                release,
+                "ship_tag_side",
+                side_effect=lambda a, side, tag, t, i, **kw: calls.append(
+                    ("tag", side)
+                ),
+            ),
+            mock.patch.object(release, "image_digest", return_value=DIGEST),
+            mock.patch.object(
+                release,
+                "dispatch_deploy",
+                side_effect=lambda side, ref, t, i, **kw: calls.append(
+                    ("deploy", side, ref)
+                ),
+            ),
+        ):
+            self.assertTrue(
+                release.cmd_hotfix(self.hotfix_args(repo="gameplay", pr=12))
+            )
+        self.assertEqual(
+            calls,
+            [
+                ("tag", "gameplay"),
+                ("tag", "server"),
+                ("deploy", "server", DIGEST),
+            ],
+        )
+
+    def test_live_client_only_skips_digest(self):
+        calls = []
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="green"),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=self.prepared(
+                    {"client": "v2.83.1"},
+                    "client-only",
+                    [("tag", "client"), ("deploy", "client")],
+                ),
+            ),
+            mock.patch.object(release, "say"),
+            mock.patch.object(release, "say_held"),
+            mock.patch.object(
+                release, "require_rc_gate", side_effect=lambda tags, *a, **k: True
+            ),
+            mock.patch.object(
+                release,
+                "ship_tag_side",
+                side_effect=lambda a, side, tag, t, i, **kw: calls.append(
+                    ("tag", side)
+                ),
+            ),
+            mock.patch.object(
+                release, "image_digest", side_effect=AssertionError("no digest")
+            ),
+            mock.patch.object(
+                release,
+                "dispatch_deploy",
+                side_effect=lambda side, ref, t, i, **kw: calls.append(
+                    ("deploy", side, ref)
+                ),
+            ),
+        ):
+            self.assertTrue(release.cmd_hotfix(self.hotfix_args(repo="client", pr=13)))
+        self.assertEqual(calls, [("tag", "client"), ("deploy", "client", "v2.83.1")])
+
+
 if __name__ == "__main__":
     unittest.main()

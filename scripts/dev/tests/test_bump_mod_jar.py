@@ -189,6 +189,59 @@ class Bump(unittest.TestCase):
         ):
             bump.plan(MOD, "bf7", self.trees, fake_fetch)
 
+    def registry(self, entries):
+        """Fixture block-registry.json in the gameplay tree, tracked by git."""
+        path = self.trees["gameplay"] / bump.REGISTRY
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 1, "pins": entries}))
+        subprocess.run(["git", "-C", self.trees["gameplay"], "add", "-A"], check=True)
+
+    def pin(self, j):
+        return {
+            "url": f"{URL}/{j.tag}/{j.name}",
+            "algorithm": "sha512",
+            "hash": j.sha512,
+        }
+
+    def test_registry_pinning_an_old_release_stops_the_write(self):
+        self.registry({JARS["bf6"].name: self.pin(JARS["bf6"])})
+        before = self.holder_bytes()
+        with self.assertRaisesRegex(bump.BumpError, "just export-registry") as ctx:
+            bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        self.assertIn("just vendor-block-registry", str(ctx.exception))
+        self.assertNotIn("not a known holder", str(ctx.exception))
+        self.assertEqual(self.holder_bytes(), before)
+
+    def test_registry_pinning_the_new_release_lets_the_bump_through(self):
+        self.registry({JARS["bf7"].name: self.pin(JARS["bf7"])})
+        edits, _ = bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        holders = {(s, p) for s, paths in bump.MODS[MOD][1].items() for p in paths}
+        self.assertEqual(set(edits), holders)
+
+    def test_registry_without_this_mod_is_not_a_block(self):
+        self.registry(
+            {"other-1.0.jar": {"url": "x", "algorithm": "sha512", "hash": "0" * 128}}
+        )
+        self.assertTrue(bump.plan(MOD, "bf7", self.trees, fake_fetch)[0])
+
+    def test_missing_registry_is_not_a_block(self):
+        self.assertTrue(bump.plan(MOD, "bf7", self.trees, fake_fetch)[0])
+
+    def test_main_writes_nothing_when_the_registry_is_stale(self):
+        self.registry({JARS["bf6"].name: self.pin(JARS["bf6"])})
+        before = self.holder_bytes()
+        code, err, _ = self.main("bf7", mirrored=["bf6", "bf7"])
+        self.assertEqual(code, 1)
+        self.assertIn("just export-registry", err)
+        self.assertIn("just vendor-block-registry", err)
+        self.assertEqual(self.holder_bytes(), before)
+
+    def test_write_with_a_fresh_registry_names_the_re_export(self):
+        self.registry({JARS["bf7"].name: self.pin(JARS["bf7"])})
+        code, out, _ = self.run_main("bf7")
+        self.assertEqual(code, 0)
+        self.assertIn("just export-registry", out)
+
     def test_archive_fallback_naming_the_old_jar_is_an_error(self):
         path = bump.MODS[MOD][1]["gameplay"][0]
         text = (

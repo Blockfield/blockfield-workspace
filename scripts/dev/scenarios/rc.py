@@ -108,6 +108,11 @@ LOG_SCAN_ALLOW = (
     "No data fixer registered for pale_oak_chest_boat",
     # fabric-server-launch.jar cold-install mirror fallback (per-mirror notice from FabricService.invokeWithFallbacks, start succeeds on the next mirror): exact service plus manifest only.
     "service FabricService{meta='https://meta.fabricmc.net/', maven='https://maven.fabricmc.net/'} failed: java.io.IOException: Request to https://maven.fabricmc.net/net/minecraft/experimental_versions.json",
+    # The stand boots with the prod-shape fake CP env (devstack RC_STATS_ENV) and
+    # no CP answers it: the best-effort stats transport retry logs exactly this
+    # line per tick while the boot path under test (resolveConfig) already passed.
+    # Never a prefix: any other stats error still fails the scan.
+    "Statistics outbox cannot be read or committed; queued files retained. Inspect the volume.",
 )
 
 
@@ -819,6 +824,18 @@ def run(
             # Every unexplained line verbatim: the next RC must show the
             # exact text of a new failure instead of a truncated prefix.
             ("log scan clean", not errors, "; ".join(errors) or "no errors")
+        )
+        server_log = logs()
+        rows.append(
+            # The v2.83.3 incident path: the stand CP env must satisfy
+            # StatsDelivery.resolveConfig, whose success logs exactly this.
+            (
+                "stats delivery initialized",
+                "Statistics delivery initialized" in server_log,
+                "resolveConfig accepted the stand CP env"
+                if "Statistics delivery initialized" in server_log
+                else "stand log lacks the stats boot line",
+            )
         )
         reply = rcon.cmd("save-all") or ""
         rows.append(("save-all", "sav" in reply.lower(), reply[:120]))

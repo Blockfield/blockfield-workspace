@@ -55,6 +55,63 @@ class ClientNatives(unittest.TestCase):
 
 
 class ServerProperties(unittest.TestCase):
+    def test_stand_boots_with_the_prod_shape_fake_cp_env(self):
+        # v2.83.3 incident: the RC stand set no CP/stats env, so
+        # StatsDelivery.resolveConfig never ran before prod. The stand carries
+        # the prod shape with fake values of valid shapes instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fabric-server-launch.jar").write_bytes(b"fixture")
+            log = root / "server.out"
+            log.write_text("Done (0.1s)!")
+            args = SimpleNamespace(xms="512M", xmx="1536M", debug=False, gate=False)
+            with (
+                patch.dict(devstack.os.environ, {}, clear=True),
+                patch.object(devstack, "SERVER", root),
+                patch.object(devstack, "LOG", log),
+                patch.object(devstack, "server_pid", side_effect=(None, 77)),
+                patch.object(devstack, "port_open", return_value=False),
+                patch.object(devstack, "java_exe", return_value="/fixture/java"),
+                patch.object(devstack, "stand_preflight", return_value=None),
+                patch.object(devstack, "start_process", return_value=(77, {})) as start,
+            ):
+                devstack.server_start(args)
+                env = start.call_args.kwargs["env"]
+                self.assertEqual(env["BLOCKFIELD_STATS_EXPORT_ENABLED"], "true")
+                self.assertTrue(env["BLOCKFIELD_CP_URL"].startswith("http://"))
+                self.assertEqual(env["BLOCKFIELD_STATS_ALLOW_HTTP"], "true")
+                self.assertNotIn("rc-fake", env["BLOCKFIELD_CP_URL"])
+                for key in (
+                    "BLOCKFIELD_STATS_SERVER_ID",
+                    "BLOCKFIELD_STATS_RULESET",
+                    "BLOCKFIELD_SESSION_PURPOSE",
+                    "BLOCKFIELD_CP_STATS_INGEST_TOKEN",
+                    "BLOCKFIELD_CP_AGENT_ID",
+                    "BLOCKFIELD_CP_COMMAND_TOKEN",
+                    "BLOCKFIELD_CP_CONSOLE_READ_TOKEN",
+                ):
+                    self.assertTrue(env[key], key)
+            # A developer's real env wins: fakes only fill gaps.
+            with (
+                patch.dict(
+                    devstack.os.environ,
+                    {"BLOCKFIELD_CP_URL": "https://cp.example"},
+                    clear=True,
+                ),
+                patch.object(devstack, "SERVER", root),
+                patch.object(devstack, "LOG", log),
+                patch.object(devstack, "server_pid", side_effect=(None, 77)),
+                patch.object(devstack, "port_open", return_value=False),
+                patch.object(devstack, "java_exe", return_value="/fixture/java"),
+                patch.object(devstack, "stand_preflight", return_value=None),
+                patch.object(devstack, "start_process", return_value=(77, {})) as start,
+            ):
+                devstack.server_start(args)
+                self.assertEqual(
+                    start.call_args.kwargs["env"]["BLOCKFIELD_CP_URL"],
+                    "https://cp.example",
+                )
+
     def test_direct_start_restores_proxy_mods_left_by_via_proxy(self):
         # A --via-proxy run moves the proxy-only mods into mods/; the next
         # plain start must move them back, or direct connects are refused.

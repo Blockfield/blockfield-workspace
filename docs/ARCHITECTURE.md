@@ -70,5 +70,6 @@ flowchart LR
 | Комнаты и deep links                  | Launcher [ROOMS-AND-DISCORD](https://github.com/Blockfield/Blockfield-Launcher/blob/main/docs/ROOMS-AND-DISCORD.md)                                                                  |
 | Текст релизов                         | Workspace `.github/actions/release-text`; формат — client [release notes](https://github.com/Blockfield/blockfield-client/blob/main/docs/RELEASE-NOTES.md)                           |
 | TestBot — single source               | Workspace `scripts/dev/testbot`; the mod rig consumes it at a pinned commit (`dev/rig/testbot/testbot-pin.txt` in `blockfield-mod`)                                                  |
+| JAR форков модов в трёх repo          | Список держателей пина (gameplay, mod, client) — `MODS` в workspace `scripts/bump_mod_jar.py`; новый держатель добавляйте туда                                                       |
 
 Решения с историей и проверенными фактами: [docs/adr/](adr/).

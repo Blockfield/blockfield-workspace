@@ -926,7 +926,9 @@ def coverage_source(facts):
         for pr in pin.get("pull_requests", ()):
             lines += [pr["title"], pr["body"], *pr.get("commits", ())]
         lines += pin.get("component_notes", [])
-    return [line for line in lines if line]
+    # Тела PR многострочные: пропуск test/refactor действует построчно, иначе
+    # строка «Tests: passed» гасит соседний факт про killfeed.
+    return [s for line in lines if line for s in line.splitlines() if s]
 
 
 def coverage_errors(player_text, facts):

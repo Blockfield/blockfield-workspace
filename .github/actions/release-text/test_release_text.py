@@ -1868,6 +1868,28 @@ class Coverage(unittest.TestCase):
         )
         self.assertEqual(rt.coverage_errors("- Рамка фокуса.", f), [])
 
+    def test_multiline_body_skip_applies_per_line(self):
+        pr = {
+            "number": 435,
+            "title": "Release server 2.80.0",
+            "body": "killfeed carries the death-event weapon\nTests: passed",
+            "commits": [],
+        }
+        f = facts(
+            pins=[
+                {
+                    "name": "blockfield-server",
+                    "change": "update",
+                    "text": "t",
+                    "component_notes": [],
+                    "pull_requests": [pr],
+                }
+            ]
+        )
+        errors = rt.coverage_errors("- Рамка фокуса.", f)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ленту убийств", errors[0])
+
     def test_facts_without_the_token_are_unaffected(self):
         self.assertEqual(rt.coverage_errors("- Рамка фокуса.", facts()), [])
 

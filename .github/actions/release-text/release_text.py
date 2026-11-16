@@ -899,6 +899,44 @@ def player_errors(sections, facts):
     return errors
 
 
+# Покрытие заметных игроку фактов. Одиночный коммит в сводном PR легко потерять
+# среди десятков записей (v2.81.0: `killfeed carries the death-event weapon`
+# внутри «Release server 2.80.0»). Пара: токен факта → слово, которое игрок
+# должен увидеть. Проверка цитирует строку факта, повтор вынуждает модель
+# вернуть пункт; на последней попытке лишь предупреждает, как стиль.
+COVERAGE_TERMS = (
+    (re.compile(r"(?i)killfeed"), re.compile(r"(?i)лент"), "ленту убийств"),
+)
+
+
+def coverage_source(facts):
+    """Строки фактов, где заметно изменение: PR, коммиты и выдержки пинов и прямых PR."""
+    lines = []
+    for pr in facts["pull_requests"]:
+        lines += [pr["title"], pr["body"], *pr.get("commits", ())]
+    for pin in facts["pins"]:
+        for pr in pin.get("pull_requests", ()):
+            lines += [pr["title"], pr["body"], *pr.get("commits", ())]
+        lines += pin.get("component_notes", [])
+    return [line for line in lines if line]
+
+
+def coverage_errors(player_text, facts):
+    """Факт с игровым токеном без его слова в тексте для игрока."""
+    errors = []
+    sources = coverage_source(facts)
+    for fact_rx, player_rx, what in COVERAGE_TERMS:
+        if not any(fact_rx.search(line) for line in sources):
+            continue
+        if player_rx.search(player_text):
+            continue
+        sample = next(line.strip()[:120] for line in sources if fact_rx.search(line))
+        errors.append(
+            f"в фактах есть «{sample}», а в тексте для игроков нет про {what}"
+        )
+    return errors
+
+
 def player_style_errors(fields):
     """Версии и служебное в текстах для игрока; повторяется, но не отменяет выпуск."""
     errors = []
@@ -943,11 +981,13 @@ def validate_release(obj, facts, final=False):
     style = player_style_errors(
         {"«Кратко»": sections["brief"], "«Для игроков»": sections["players"]}
     )
+    coverage = coverage_errors(sections["players"], facts)
     if final and not errors:
-        for error in style:
+        for error in style + coverage:
             warn(f"описание опубликовано с замечанием: {error}")
         style = []
-    return text, errors + style
+        coverage = []
+    return text, errors + style + coverage
 
 
 def is_patch(version):
@@ -1042,14 +1082,18 @@ def validate_announcement(obj, facts, final=False):
         f"запрещено публиковать: {item}" for item in sorted(set(denied(everything)))
     ]
     style = style_errors(announcement, facts["version"])
+    coverage = coverage_errors(
+        announcement["player_changes"] + "\n" + announcement["bug_fixes"], facts
+    )
     if final and not errors:
-        for error in style:
+        for error in style + coverage:
             warn(f"анонс опубликован с замечанием: {error}")
         style = []
+        coverage = []
     announcement["color_hex"] = (
         COLOR_PATCH if is_patch(facts["version"]) else COLOR_RELEASE
     )
-    return announcement, errors + style
+    return announcement, errors + style + coverage
 
 
 def announcement_request(facts):

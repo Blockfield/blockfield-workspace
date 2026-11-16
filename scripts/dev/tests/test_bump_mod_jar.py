@@ -198,6 +198,14 @@ class Bump(unittest.TestCase):
         with self.assertRaisesRegex(bump.BumpError, "client archive ships"):
             bump.plan(MOD, "bf7", self.trees, fake_fetch)
 
+    def test_truncated_hash_comment_moves_with_the_pin(self):
+        path = bump.MODS[MOD][1]["mod"][0]
+        comment = f"// oracle sha512 {JARS['bf6'].sha512[:8]}…\n"
+        self.write("mod", path, holder(path, JARS["bf6"]) + comment)
+        edits, _ = bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        self.assertIn(f"// oracle sha512 {JARS['bf7'].sha512[:8]}…", edits["mod", path])
+        self.assertNotIn(JARS["bf6"].sha512[:8] + "…", edits["mod", path])
+
     def main(self, *args, mirrored=()):
         """bump.main with fake fetch and gh; (exit code, stderr, gh fake)."""
         fake = FakeMirror(
@@ -249,6 +257,55 @@ class Bump(unittest.TestCase):
         self.assertIn(f"just mirror-mod-jar {MOD} bf7", err)
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(self.holder_bytes(), before)
+
+    def run_main(self, *args, mirrored=("bf6", "bf7"), properties=None):
+        """bump.main with fake fetch and gh; (exit code, stdout, stderr)."""
+        fake = FakeMirror(
+            {
+                JARS[tag].sha512: (
+                    len(jar_bytes(tag)),
+                    f"sha256:{JARS[tag].sha256}",
+                )
+                for tag in mirrored
+            }
+        )
+        if properties is not None:
+            props = self.trees["gameplay"] / "mod-server/common.properties"
+            props.parent.mkdir(parents=True, exist_ok=True)
+            props.write_text(properties)
+        flags = [
+            arg for side, tree in self.trees.items() for arg in (f"--{side}", str(tree))
+        ]
+        with (
+            mock.patch.object(bump, "fetch", fake_fetch),
+            mock.patch.object(release, "gh", fake),
+            contextlib.redirect_stdout(io.StringIO()) as out,
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            code = bump.main([MOD, *args, *flags])
+        self.assertEqual(fake.uploads(), [])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_check_reports_the_common_jar_step(self):
+        code, out, _ = self.run_main("--check", properties="commonVersion=1.66.0\n")
+        self.assertEqual(code, 0)
+        self.assertIn("mod-server/common.properties", out)
+        self.assertIn("commonVersion=1.66.0", out)
+        self.assertIn("vendor-block-registry", out)
+        self.assertIn("client pack", out)
+
+    def test_check_without_properties_still_reports_the_step(self):
+        code, out, _ = self.run_main("--check")
+        self.assertEqual(code, 0)
+        self.assertIn("mod-server/common.properties", out)
+
+    def test_write_prints_the_remaining_chain(self):
+        code, out, _ = self.run_main("bf7")
+        self.assertEqual(code, 0)
+        self.assertIn("remaining release chain", out)
+        self.assertIn("mod-server/common.properties", out)
+        self.assertIn("vendor-block-registry", out)
+        self.assertIn("client pack", out)
 
 
 class Offline(unittest.TestCase):

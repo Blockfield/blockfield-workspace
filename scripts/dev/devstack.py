@@ -81,13 +81,19 @@ BOT_PORTS = {1: 47777, 2: 47778}
 # override a developer's real env; nothing here is a real credential. No CP answers
 # on the stand, so the best-effort transport retry logs once a tick (allowlisted in
 # scenarios/rc.py); the boot line it asserts stays the signal.
+# Pair-completeness matters: StatsHttpTransport only accepts the two ingest paths
+# below (plus ALLOW_HTTP for the fake scheme), and the CP dual-write boots only
+# when BOTH url and token are set — one half alone crashes the boot like no env.
 RC_STATS_ENV = {
     "BLOCKFIELD_STATS_EXPORT_ENABLED": "true",
     "BLOCKFIELD_STATS_SERVER_ID": "00000000-0000-4000-8000-000000000000",
     "BLOCKFIELD_STATS_RULESET": "rc-fake",
     "BLOCKFIELD_SESSION_PURPOSE": "test",
+    "BLOCKFIELD_STATS_INGEST_URL": "http://127.0.0.1:9/api/stats/results",
+    "BLOCKFIELD_STATS_INGEST_TOKEN": "rc-stand-fake-stats-ingest-token-00",
     "BLOCKFIELD_CP_URL": "http://127.0.0.1:9",
     "BLOCKFIELD_STATS_ALLOW_HTTP": "true",
+    "BLOCKFIELD_CP_STATS_INGEST_URL": "http://127.0.0.1:9/v2/stats/results",
     "BLOCKFIELD_CP_STATS_INGEST_TOKEN": "rc-stand-fake-stats-ingest-token-00",
     "BLOCKFIELD_CP_AGENT_ID": "rc-fake",
     "BLOCKFIELD_CP_COMMAND_TOKEN": "rc-stand-fake-cp-command-token-00",

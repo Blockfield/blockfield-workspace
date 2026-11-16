@@ -113,6 +113,14 @@ LOG_SCAN_ALLOW = (
     # line per tick while the boot path under test (resolveConfig) already passed.
     # Never a prefix: any other stats error still fails the scan.
     "Statistics outbox cannot be read or committed; queued files retained. Inspect the volume.",
+    # Same fake env, CP consumer side: with BLOCKFIELD_CP_URL pointing at
+    # 127.0.0.1:9 and nothing listening, the stream/presence/console/renewal
+    # retries log these WARNs every cycle. Exact message cores only; any other
+    # connection failure text still fails the scan.
+    "control-plane: control-plane stream failed, retrying",
+    "CP credential renewal check failed: java.net.ConnectException",
+    "control-plane: presence report failed: java.net.ConnectException",
+    "[BlockField] Console log push failed, retrying.",
 )
 
 

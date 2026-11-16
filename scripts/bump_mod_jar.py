@@ -9,8 +9,10 @@ The JAR is read from the fork's GitHub release and must match the asset digest G
 records plus every SHA256SUMS/SHA512SUMS asset and the BUILD-SHA256SUMS file at the tag
 that names it. Old values are the releases the holders name now (each holder may lag on
 its own). Nothing is written when a holder is missing or pins none of them, or when any
-other tracked file in the three repos would still hold an old hash. Commits and PRs stay
-with the caller.
+other tracked file in the three repos would still hold an old hash. Gameplay
+scripts/maps/block-registry.json records the pin set it was exported from: a bump
+that moves a recorded pin stops with the re-export command instead of writing.
+Commits and PRs stay with the caller.
 """
 
 import argparse
@@ -39,6 +41,11 @@ TREES = {
     "mod": release.ROOT / "localmods/blockfield-mod",
     "client": release.ROOT / "client",
 }
+# Gameplay-tree file recording the pin set the registry was exported from
+# (gameplay PR #41): a bump that moves a recorded pin leaves the blocks stale,
+# and the export downloads every pinned jar, so it cannot run offline from here.
+# The tool stops instead of rewriting the registry; see registry_stale.
+REGISTRY = "scripts/maps/block-registry.json"
 # fork repo -> (jar name with its release tag as group 1, holders per tree). Hash-only
 # holders (frozen test constants, AnimationManifest.PINS) are matched by the hashes of
 # the releases the named holders pin.
@@ -83,6 +90,7 @@ MODS = {
 CHAIN = (
     "mod release carrying the pins"
     " -> gameplay mod-server/common.properties bump (commonVersion/Url/Sha256)"
+    " -> gameplay block-registry re-export (just export-registry)"
     " -> dedicated block-registry re-vendor"
     " (just vendor-block-registry <gameplay-sha>)"
     " -> dedicated release -> client pack release"
@@ -237,6 +245,53 @@ def leftovers(tree, hashes):
     return set(filter(None, done.stdout.split("\0")))
 
 
+def registry_stale(mod, trees, olds, new):
+    """Why the gameplay block registry blocks this bump, or None.
+
+    The registry records the pin set it was exported from, so moving a recorded
+    pin would leave its blocks stale, as would a registry that is already
+    behind the holders (an older recorded pin of this mod instead of the new
+    one). The export downloads every pinned jar and
+    cannot run offline from here, so the bump stops with the re-export command.
+    A missing file predates the registry (gameplay PR #41) and is not a block.
+    """
+    path = Path(trees["gameplay"]) / REGISTRY
+    if not path.is_file():
+        return None
+    try:
+        recorded = json.loads(path.read_text()).get("pins", {})
+    except (ValueError, AttributeError) as error:
+        raise BumpError(f"gameplay {REGISTRY}: cannot read the recorded pins: {error}")
+    if not isinstance(recorded, dict):
+        raise BumpError(f"gameplay {REGISTRY}: recorded pins are not an object")
+    recorded_hashes = {
+        pin.get("hash") for pin in recorded.values() if isinstance(pin, dict)
+    }
+    stale = [
+        jar.name
+        for jar in olds
+        if jar.name in recorded
+        or jar.sha256 in recorded_hashes
+        or jar.sha512 in recorded_hashes
+    ]
+    if not stale and new.name not in recorded and new.sha512 not in recorded_hashes:
+        # Holders moved on without a re-export (e.g. they pin bf6 while the
+        # registry still records bf5), so no bumped old is recorded but the
+        # registry is still behind the new pin.
+        stem = MODS[mod][0]
+        stale = sorted(name for name in recorded if re.search(stem, name or ""))
+    if not stale:
+        return None
+    return (
+        f"gameplay {REGISTRY} pins {', '.join(stale)}: this bump would leave"
+        f" the registry stale. Point the gameplay pins at {new.tag} first"
+        " (--check lists the holders), then run `just export-registry` in the"
+        " gameplay checkout, commit it, push and merge it into gameplay next,"
+        " then `just vendor-block-registry <merge-sha>` for dedicated"
+        " and re-run this bump."
+    )
+
+
 def plan(mod, tag, trees, fetch):
     """(edits, new jar) for the holders that change; raises before any write."""
     repo = f"{release.ORG}/{mod}"
@@ -257,10 +312,15 @@ def plan(mod, tag, trees, fetch):
     old_hashes = {h for jar in olds for h in (jar.sha256, jar.sha512)}
     for side in MODS[mod][1]:
         for path in sorted(leftovers(trees[side], old_hashes)):
+            if (side, path) == ("gameplay", REGISTRY):
+                continue  # the registry has its own staleness check below
             if (side, path) not in texts:
                 errors.append(
                     f"{side} {path}: holds an old hash but is not a known holder"
                 )
+    stale = registry_stale(mod, trees, olds, new)
+    if stale:
+        errors.append(stale)
     if errors:
         raise BumpError("\n".join(errors))
     return edits, new

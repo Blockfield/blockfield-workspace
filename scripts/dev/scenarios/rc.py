@@ -8,10 +8,12 @@ never degrade to SKIP rows).
 """
 
 import json
+import os
 import re
 import time
 import tomllib
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import check_gameplay, hitreg, readiness
 from .common import (
@@ -108,20 +110,49 @@ LOG_SCAN_ALLOW = (
     "No data fixer registered for pale_oak_chest_boat",
     # fabric-server-launch.jar cold-install mirror fallback (per-mirror notice from FabricService.invokeWithFallbacks, start succeeds on the next mirror): exact service plus manifest only.
     "service FabricService{meta='https://meta.fabricmc.net/', maven='https://maven.fabricmc.net/'} failed: java.io.IOException: Request to https://maven.fabricmc.net/net/minecraft/experimental_versions.json",
-    # The stand boots with the prod-shape fake CP env (devstack RC_STATS_ENV) and
-    # no CP answers it: the best-effort stats transport retry logs exactly this
-    # line per tick while the boot path under test (resolveConfig) already passed.
-    # Never a prefix: any other stats error still fails the scan.
+)
+
+
+# Fake-CP retry noise (backlog:blockfield#63): the stand boots with the
+# prod-shape fake CP env (devstack RC_STATS_ENV: BLOCKFIELD_CP_URL at
+# 127.0.0.1:9, nothing listening) and the best-effort retries log these lines
+# every cycle, after the boot path under test (resolveConfig) already passed.
+# Two needles name the refused-connection cause outright
+# (java.net.ConnectException: a 401/503/timeout gives other text and still
+# fails); the other three carry no cause in the line itself, so all five apply
+# only while the RC runs against the fake endpoint (scan_allow): on a stand
+# pointed at a real CP the same lines stay failures.
+FAKE_CP_NOISE = (
     "Statistics outbox cannot be read or committed; queued files retained. Inspect the volume.",
-    # Same fake env, CP consumer side: with BLOCKFIELD_CP_URL pointing at
-    # 127.0.0.1:9 and nothing listening, the stream/presence/console/renewal
-    # retries log these WARNs every cycle. Exact message cores only; any other
-    # connection failure text still fails the scan.
     "control-plane: control-plane stream failed, retrying",
     "CP credential renewal check failed: java.net.ConnectException",
     "control-plane: presence report failed: java.net.ConnectException",
     "[BlockField] Console log push failed, retrying.",
 )
+# The fake endpoint the stand CP env points at (devstack RC_STATS_ENV).
+FAKE_CP_URL = "http://127.0.0.1:9"
+
+
+def fake_cp_noise_active(env=None):
+    """True when the RC runs against the fake CP endpoint.
+
+    A missing BLOCKFIELD_CP_URL means the stand default, which is the fake
+    one (devstack fills gaps with setdefault, never overrides a real env).
+    """
+    url = (os.environ if env is None else env).get("BLOCKFIELD_CP_URL", FAKE_CP_URL)
+    try:
+        endpoint = urlparse(url)
+        host, port = endpoint.hostname, endpoint.port
+    except ValueError:
+        return False
+    return host == "127.0.0.1" and port == 9
+
+
+def scan_allow(env=None):
+    """Effective log-scan allowlist: fake-CP noise only against the fake endpoint."""
+    if fake_cp_noise_active(env):
+        return LOG_SCAN_ALLOW + FAKE_CP_NOISE
+    return LOG_SCAN_ALLOW
 
 
 def pin_version(text):
@@ -822,11 +853,12 @@ def run(
             AssertionError,
         ) as error:
             rows.append(("hitreg smoke", False, str(error)[:160]))
-        errors = scan_errors(logs(), LOG_SCAN_ALLOW) + scan_errors(
+        allow = scan_allow()
+        errors = scan_errors(logs(), allow) + scan_errors(
             client_log_path.read_text(encoding="utf-8", errors="replace")
             if client_log_path.is_file()
             else "",
-            LOG_SCAN_ALLOW,
+            allow,
         )
         rows.append(
             # Every unexplained line verbatim: the next RC must show the

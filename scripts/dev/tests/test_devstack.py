@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 SCRIPT = Path(__file__).resolve().parents[1] / "devstack.py"
 spec = importlib.util.spec_from_file_location("devstack", SCRIPT)
@@ -78,20 +79,41 @@ class ServerProperties(unittest.TestCase):
                 devstack.server_start(args)
                 env = start.call_args.kwargs["env"]
                 self.assertEqual(env["BLOCKFIELD_STATS_EXPORT_ENABLED"], "true")
-                self.assertTrue(env["BLOCKFIELD_CP_URL"].startswith("http://"))
                 self.assertEqual(env["BLOCKFIELD_STATS_ALLOW_HTTP"], "true")
-                self.assertNotIn("rc-fake", env["BLOCKFIELD_CP_URL"])
+                # backlog:blockfield#63: the boot only succeeds with the fake
+                # endpoint, the ingest paths and full-shape fake tokens, so
+                # the test pins host, path and token shape, not truthiness.
+                for key in (
+                    "BLOCKFIELD_STATS_INGEST_URL",
+                    "BLOCKFIELD_CP_URL",
+                    "BLOCKFIELD_CP_STATS_INGEST_URL",
+                ):
+                    endpoint = urlparse(env[key])
+                    self.assertEqual(
+                        (endpoint.hostname, endpoint.port), ("127.0.0.1", 9), key
+                    )
+                self.assertTrue(
+                    urlparse(env["BLOCKFIELD_STATS_INGEST_URL"]).path.endswith(
+                        "/api/stats/results"
+                    )
+                )
+                self.assertTrue(
+                    urlparse(env["BLOCKFIELD_CP_STATS_INGEST_URL"]).path.endswith(
+                        "/v2/stats/results"
+                    )
+                )
+                for key in (
+                    "BLOCKFIELD_STATS_INGEST_TOKEN",
+                    "BLOCKFIELD_CP_STATS_INGEST_TOKEN",
+                    "BLOCKFIELD_CP_COMMAND_TOKEN",
+                    "BLOCKFIELD_CP_CONSOLE_READ_TOKEN",
+                ):
+                    self.assertRegex(env[key], r"\A[!-~]{32,256}\Z", key)
                 for key in (
                     "BLOCKFIELD_STATS_SERVER_ID",
                     "BLOCKFIELD_STATS_RULESET",
                     "BLOCKFIELD_SESSION_PURPOSE",
-                    "BLOCKFIELD_STATS_INGEST_URL",
-                    "BLOCKFIELD_STATS_INGEST_TOKEN",
-                    "BLOCKFIELD_CP_STATS_INGEST_URL",
-                    "BLOCKFIELD_CP_STATS_INGEST_TOKEN",
                     "BLOCKFIELD_CP_AGENT_ID",
-                    "BLOCKFIELD_CP_COMMAND_TOKEN",
-                    "BLOCKFIELD_CP_CONSOLE_READ_TOKEN",
                 ):
                     self.assertTrue(env[key], key)
             # A developer's real env wins: fakes only fill gaps.

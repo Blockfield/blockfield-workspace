@@ -36,8 +36,14 @@
     "            dist/SHA256SUMS"
   ],
   "gameplay/.github/workflows/deploy.yml": [
+    "    inputs:\n      digest:\n",
+    "      client_tag:\n",
     "jobs:\n  deploy:\n",
     "      - name: Validate target and remember previous pair\n"
+  ],
+  "gameplay/.github/workflows/deploy-client.yml": [
+    "    inputs:\n      tag:\n",
+    "      dry_run:\n"
   ],
   "gameplay/scripts/prepare-server-deploy.py": [
     "\"Server moves the client contract: rerun Deploy server with client_tag \"\n"

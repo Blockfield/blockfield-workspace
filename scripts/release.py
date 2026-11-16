@@ -56,7 +56,11 @@ RELEASES = {
     "client": f"{ORG}/blockfield-releases",
     "server": f"{ORG}/blockfield-dedicated",
 }
-WORKFLOW = {"client": "client.yml", "server": "release.yml"}
+WORKFLOW = {
+    "client": "client.yml",
+    "server": "release.yml",
+    "gameplay": "release.yml",
+}
 # A server release never stages, waits for or consults the Workshop: Game and
 # Workshop deploy independently (the Workshop deploys via an explicit
 # move-approved-tag dispatch). No workshop-first annotation exists anymore.
@@ -147,17 +151,16 @@ def plan(changed, compat, prod):
     game = [("tag-gameplay", "server")] if changed.get("gameplay") else []
     moved = {s for s in sides if compat.get(s) != prod}
     if not moved:
-        # Server-only: tag gameplay first when it changed, then dedicated.
-        # Neither tag run deploys on its own: the Game deploy is an explicit
-        # gameplay deploy.yml dispatch (ship), so the dry-run text names no
-        # dispatch here.
+        # Tag gameplay first when it changed, then dedicated. Neither tag run
+        # deploys on its own: each side's deploy is an explicit dispatch
+        # (the Game one carries the image digest), the step after its tag.
         order = []
         for s in ("server", "client"):
             if s not in sides:
                 continue
             if s == "server":
                 order += game
-            order.append(("tag", s))
+            order += [("tag", s), ("deploy", s)]
         return ("independent" if len(sides) == 2 else f"{sides[0]}-only"), order
     if moved == set(SIDES) and compat["client"] == compat["server"]:
         return "pair", [
@@ -972,11 +975,12 @@ def prepare_dedicated(args, prod, gameplay_tag, manifest=None, repin=True):
 def prepare_server(args, prod, manifest=None, repin=True):
     """Gameplay release leg, then the dedicated pin leg.
 
-    Returns (dedicated_tag, meta, gameplay_tag, deferred): the dedicated leg
+    Returns (dedicated_tag, meta, gameplay_tag, deferred), gameplay_tag only
+    for a gameplay release this prepare opened: the dedicated leg
     pins the gameplay release, so it defers (deferred=True, no dedicated tag)
     while that release is unpublished; re-run prepare after tagging gameplay.
     """
-    gameplay_tag, _ = prepare_gameplay(args)
+    gameplay_tag, opened = prepare_gameplay(args)
     if gameplay_tag is None:
         return None, None, None, False
     if not release_published(REPO["gameplay"], gameplay_tag):
@@ -990,7 +994,18 @@ def prepare_server(args, prod, manifest=None, repin=True):
         # The dedicated side has nothing new (a fresh gameplay tag always
         # changes the lock, so this only happens when reusing an old one).
         return None, None, None, False
-    return tag, meta, gameplay_tag, False
+    # A reused (already published) gameplay tag is not a release step: ship
+    # would otherwise try to tag it again.
+    return tag, meta, gameplay_tag if opened else None, False
+
+
+def deploy_line(side, tag, client_tag=None):
+    """The dispatch ship runs, as printed in the plan (the digest exists only after the dedicated tag run)."""
+    ref = f"<game image digest of dedicated {tag}>" if side == "server" else tag
+    return (
+        shlex.join(deploy_command(side, ref, client_tag))
+        + "   # wait for this new dispatch run to succeed"
+    )
 
 
 def tag_lines(order, tags, branch):
@@ -998,10 +1013,8 @@ def tag_lines(order, tags, branch):
     for action, side in order:
         tag = tags.get("gameplay" if action == "tag-gameplay" else side)
         if action == "tag-gameplay":
-            lines.append(
-                f"release gate: RC record for gameplay {tag} passes "
-                "(or a named --gate-waiver); release.push_tag refuses without one"
-            )
+            # The RC record covers the release sides: the gate runs at the
+            # dedicated tag, and a gameplay tag deploys nothing by itself.
             lines.append(
                 f"wait for green gameplay PR checks at pinned head; merge that head; preflight gameplay {tag} at merged SHA"
             )
@@ -1063,20 +1076,9 @@ def tag_lines(order, tags, branch):
             lines.append(
                 f"assert client {tags['client']} is still a prerelease before the server switch"
             )
-            # The digest only exists once the dedicated tag builds the image,
-            # so the plan names the dispatch shape; ship (part 2) fills it in.
-            lines.append(
-                "gh api --method POST repos/Blockfield/blockfield-gameplay/actions/workflows/deploy.yml/dispatches "
-                "-H X-GitHub-Api-Version: 2022-11-28 -f ref=main -F return_run_details=true "
-                f"-f inputs[digest]=<game image digest of dedicated {tags['server']}> "
-                f"-f inputs[client_tag]={tags['client']}"
-                "   # wait for this new dispatch run to succeed"
-            )
+            lines.append(deploy_line("server", tags["server"], tags["client"]))
         else:
-            lines.append(
-                shlex.join(deploy_command(side, tags[side]))
-                + "   # wait for this new dispatch run to succeed"
-            )
+            lines.append(deploy_line(side, tags[side]))
     for action, side in order:
         if action == "tag-gameplay":
             lines.append(
@@ -1622,22 +1624,14 @@ def wait_pr_green(repo, branch, timeout_s, interval_s, expected_head=None):
         raise RuntimeError(f"invalid PR head for {repo} #{number}")
 
     def ready():
-        state = pr_checks(
-            repo,
-            number,
-            expected_head,
-            required_jobs=("image",) if repo == REPO["server"] else (),
-        )
+        state = pr_checks(repo, number, expected_head)
         if state == "red":
             raise RuntimeError(
                 f"checks are red on {repo} PR #{number} ({branch}): fix before shipping"
             )
         return state == "green"
 
-    label = f"green checks on {repo} PR #{number}" + (
-        " including image SUCCESS on the final head" if repo == REPO["server"] else ""
-    )
-    wait_until(label, timeout_s, interval_s, ready)
+    wait_until(f"green checks on {repo} PR #{number}", timeout_s, interval_s, ready)
     return number, expected_head
 
 
@@ -1704,7 +1698,8 @@ def push_tag(
             f"-m {tag} origin/main && git -C {side} push origin {tag}"
         )
         return "(dry run)"
-    require_rc_gate(release_tags or {side: tag}, rc_record, gate_waiver)
+    if side != "gameplay":  # the RC record covers the release sides only
+        require_rc_gate(release_tags or {side: tag}, rc_record, gate_waiver)
     repo = repo_dir(side)
     git(repo, "fetch", "-q", "origin", "main")
     sha = git(repo, "rev-parse", "origin/main")
@@ -1712,10 +1707,21 @@ def push_tag(
         raise RuntimeError(
             f"{side} main differs from the merged commit; nothing was tagged"
         )
-    with worktree(repo, sha, side=side) as tree:
-        res, _ = preflight(side, tag, tree)
+    if side == "gameplay":
+        # Gameplay compiles on CI (no local build): only the tag is checked here.
+        found = published_repo(REPO[side])
+        res = check_tag(
+            tag,
+            tag.removeprefix("v"),
+            {*remote_tags(repo), *([found] if found else [])},
+        )
         if not show(res):
             raise RuntimeError(f"preflight failed before tagging {side} {tag}")
+    else:
+        with worktree(repo, sha, side=side) as tree:
+            res, _ = preflight(side, tag, tree)
+            if not show(res):
+                raise RuntimeError(f"preflight failed before tagging {side} {tag}")
     fetch_main(repo)
     if git(repo, "rev-parse", "origin/main") != sha:
         raise RuntimeError(f"{side} main moved during preflight; nothing was tagged")
@@ -1808,31 +1814,6 @@ def wait_run_success(side, run_id, timeout_s, interval_s, repo=None):
         return None
 
     wait_until(f"successful {side} release run {run_id}", timeout_s, interval_s, ready)
-
-
-def deploy_jobs(repo, run_id):
-    data = json.loads(
-        gh("api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100") or "{}"
-    )
-    return [
-        (j.get("name"), j.get("status"), j.get("conclusion"))
-        for j in data.get("jobs", [])
-    ]
-
-
-def wait_deploy_started(side, run_id, timeout_s, interval_s):
-    """Wait until the tag run's deploy job is in_progress (or done): only then is it safe to tag the other side."""
-
-    def ready():
-        jobs = deploy_jobs(REPO[side], run_id)
-        deploy = [j for j in jobs if "deploy" in (j[0] or "").lower()]
-        if any(c in ("FAILURE", "CANCELLED", "TIMED_OUT") for _, _, c in deploy):
-            raise RuntimeError(
-                f"{side} deploy job failed before the client tag: see the run URL above"
-            )
-        return any(s in ("in_progress", "completed") for _, s, _ in deploy)
-
-    wait_until(f"{side} deploy job started", timeout_s, interval_s, ready)
 
 
 def check_client_release(tag, prerelease, latest=False):
@@ -2068,53 +2049,57 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s, client_stage_run=
 
 
 def deploy_repo(side):
-    """Repo hosting side's Deploy workflow (client deploys from the server repo)."""
-    return REPO["server"] if side == "client" else REPO[side]
+    """Repo hosting side's Deploy workflow: gameplay owns both the Game and the client deploy."""
+    return REPO["gameplay"]
 
 
-def deploy_command(side, tag, client_tag=None):
+def image_digest(tag):
+    """Digest of the game image the dedicated tag run pushed (the lookup deploy.yml uses for its default)."""
+    package = REPO["server"].split("/", 1)[1]
+    versions = json.loads(
+        gh("api", f"orgs/{ORG}/packages/container/{package}/versions?per_page=100")
+    )
+    for version in versions:
+        if tag in version["metadata"]["container"]["tags"]:
+            digest = version["name"]
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                return digest
+    raise RuntimeError(f"no published game image for dedicated {tag}")
+
+
+def deploy_command(side, ref, client_tag=None):
+    """Dispatch argv: the Game deploy takes the image digest (client_tag only when the contract moves), the client deploy a release tag."""
     if side == "client":
-        # The public client repo only publishes the release: its deploy.yml
-        # is a stub with no blockfield-deploy runner. Staging, serving and
-        # Latest run from the server repo's deploy-client.yml instead.
-        return (
-            "gh",
-            "api",
-            "--method",
-            "POST",
-            f"repos/{REPO['server']}/actions/workflows/deploy-client.yml/dispatches",
-            "-H",
-            "X-GitHub-Api-Version: 2022-11-28",
-            "-f",
-            "ref=main",
-            "-F",
-            "return_run_details=true",
-            "-f",
-            f"inputs[tag]={tag}",
-            "-f",
-            "inputs[dry_run]=false",
+        workflow, inputs = (
+            "deploy-client.yml",
+            [f"inputs[tag]={ref}", "inputs[dry_run]=false"],
         )
+    else:
+        workflow = "deploy.yml"
+        inputs = [
+            f"inputs[digest]={ref}",
+            *([f"inputs[client_tag]={client_tag}"] if client_tag else []),
+        ]
     return (
         "gh",
         "api",
         "--method",
         "POST",
-        f"repos/{REPO[side]}/actions/workflows/deploy.yml/dispatches",
+        f"repos/{REPO['gameplay']}/actions/workflows/{workflow}/dispatches",
         "-H",
         "X-GitHub-Api-Version: 2022-11-28",
         "-f",
         "ref=main",
         "-F",
         "return_run_details=true",
-        "-f",
-        f"inputs[tag]={tag}",
-        *(["-f", f"inputs[client_tag]={client_tag}"] if client_tag else []),
+        *[arg for item in inputs for arg in ("-f", item)],
     )
 
 
-def dispatch_deploy(side, tag, timeout_s, interval_s, client_tag=None, dry=False):
+def dispatch_deploy(side, ref, timeout_s, interval_s, client_tag=None, dry=False):
+    """ref: the image digest for server, the release tag for client."""
     # Ask GitHub for the dispatched run ID: a list-by-SHA can select someone else's deploy.
-    result = ship_mutate(dry, *deploy_command(side, tag, client_tag))
+    result = ship_mutate(dry, *deploy_command(side, ref, client_tag))
     if dry:
         return
     data = json.loads(result or "{}")
@@ -2480,17 +2465,24 @@ def cmd_ship(args):
     # heal it before prepare cuts a release from a stale next. Nothing is
     # merged yet, so a next that cannot be synced stops the ship here.
     if not dry:
-        for side in SIDES:
+        for side in (*SIDES, "gameplay"):  # the sides status heals
             if not ff_next_to_main(side, dry) and has_next(repo_dir(side)):
                 raise SystemExit(
                     f"ship stopped: origin/next of {side} is not synced with origin/main; fix it first"
                 )
     tags, kind, order, branch = resume_pair(args) if resume else prepare_all(args)
-    if kind in ("none", "mismatch", "deferred") or not tags:
+    if kind in ("none", "mismatch") or not tags:
         raise SystemExit(f"ship stopped: release kind is {kind}")
     say(f"\nrelease kind: {kind}")
     if dry:
-        lines = tag_lines(order, tags, branch)
+        if kind == "deferred":
+            lines = [
+                *tag_lines([("tag-gameplay", "server")], tags, branch),
+                f"re-run prepare: it opens the dedicated pin PR against gameplay {tags['gameplay']}; "
+                "then the dedicated tag and the digest dispatch of the Game deploy follow",
+            ]
+        else:
+            lines = tag_lines(order, tags, branch)
         if kind == "pair":
             lines.append(
                 "verify public client/server tags, client digest and compatibility; client non-prerelease + Latest after both guarded Deploys"
@@ -2502,9 +2494,25 @@ def cmd_ship(args):
             "dry run: prepare pushed nothing, so merge/tag/watch/pin steps above are not executed"
         )
         return True
-    require_rc_gate(
-        tags, getattr(args, "rc_record", None), getattr(args, "gate_waiver", None)
+    rc_record, gate_waiver = (
+        getattr(args, "rc_record", None),
+        getattr(args, "gate_waiver", None),
     )
+
+    def ship_gameplay():
+        # Merge, tag and wait for the JAR release: the dedicated pin PR needs it.
+        if "gameplay" in tags:
+            ship_tag_side(args, "gameplay", tags["gameplay"], timeout_s, interval_s)
+
+    if kind == "deferred":
+        ship_gameplay()
+        tags, kind, order, branch = prepare_all(args)
+        if kind in ("none", "mismatch", "deferred") or not tags:
+            raise SystemExit(f"ship stopped: release kind is {kind}")
+        say(f"\nrelease kind: {kind}")
+    # The RC record covers the release sides; gameplay is not one of them.
+    side_tags = {s: tags[s] for s in SIDES if s in tags}
+    require_rc_gate(side_tags, rc_record, gate_waiver)
     if kind == "pair":
         if resume:
             sha = git(repo_dir("client"), "rev-parse", "FETCH_HEAD^{commit}")
@@ -2528,7 +2536,7 @@ def cmd_ship(args):
                 timeout_s,
                 interval_s,
                 publish_only=True,
-                release_tags=tags,
+                release_tags=side_tags,
             )
         candidate_sha = cmd_candidate(
             argparse.Namespace(
@@ -2538,6 +2546,7 @@ def cmd_ship(args):
                 expected_tree=resume[3] if resume else None,
             )
         )
+        ship_gameplay()
         ship_tag_side(
             args,
             "server",
@@ -2546,12 +2555,12 @@ def cmd_ship(args):
             interval_s,
             publish_only=True,
             expected_head=candidate_sha,
-            release_tags=tags,
+            release_tags=side_tags,
         )
         check_client_release(tags["client"], True)
         dispatch_deploy(
             "server",
-            tags["server"],
+            image_digest(tags["server"]),
             timeout_s,
             interval_s,
             client_tag=tags["client"],
@@ -2561,87 +2570,38 @@ def cmd_ship(args):
         dispatch_deploy("client", tags["client"], timeout_s, interval_s, dry=dry)
         post_deploy_probes({"client": tags["client"]}, client, timeout_s, interval_s)
         verify_pair(tags, client, timeout_s, interval_s)
-    elif kind == "server-only":
-        # Server-only hotfix: a plain tag, then the automatic tag-run deploys
-        # Game on its own. The Workshop is never staged, moved or consulted;
-        # a Workshop release is a separate explicit move-approved-tag dispatch.
-        ship_tag_side(
-            args,
-            "server",
-            tags["server"],
-            timeout_s,
-            interval_s,
-        )
-        post_deploy_probes(tags, None, timeout_s, interval_s)
-    elif len(tags) == 2:
-        # Independent: server first; hold the client tag until the server
-        # deploy job runs, so old clients stay locked out for less time.
-        server_branch, client_branch = (
-            pr_branch("server", tags["server"]),
-            pr_branch("client", tags["client"]),
-        )
-        number, head = wait_pr_green(
-            REPO["server"], server_branch, timeout_s, interval_s
-        )
-        server_merged = merge_pr(
-            REPO["server"],
-            number,
-            dry,
-            head,
-        )
-        # A later gate may still fail: move next now, so a rerun never
-        # builds on the stale base.
-        ff_next_to_main("server", dry)
-        server_sha = push_tag(
-            "server",
-            tags["server"],
-            dry,
-            server_merged,
-            getattr(args, "rc_record", None),
-            getattr(args, "gate_waiver", None),
-            tags,
-        )
-        number, head = wait_pr_green(
-            REPO["client"], client_branch, timeout_s, interval_s
-        )
-        client_merged = merge_pr(
-            REPO["client"],
-            number,
-            dry,
-            head,
-        )
-        ff_next_to_main("client", dry)
-        server_run = wait_release_run(
-            "server", server_sha, timeout_s, interval_s, tags["server"]
-        )
-        wait_deploy_started("server", server_run["databaseId"], timeout_s, interval_s)
-        client_sha = push_tag(
-            "client",
-            tags["client"],
-            dry,
-            client_merged,
-            getattr(args, "rc_record", None),
-            getattr(args, "gate_waiver", None),
-            tags,
-        )
-        wait_run_success("server", server_run["databaseId"], timeout_s, interval_s)
-        wait_run_success(
-            "client",
-            wait_release_run(
-                "client", client_sha, timeout_s, interval_s, tags["client"]
-            )["databaseId"],
-            timeout_s,
-            interval_s,
-        )
-        # The client tag run only publishes; serving runs from the server repo.
-        dispatch_deploy("client", tags["client"], timeout_s, interval_s, dry=dry)
-        post_deploy_probes(tags, None, timeout_s, interval_s)
-    else:
-        side = next(iter(tags))
-        ship_tag_side(args, side, tags[side], timeout_s, interval_s)
-        if side == "client":
+    elif kind in ("server-only", "independent", "client-only"):
+        # One server leg and/or one client leg, server first: the dedicated tag
+        # run only publishes, so the Game deploy is a digest dispatch after it,
+        # and the client tag run only publishes too (serving is the dispatch).
+        # The Workshop is never staged, moved or consulted here; a Workshop
+        # release is a separate explicit move-approved-tag dispatch.
+        if "server" in side_tags:
+            ship_gameplay()
+            ship_tag_side(
+                args,
+                "server",
+                tags["server"],
+                timeout_s,
+                interval_s,
+                release_tags=side_tags,
+            )
+            dispatch_deploy(
+                "server", image_digest(tags["server"]), timeout_s, interval_s, dry=dry
+            )
+        if "client" in side_tags:
+            ship_tag_side(
+                args,
+                "client",
+                tags["client"],
+                timeout_s,
+                interval_s,
+                release_tags=side_tags,
+            )
             dispatch_deploy("client", tags["client"], timeout_s, interval_s, dry=dry)
-        post_deploy_probes(tags, None, timeout_s, interval_s)
+        post_deploy_probes(side_tags, None, timeout_s, interval_s)
+    else:
+        raise SystemExit(f"ship stopped: unsupported release kind {kind}")
     pin = cmd_pin(
         argparse.Namespace(
             client=tags.get("client"),
@@ -2664,7 +2624,7 @@ def cmd_ship(args):
 
 
 def cmd_rollback_client(args):
-    """Roll the served client back to an older tag via the server workflow."""
+    """Roll the served client back to an older tag via the gameplay deploy-client workflow."""
     if not args.confirmed_by_owner and not args.dry_run:
         raise SystemExit(
             "refusing: `release rollback-client` switches production serving, "
@@ -2774,7 +2734,7 @@ def parser():
     s.set_defaults(run=cmd_ship)
     s = sub.add_parser(
         "rollback-client",
-        help="roll the served client back to an older tag via the server deploy-client workflow",
+        help="roll the served client back to an older tag via the gameplay deploy-client workflow",
     )
     s.add_argument("tag", metavar="vX.Y.Z")
     s.add_argument(

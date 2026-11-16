@@ -1137,7 +1137,7 @@ Product-репозитории работают через интеграцио�
 | `just release candidate vC --branch release/server-X.Y.Z [--dry-run]`                              | Пин опубликованного клиента в `client_candidate` сервера, preflight, коммит в ветку PR                                                                                                                                                                                    |
 | `just release pin [--dry-run]`                                                                     | После выпуска переводит submodules `client`, `server` и их моды на то, что работает на проде, и открывает PR «Pin released ...»                                                                                                                                           |
 | `just release ship --mod vX --confirmed-by-owner [--only ...] [--server-merge BRANCH] [--dry-run]` | Сквозной выпуск после подтверждения владельца: ждёт публикации мода, `prepare`, слияние PR, теги, ожидание запусков, `pin` и слияние pin-PR                                                                                                                               |
-| `just release rollback-client vX.Y.Z [--dry-run]`                                                  | Откат раздаваемого клиента на более старый тег через workflow `deploy-client.yml` в server-репозитории (тот же вызов, что делает `ship` для клиента)                                                                                                                      |
+| `just release rollback-client vX.Y.Z [--dry-run]`                                                  | Откат раздаваемого клиента на более старый тег через workflow `deploy-client.yml` в `blockfield-gameplay` (тот же вызов, что делает `ship` для клиента)                                                                                                                   |
 
 `status` и `prepare` также показывают открытые client/server issues с меткой
 `next-release`: отложенные пины, теги ресурсов и проверки. Список загружается
@@ -1153,17 +1153,21 @@ Product-репозитории работают через интеграцио�
 
 - контракт не меняется: сервер и клиент выпускаются независимо (сервер первым, затем клиент);
   `candidate` и `client_tag` не нужны, откат каждой стороны — тоже в одиночку;
+  сервер: [тег gameplay], тег dedicated и dispatch gameplay `deploy.yml` с `digest`; клиент: тег и dispatch `deploy-client.yml`;
 - контракт меняется на обеих сторонах одинаково (пара): тег клиента публикует prerelease, auto Deploy client успешно подготавливает невидимый stage,
-  `just release candidate`, слияние серверного PR, тег сервера (его Deploy отказывает, это ожидаемо),
-  Deploy server с `client_tag`, затем Deploy client; PR сервера красный до шага `candidate`;
+  `just release candidate`, слияние PR dedicated, тег dedicated (автоматического Deploy у него нет),
+  Deploy server (gameplay `deploy.yml`) с `digest` и `client_tag`, затем Deploy client; PR dedicated красный до шага `candidate`;
 - контракт изменился на одной стороне или стороны расходятся: выпуск невозможен, `status` и `prepare` сообщают об этом.
 
 Клиентский Deploy (`deploy` в паре и `rollback-client`) идёт не в публичный
 `blockfield-client` — его `deploy.yml` заглушка без раннера `blockfield-deploy`, —
-а workflow `deploy-client.yml` в `blockfield-dedicated` (`inputs: tag, dry_run`;
+а workflow `deploy-client.yml` в `blockfield-gameplay` (`inputs: tag, dry_run`;
 `ship` всегда шлёт `dry_run=false`). Откат не пересобирает пак: workflow
-переключает раздачу на указанный старый тег и Latest. До слияния
-blockfield-server#276 следующий `ship` не стартует.
+переключает раздачу на указанный старый тег и Latest. Deploy Game — workflow
+`deploy.yml` там же (`inputs: digest`, `client_tag` только при смене контракта);
+workflow в `blockfield-server` и в `blockfield-dedicated` `ship` не запускает.
+Если gameplay изменился, а его релиз ещё не опубликован, `prepare` ждёт: `ship` сам сливает
+PR gameplay, ставит тег, ждёт публикации JAR и повторяет `prepare` (PR закрепления dedicated).
 
 `--dry-run` выполняет всё локально (скачивание, сборку, коммит во временном worktree) и только печатает
 `git push` и `gh pr create`. Release notes инструмент не пишет: пока workflow тега их требует, `prepare`
@@ -1181,7 +1185,7 @@ just release ship --mod v1.55.3 --bump minor --server-merge pins/fork-bf-release
 ```
 
 `release ship` ждёт публикации мода и выполняет `prepare`: оба release PR открываются
-до клиентского тега, чтобы серверные check/image шли параллельно публикации клиента.
+до клиентского тега, чтобы серверные проверки шли параллельно публикации клиента.
 Для несовместимой пары:
 
 1. Закрепляет head клиентского PR, ждёт зелёного CI этого SHA и сливает только его
@@ -1191,13 +1195,13 @@ just release ship --mod v1.55.3 --bump minor --server-merge pins/fork-bf-release
    с `SHA256SUMS` и GitHub asset digests, скачанный `build.json` проверяется отдельно.
    Любой клиентский refusal, stage failure или пропущенный Deploy останавливает ship.
 2. `candidate` закрепляет опубликованный клиент в серверной release-ветке и выполняет preflight.
-   Только после зелёного CI **нового head**, включая успешный (не skipped) `image`, серверный PR сливается; свежий preflight, затем тег сервера.
-   У tag workflow требуются успешные `prepare` и `release`, опубликованный релиз с release notes;
-   полный tag run и автоматический Deploy не задерживают следующий шаг. Любая уже видимая
-   ошибка останавливает ship; допустим только проверенный отказ server auto Deploy на старом клиенте.
-   Раннее создание GitHub release не заменяет успешный publication job и asset `release-notes.md`.
+   Только после зелёного CI **нового head** PR dedicated сливается; свежий preflight, затем тег dedicated.
+   У tag workflow требуется успешный job `release` и опубликованный релиз с `build.json`,
+   `build-workshop.json` и `SHA256SUMS`; автоматического Deploy у тега нет. Любая уже видимая
+   ошибка останавливает ship.
+   Раннее создание GitHub release не заменяет успешный publication job.
 3. Перед switch повторно проверяет, что клиент остаётся prerelease. Запускает Deploy server
-   с `tag=<сервер>` и `client_tag=<клиент>`, ждёт успеха именно этого dispatch.
+   с `digest=<digest образа тега dedicated>` (из пакета GHCR) и `client_tag=<клиент>`, ждёт успеха именно этого dispatch.
    Затем запускает Deploy client с `tag=<клиент>`: serve/gate, снятие prerelease и promotion в Latest;
    также ждёт успеха. Promotion принадлежит Deploy client. Все проверки совместимости,
    стабильности Game/Workshop, готовности, gate, пак и откат выполняются штатными workflows
@@ -1208,9 +1212,9 @@ just release ship --mod v1.55.3 --bump minor --server-merge pins/fork-bf-release
    клиента должен быть non-prerelease и Latest. Только затем
    `pin`, зелёный CI workspace pin-PR и его слияние. Игровую приёмку это не заменяет.
 
-Независимый выпуск сохраняет порядок: сервер первым, тег клиента — когда deploy job серверного
-запуска стал `in_progress`; обе полные workflow должны завершиться успешно. Выпуск одной стороны
-тоже ждёт успеха полного tag workflow. Все tag-run выбираются по тегу, событию `push` и SHA.
+Независимый выпуск идёт по виду выпуска, а не по числу тегов: сервер первым ([тег gameplay], тег
+dedicated, Deploy по `digest`), затем клиент (тег, Deploy client); каждый шаг ждёт успеха.
+Выпуск одной стороны тоже ждёт успеха полного tag workflow и своего dispatch. Все tag-run выбираются по тегу, событию `push` и SHA.
 Перед каждым тегом повторяется preflight на точном merge commit; если main отличается от него
 или сдвинулся во время проверки, тег не ставится.
 Каждое ожидание ограничено `--timeout` (по умолчанию 1800 с, опрос каждые `--interval` секунд, по умолчанию 5).
@@ -1221,7 +1225,7 @@ URL запусков остаются в выводе. Допускается т
 `--dry-run` подтверждения не требует: выполняет локальные сборки/preflight и печатает полный план
 с ожиданиями CI/публикации/Deploy, проверкой пары и pin (ветка candidate — только для пары); наружу ничего не отправляет.
 Команда dispatch в плане и реальном запуске строится одним helper: `gh api --method POST`,
-`-f ref=main`, `-F return_run_details=true` (JSON boolean), `-f inputs[tag]=...` и при паре `inputs[client_tag]`.
+`-f ref=main`, `-F return_run_details=true` (JSON boolean), `-f inputs[digest]=...` (Game) или `-f inputs[tag]=...` (клиент) и при паре `inputs[client_tag]`.
 
 В результате задачи отдельно укажите: **слито / опубликовано / развёрнуто /
 проверено в игре**. Исходники в main и успешная сборка не означают выпуск или

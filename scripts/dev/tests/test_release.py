@@ -18,6 +18,7 @@ import release  # noqa: E402 - common helper lives alongside the dev directory.
 
 PROD = "a" * 64
 MOVED = "b" * 64
+DIGEST = "sha256:" + "d" * 64
 
 
 class Versions(unittest.TestCase):
@@ -51,11 +52,15 @@ class Plan(unittest.TestCase):
 
     def test_single_side_keeps_contract(self):
         kind, order = release.plan({"server": True}, {"server": PROD}, PROD)
-        # Server-only is tag-only: neither tag run deploys on its own (the
-        # Game deploy is an explicit gameplay dispatch owned by ship).
-        self.assertEqual((kind, order), ("server-only", [("tag", "server")]))
+        # Neither tag run deploys on its own: the Game deploy is an explicit
+        # gameplay dispatch and the client deploy a deploy-client dispatch.
+        self.assertEqual(
+            (kind, order), ("server-only", [("tag", "server"), ("deploy", "server")])
+        )
         kind, order = release.plan({"client": True}, {"client": PROD}, PROD)
-        self.assertEqual((kind, order), ("client-only", [("tag", "client")]))
+        self.assertEqual(
+            (kind, order), ("client-only", [("tag", "client"), ("deploy", "client")])
+        )
 
     def test_gameplay_change_tags_gameplay_first(self):
         kind, order = release.plan(
@@ -63,7 +68,10 @@ class Plan(unittest.TestCase):
         )
         self.assertEqual(
             (kind, order),
-            ("server-only", [("tag-gameplay", "server"), ("tag", "server")]),
+            (
+                "server-only",
+                [("tag-gameplay", "server"), ("tag", "server"), ("deploy", "server")],
+            ),
         )
         compat = {"client": MOVED, "server": MOVED}
         kind, order = release.plan(
@@ -82,19 +90,31 @@ class Plan(unittest.TestCase):
             ],
         )
 
-    def test_server_only_dry_run_has_no_manual_deploy(self):
+    def test_server_only_dry_run_names_the_digest_dispatch(self):
         tags = {"server": "v2.79.4"}
-        lines = release.tag_lines([("tag", "server")], tags, "release/server-v2.79.4")
-        self.assertFalse(
-            [line for line in lines if "dispatches" in line or "deploy.yml" in line],
-            lines,
+        lines = release.tag_lines(
+            [("tag", "server"), ("deploy", "server")], tags, "release/server-v2.79.4"
         )
+        dispatch = [line for line in lines if "deploy.yml/dispatches" in line]
+        self.assertEqual(len(dispatch), 1, lines)
+        self.assertIn("blockfield-gameplay/actions/workflows/deploy.yml", dispatch[0])
+        self.assertIn("inputs[digest]=", dispatch[0])
+        self.assertNotIn("client_tag", dispatch[0])
+        self.assertNotIn("inputs[tag]", dispatch[0])
 
     def test_independent_pair_tags_server_first(self):
         compat = {"client": PROD, "server": PROD}
         kind, order = release.plan({"client": True, "server": True}, compat, PROD)
         self.assertEqual(kind, "independent")
-        self.assertEqual(order, [("tag", "server"), ("tag", "client")])
+        self.assertEqual(
+            order,
+            [
+                ("tag", "server"),
+                ("deploy", "server"),
+                ("tag", "client"),
+                ("deploy", "client"),
+            ],
+        )
 
     def test_contract_change_on_both_sides_is_a_pair(self):
         compat = {"client": MOVED, "server": MOVED}
@@ -389,11 +409,11 @@ class Ship(unittest.TestCase):
         self.assertLess(kinds.index("watched"), kinds.index("deploy"))
         self.assertLess(kinds.index("deploy"), kinds.index("probes"))
 
-    def test_server_only_ships_game_without_workshop(self):
+    def test_server_only_ships_game_with_digest_dispatch(self):
         calls = []
         tags = {"server": "v2.77.0"}
         patches = self.base_patches(
-            calls, (tags, "server-only", [("tag", "server")], "")
+            calls, (tags, "server-only", [("tag", "server"), ("deploy", "server")], "")
         )
         self.assertTrue(
             self.run_patches(
@@ -403,24 +423,35 @@ class Ship(unittest.TestCase):
         staged = [
             c
             for c in calls
-            if c[0] in ("tag", "run", "published", "watched", "deploy", "probes", "pin")
+            if c[0]
+            in (
+                "tag",
+                "run",
+                "published",
+                "watched",
+                "digest",
+                "deploy",
+                "probes",
+                "pin",
+            )
         ]
-        # A plain tag, then the automatic tag-run deploys Game on its own:
-        # no Workshop staging (published), no explicit Workshop move
-        # (approve), no manual Game deploy.
+        # A plain dedicated tag, then one gameplay deploy dispatch with the
+        # image digest (no client_tag: the contract did not move). No Workshop
+        # staging (published) and no Workshop move (approve).
         self.assertEqual(
             staged,
             [
                 ("tag", "server"),
                 ("run", "server"),
                 ("watched", "server"),
+                ("digest", "v2.77.0"),
+                ("deploy", "server", DIGEST, {"dry": False}),
                 ("probes", "server"),
                 ("pin",),
             ],
         )
         self.assertFalse(any(c[0] == "published" for c in calls))
         self.assertFalse(any(c[0] == "approve" for c in calls))
-        self.assertFalse(any(c[0] == "deploy" for c in calls))
         self.assertIn(("ff", "server"), calls)
 
     def test_wait_until_returns_first_truthy_and_times_out(self):
@@ -572,7 +603,7 @@ class Ship(unittest.TestCase):
             calls.append(("prepare", "server"))
             self.assertIsNotNone(manifest)
             self.assertFalse(repin)
-            return tags["server"], {"compatibility": MOVED}, "v2.78.0", False
+            return tags["server"], {"compatibility": MOVED}, None, False
 
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -592,10 +623,11 @@ class Ship(unittest.TestCase):
             )
         # next is healed before prepare cuts a release from it.
         self.assertEqual(
-            calls[:4],
+            calls[:5],
             [
                 ("ff", "client"),
                 ("ff", "server"),
+                ("ff", "gameplay"),
                 ("prepare", "client"),
                 ("prepare", "server"),
             ],
@@ -605,57 +637,26 @@ class Ship(unittest.TestCase):
         )
         self.assertIn(("green", release.REPO["server"], "candidate-sha"), calls)
 
-    def test_server_image_must_succeed_on_final_head_before_merge(self):
+    def test_no_repo_waits_for_an_image_job(self):
+        # The dedicated check workflow has a single `check` job: a required
+        # `image` job could never turn green and ship would wait forever.
         head = "a" * 40
-        for conclusion in (
-            "SUCCESS",
-            "FAILURE",
-            "SKIPPED",
-            "NEUTRAL",
-            None,
-            "missing",
-            "old-head",
-        ):
-            data = {
-                "headRefOid": "b" * 40 if conclusion == "old-head" else head,
-                "statusCheckRollup": [
-                    {"name": "check", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                ],
-            }
-            if conclusion != "missing":
-                data["statusCheckRollup"].append(
-                    {
-                        "name": "image",
-                        "status": "IN_PROGRESS" if conclusion is None else "COMPLETED",
-                        "conclusion": "SUCCESS"
-                        if conclusion == "old-head"
-                        else conclusion,
-                    }
-                )
+        data = {
+            "headRefOid": head,
+            "statusCheckRollup": [
+                {"name": "check", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+        }
+        for repo in release.REPO.values():
             with (
-                self.subTest(conclusion=conclusion),
+                self.subTest(repo=repo),
                 mock.patch.object(release, "pr_number", return_value=7),
                 mock.patch.object(release, "gh", return_value=json.dumps(data)),
-                mock.patch.object(release, "merge_pr") as merge,
             ):
-                if conclusion == "SUCCESS":
-                    self.assertEqual(
-                        release.wait_pr_green(
-                            release.REPO["server"], "release/server-2.78.0", 0, 0, head
-                        ),
-                        (7, head),
-                    )
-                else:
-                    with self.assertRaises(RuntimeError):
-                        release.ship_tag_side(
-                            self.ship_args(timeout=0),
-                            "server",
-                            "v2.78.0",
-                            0,
-                            0,
-                            expected_head=head,
-                        )
-                merge.assert_not_called()
+                self.assertEqual(
+                    release.wait_pr_green(repo, "release/x-1.0.0", 0, 0, head),
+                    (7, head),
+                )
 
     def test_mod_published(self):
         ok = mock.Mock(returncode=0, stdout="v1.54.0", stderr="")
@@ -670,10 +671,11 @@ class Ship(unittest.TestCase):
                 release.mod_published("v1.54.0")
 
     def base_patches(self, calls, prepared):
-        shas = {"server": "s" * 40, "client": "c" * 40}
+        shas = {"server": "s" * 40, "client": "c" * 40, "gameplay": "g" * 40}
         runs = {
             "server": {"databaseId": 11, "url": "https://example.com/s"},
             "client": {"databaseId": 12, "url": "https://example.com/c"},
+            "gameplay": {"databaseId": 13, "url": "https://example.com/g"},
         }
         return (
             mock.patch.object(release, "prepare_all", return_value=prepared),
@@ -713,8 +715,8 @@ class Ship(unittest.TestCase):
             ),
             mock.patch.object(
                 release,
-                "wait_deploy_started",
-                side_effect=lambda side, rid, t, i: calls.append(("gate", side)),
+                "image_digest",
+                side_effect=lambda tag: calls.append(("digest", tag)) or DIGEST,
             ),
             mock.patch.object(
                 release,
@@ -738,7 +740,7 @@ class Ship(unittest.TestCase):
                 release,
                 "dispatch_deploy",
                 side_effect=lambda side, tag, t, i, **kw: calls.append(
-                    ("deploy", side, kw)
+                    ("deploy", side, tag, kw)
                 ),
             ),
             mock.patch.object(
@@ -795,52 +797,127 @@ class Ship(unittest.TestCase):
             self.run_patches(patches, lambda: release.cmd_ship(self.ship_args()))
         prepare.assert_not_called()
 
-    def test_independent_gates_client_tag_on_server_deploy(self):
+    def test_independent_ships_every_side_server_before_client(self):
+        # Kind decides the flow, not len(tags): client + dedicated + gameplay is
+        # still an independent release and every side ships.
+        for with_gameplay in (False, True):
+            with self.subTest(gameplay=with_gameplay):
+                calls = []
+                tags = {"server": "v2.76.3", "client": "v2.76.3"}
+                if with_gameplay:
+                    tags["gameplay"] = "v2.83.0"
+                patches = self.base_patches(
+                    calls,
+                    (tags, "independent", [("tag", "server"), ("tag", "client")], ""),
+                )
+                self.assertTrue(
+                    self.run_patches(
+                        patches, lambda: release.cmd_ship(self.ship_args())
+                    )
+                )
+                head = "a" * 40
+                gameplay = (
+                    [
+                        ("green", release.REPO["gameplay"]),
+                        ("merge", release.REPO["gameplay"], head),
+                        ("ff", "gameplay"),
+                        ("tag", "gameplay"),
+                        ("run", "gameplay"),
+                        ("watched", "gameplay"),
+                    ]
+                    if with_gameplay
+                    else []
+                )
+                self.assertEqual(
+                    calls,
+                    [
+                        ("ff", "client"),
+                        ("ff", "server"),
+                        ("ff", "gameplay"),
+                        ("rc-gate",),
+                        *gameplay,
+                        ("green", release.REPO["server"]),
+                        ("merge", release.REPO["server"], head),
+                        ("ff", "server"),
+                        ("tag", "server"),
+                        ("run", "server"),
+                        ("watched", "server"),
+                        ("digest", "v2.76.3"),
+                        ("deploy", "server", DIGEST, {"dry": False}),
+                        ("green", release.REPO["client"]),
+                        ("merge", release.REPO["client"], head),
+                        ("ff", "client"),
+                        ("tag", "client"),
+                        ("run", "client"),
+                        ("watched", "client"),
+                        ("deploy", "client", "v2.76.3", {"dry": False}),
+                        ("probes", "client"),
+                        ("pin",),
+                        ("green", release.WORKSPACE_REPO),
+                        ("merge", release.WORKSPACE_REPO, head),
+                        *[("ff", side) for side in tags],
+                    ],
+                )
+
+    def test_rc_gate_covers_release_sides_not_gameplay(self):
         calls = []
-        tags = {"server": "v2.76.3", "client": "v2.76.3"}
-        patches = self.base_patches(
-            calls, (tags, "independent", [("tag", "server"), ("tag", "client")], "")
+        tags = {"server": "v2.76.3", "client": "v2.76.3", "gameplay": "v2.83.0"}
+        patches = [
+            p
+            for p in self.base_patches(
+                calls,
+                (tags, "independent", [("tag", "server"), ("tag", "client")], ""),
+            )
+            if p.attribute != "require_rc_gate"
+        ]
+        gate = mock.Mock(return_value=True)
+        patches.append(mock.patch.object(release, "require_rc_gate", gate))
+        self.run_patches(patches, lambda: release.cmd_ship(self.ship_args()))
+        self.assertEqual(
+            gate.call_args.args[0], {"client": "v2.76.3", "server": "v2.76.3"}
         )
+
+    def test_deferred_gameplay_is_tagged_then_prepare_reruns(self):
+        calls = []
+        deferred = ({"gameplay": "v2.83.0"}, "deferred", [], "")
+        server = ({"server": "v2.83.1"}, "server-only", [("tag", "server")], "")
+        # base_patches checks each run's tag against its prepared tags.
+        both = ({**server[0], **deferred[0]}, *server[1:])
+        patches = [
+            p for p in self.base_patches(calls, both) if p.attribute != "prepare_all"
+        ]
+        prepare = mock.Mock(side_effect=[deferred, server])
+        patches.append(mock.patch.object(release, "prepare_all", prepare))
         self.assertTrue(
             self.run_patches(patches, lambda: release.cmd_ship(self.ship_args()))
         )
-        kinds = [c[0] for c in calls]
-        self.assertEqual(
-            kinds,
-            [
-                "ff",
-                "ff",
-                "rc-gate",
-                "green",
-                "merge",
-                "ff",
-                "tag",
-                "green",
-                "merge",
-                "ff",
-                "run",
-                "gate",
-                "tag",
-                "watched",
-                "run",
-                "watched",
-                "deploy",
-                "probes",
-                "pin",
-                "green",
-                "merge",
-                "ff",
-                "ff",
-            ],
-        )
-        # The client tag run is a publish-only stub: serving needs the dispatch.
-        self.assertEqual([c[1] for c in calls if c[0] == "deploy"], ["client"])
+        self.assertEqual(prepare.call_count, 2)
         tagged = [c[1] for c in calls if c[0] == "tag"]
-        self.assertEqual(tagged, ["server", "client"])
-        gate = kinds.index("gate")
-        first_tag = kinds.index("tag")
-        self.assertLess(first_tag, gate)
-        self.assertLess(gate, kinds.index("tag", first_tag + 1))
+        self.assertEqual(tagged, ["gameplay", "server"])
+        self.assertLess(
+            calls.index(("run", "gameplay")), calls.index(("tag", "server"))
+        )
+        self.assertEqual([c[0] for c in calls].count("deploy"), 1)
+
+    def test_heal_covers_every_status_side(self):
+        calls = []
+        tags = {"server": "v2.77.0"}
+        prepared = (tags, "server-only", [("tag", "server")], "")
+        patches = [
+            p
+            for p in self.base_patches(calls, prepared)
+            if p.attribute != "ff_next_to_main"
+        ]
+        healed = []
+        patches.append(
+            mock.patch.object(
+                release,
+                "ff_next_to_main",
+                side_effect=lambda side, dry, **kw: healed.append(side) or True,
+            )
+        )
+        self.run_patches(patches, lambda: release.cmd_ship(self.ship_args()))
+        self.assertEqual(healed[:3], ["client", "server", "gameplay"])
 
     def test_pair_tags_client_first_then_candidate_then_server(self):
         calls = []
@@ -870,6 +947,7 @@ class Ship(unittest.TestCase):
             [
                 ("ff", "client"),
                 ("ff", "server"),
+                ("ff", "gameplay"),
                 ("rc-gate",),
                 ("green", release.REPO["client"]),
                 ("merge", release.REPO["client"], "a" * 40),
@@ -885,9 +963,15 @@ class Ship(unittest.TestCase):
                 ("run", "server"),
                 ("published", "server"),
                 ("prerelease", tags["client"], True),
-                ("deploy", "server", {"client_tag": tags["client"], "dry": False}),
+                ("digest", tags["server"]),
+                (
+                    "deploy",
+                    "server",
+                    DIGEST,
+                    {"client_tag": tags["client"], "dry": False},
+                ),
                 ("probes", "server"),
-                ("deploy", "client", {"dry": False}),
+                ("deploy", "client", tags["client"], {"dry": False}),
                 ("probes", "client"),
                 ("verify",),
                 ("pin",),
@@ -925,7 +1009,9 @@ class Ship(unittest.TestCase):
                 lambda: release.cmd_ship(self.ship_args()),
             )
         )
-        self.assertEqual(calls[:2], [("ff", "client"), ("ff", "server")])
+        self.assertEqual(
+            calls[:3], [("ff", "client"), ("ff", "server"), ("ff", "gameplay")]
+        )
 
     def test_dry_run_prepares_but_mutates_nothing(self):
         prepared = ({"server": "v2.76.3"}, "server-only", [("tag", "server")], "")
@@ -1048,6 +1134,7 @@ class Ship(unittest.TestCase):
     def test_server_only_dry_run_prints_game_only_plan(self):
         tags = {"server": "v2.77.0"}
         _, order = release.plan({"server": True}, {"server": PROD}, PROD)
+        self.assertEqual(order[-1], ("deploy", "server"))
         said = []
         with (
             mock.patch.object(release, "mod_published", return_value=True),
@@ -1072,10 +1159,12 @@ class Ship(unittest.TestCase):
                 release.cmd_ship(self.ship_args(dry_run=True, confirmed_by_owner=False))
             )
         text = "\n".join(said)
-        # Dedicated ships alone: tag, then the tag-run release publishes the
-        # manifests (no automatic Deploy: the Game deploy is an explicit
-        # gameplay dispatch owned by ship part 2).
-        self.assertNotIn("deploy.yml/dispatches", text)
+        # Dedicated tag, then the tag-run release publishes the manifests (no
+        # automatic Deploy) and one gameplay digest dispatch serves the game.
+        self.assertEqual(text.count("deploy.yml/dispatches"), 1)
+        self.assertIn("blockfield-gameplay/actions/workflows/deploy.yml", text)
+        self.assertIn("inputs[digest]=", text)
+        self.assertNotIn("client_tag", text)
         self.assertIn("dedicated v2.77.0 tag push run", text)
         self.assertIn("release SUCCESS publishes", text)
         self.assertIn("green workspace pin-PR", text)
@@ -1393,13 +1482,19 @@ class PairGates(unittest.TestCase):
 
     def test_plan_dispatch(self):
         tags = dict.fromkeys(release.SIDES, "v2.77.0")
-        # The pair Game deploy is a digest template (the live dispatch is part 2);
-        # the client line still matches dispatch_deploy exactly.
-        pair_lines = release.tag_lines([("deploy-pair", "server")], tags, "")
-        pair = next(line for line in pair_lines if "deploy.yml/dispatches" in line)
-        self.assertIn("blockfield-gameplay/actions/workflows/deploy.yml", pair)
-        self.assertIn("inputs[digest]=", pair)
-        self.assertIn("inputs[client_tag]=v2.77.0", pair)
+        for action, client_tag in (("deploy-pair", tags["client"]), ("deploy", None)):
+            lines = release.tag_lines([(action, "server")], tags, "")
+            line = next(line for line in lines if "deploy.yml/dispatches" in line)
+            argv = shlex.split(line.split("   #", 1)[0])
+            # The dry run prints the argv dispatch_deploy runs, digest placeholder aside.
+            slot = next(
+                i for i, a in enumerate(argv) if a.startswith("inputs[digest]=")
+            )
+            argv[slot] = f"inputs[digest]={DIGEST}"
+            self.assertEqual(
+                tuple(argv),
+                release.deploy_command("server", DIGEST, client_tag=client_tag),
+            )
         line = next(
             line
             for line in release.tag_lines([("deploy", "client")], tags, "")
@@ -1477,6 +1572,21 @@ class PairGates(unittest.TestCase):
             "Server moves the client contract: rerun Deploy server with client_tag",
             texts["gameplay/scripts/prepare-server-deploy.py"],
         )
+        # The dispatch argv names only inputs the deploy workflows declare.
+        for side, workflow, extra in (
+            ("server", "deploy.yml", {"client_tag": "v2.77.0"}),
+            ("client", "deploy-client.yml", {}),
+        ):
+            cmd = release.deploy_command(side, DIGEST, **extra)
+            self.assertIn(
+                f"repos/{release.REPO['gameplay']}/actions/workflows/{workflow}/dispatches",
+                cmd,
+            )
+            declared = texts[f"gameplay/.github/workflows/{workflow}"]
+            for arg in cmd:
+                if arg.startswith("inputs["):
+                    name = arg[len("inputs[") : arg.index("]")]
+                    self.assertIn(f"      {name}:\n", declared, (workflow, name))
         # Client tag run: check publishes, automatic Deploy stages.
         parent = texts["client/.github/workflows/client.yml"].split("jobs:\n", 1)[1]
         child = texts["client/.github/workflows/deploy.yml"]
@@ -2042,7 +2152,7 @@ class PairGates(unittest.TestCase):
             ),
             mock.patch.object(release, "wait_run_success") as success,
         ):
-            release.dispatch_deploy("server", "v2.77.0", 1, 0, client_tag="v2.77.0")
+            release.dispatch_deploy("server", DIGEST, 1, 0, client_tag="v2.77.0")
         self.assertEqual(
             dispatch.call_args.args,
             (
@@ -2051,7 +2161,7 @@ class PairGates(unittest.TestCase):
                 "api",
                 "--method",
                 "POST",
-                "repos/Blockfield/blockfield-dedicated/actions/workflows/deploy.yml/dispatches",
+                "repos/Blockfield/blockfield-gameplay/actions/workflows/deploy.yml/dispatches",
                 "-H",
                 "X-GitHub-Api-Version: 2022-11-28",
                 "-f",
@@ -2059,13 +2169,13 @@ class PairGates(unittest.TestCase):
                 "-F",
                 "return_run_details=true",
                 "-f",
-                "inputs[tag]=v2.77.0",
+                f"inputs[digest]={DIGEST}",
                 "-f",
                 "inputs[client_tag]=v2.77.0",
             ),
         )
         self.assertEqual(dispatch.call_count, 1)
-        success.assert_called_once_with("server", 12, 1, 0, release.REPO["server"])
+        success.assert_called_once_with("server", 12, 1, 0, release.REPO["gameplay"])
 
     def test_dispatch_without_run_id_stops_without_retry(self):
         with (
@@ -2106,7 +2216,7 @@ class PairGates(unittest.TestCase):
 
 
 class ClientDeploy(unittest.TestCase):
-    def test_client_dispatch_targets_server_workflow(self):
+    def test_client_dispatch_targets_gameplay_deploy_client(self):
         self.assertEqual(
             release.deploy_command("client", "v2.77.0"),
             (
@@ -2114,7 +2224,7 @@ class ClientDeploy(unittest.TestCase):
                 "api",
                 "--method",
                 "POST",
-                "repos/Blockfield/blockfield-dedicated/actions/workflows/deploy-client.yml/dispatches",
+                "repos/Blockfield/blockfield-gameplay/actions/workflows/deploy-client.yml/dispatches",
                 "-H",
                 "X-GitHub-Api-Version: 2022-11-28",
                 "-f",
@@ -2140,7 +2250,7 @@ class ClientDeploy(unittest.TestCase):
             dispatch.call_args.args[1:],
             release.deploy_command("client", "v2.77.0"),
         )
-        success.assert_called_once_with("client", 12, 1, 0, release.REPO["server"])
+        success.assert_called_once_with("client", 12, 1, 0, release.REPO["gameplay"])
 
     def test_deploy_waiter_uses_dispatch_repo_for_every_side(self):
         for side in ("client", "server"):
@@ -2156,8 +2266,9 @@ class ClientDeploy(unittest.TestCase):
             ):
                 release.dispatch_deploy(side, "v2.77.0", 1, 0)
             success.assert_called_once_with(side, 12, 1, 0, release.deploy_repo(side))
-        self.assertEqual(release.deploy_repo("client"), release.REPO["server"])
-        self.assertEqual(release.deploy_repo("server"), release.REPO["server"])
+        # Both deploy workflows live in the gameplay repo.
+        self.assertEqual(release.deploy_repo("client"), release.REPO["gameplay"])
+        self.assertEqual(release.deploy_repo("server"), release.REPO["gameplay"])
 
     def test_wait_run_success_polls_given_repo(self):
         with mock.patch.object(
@@ -2165,20 +2276,33 @@ class ClientDeploy(unittest.TestCase):
             "gh",
             return_value=json.dumps({"conclusion": "success", "url": "run-url"}),
         ) as gh:
-            release.wait_run_success("client", 12, 1, 0, release.REPO["server"])
+            release.wait_run_success("client", 12, 1, 0, release.REPO["gameplay"])
         repo_flag = gh.call_args.args
-        self.assertIn(release.REPO["server"], repo_flag)
+        self.assertIn(release.REPO["gameplay"], repo_flag)
         self.assertNotIn(release.REPO["client"], repo_flag)
 
-    def test_server_dispatch_still_targets_server_deploy(self):
+    def test_server_dispatch_targets_gameplay_deploy_with_digest(self):
+        pair = release.deploy_command("server", DIGEST, client_tag="v2.77.0")
         self.assertIn(
-            "repos/Blockfield/blockfield-dedicated/actions/workflows/deploy.yml/dispatches",
-            release.deploy_command("server", "v2.77.0", client_tag="v2.77.0"),
+            "repos/Blockfield/blockfield-gameplay/actions/workflows/deploy.yml/dispatches",
+            pair,
         )
-        self.assertIn(
-            "inputs[client_tag]=v2.77.0",
-            release.deploy_command("server", "v2.77.0", client_tag="v2.77.0"),
-        )
+        self.assertIn(f"inputs[digest]={DIGEST}", pair)
+        self.assertIn("inputs[client_tag]=v2.77.0", pair)
+        plain = release.deploy_command("server", DIGEST)
+        self.assertFalse([a for a in plain if "client_tag" in a or "inputs[tag]" in a])
+
+    def test_image_digest_reads_the_ghcr_version_of_the_tag(self):
+        versions = [
+            {"name": "sha256:" + "1" * 64, "metadata": {"container": {"tags": []}}},
+            {"name": DIGEST, "metadata": {"container": {"tags": ["v2.77.0"]}}},
+        ]
+        with mock.patch.object(release, "gh", return_value=json.dumps(versions)) as gh:
+            self.assertEqual(release.image_digest("v2.77.0"), DIGEST)
+        self.assertIn("blockfield-dedicated", " ".join(gh.call_args.args))
+        with mock.patch.object(release, "gh", return_value=json.dumps(versions)):
+            with self.assertRaisesRegex(RuntimeError, "v2.78.0"):
+                release.image_digest("v2.78.0")
 
     def test_rollback_client_dispatches_older_tag(self):
         args = release.parser().parse_args(
@@ -3283,6 +3407,164 @@ class DeferredPrepare(unittest.TestCase):
             self.assertEqual(tag, "v2.83.0")
             self.assertFalse(opened)
             pr.assert_not_called()
+
+
+class DryRunLegs(unittest.TestCase):
+    """Each leg of the new flow in dry-run mode: reads only, no network write."""
+
+    @contextlib.contextmanager
+    def no_writes(self):
+        with (
+            mock.patch.object(release, "run", side_effect=AssertionError("no run")),
+            mock.patch.object(
+                release, "ship_mutate", side_effect=AssertionError("no mutation")
+            ),
+            mock.patch.object(release, "say"),
+        ):
+            yield
+
+    def test_status_reads_every_side_report_only(self):
+        healed = []
+        prod = {"build": "v1.0.0", "server_build": "v1.0.0", "compatibility": PROD}
+        with (
+            mock.patch.object(release, "prod_state", return_value=prod),
+            mock.patch.object(release, "say_held"),
+            mock.patch.object(
+                release,
+                "ff_next_to_main",
+                side_effect=lambda side, dry, report_only=False: healed.append(
+                    (side, report_only)
+                ),
+            ),
+            mock.patch.object(release, "repo_dir", side_effect=lambda side: Path(side)),
+            mock.patch.object(release, "fetch_main"),
+            mock.patch.object(release, "integration_ref", return_value="origin/next"),
+            mock.patch.object(
+                release, "remote_tags", return_value={"v1.0.0": "a" * 40}
+            ),
+            mock.patch.object(release, "published", return_value="v1.0.0"),
+            mock.patch.object(release, "published_repo", return_value="v1.0.0"),
+            mock.patch.object(release, "git", return_value=""),
+            mock.patch.object(release, "pins", return_value=[]),
+            mock.patch.object(release, "show_pack", return_value="1.0.0"),
+            mock.patch.object(release, "say") as say,
+        ):
+            self.assertTrue(release.cmd_status(SimpleNamespace()))
+        self.assertEqual(
+            healed, [("client", True), ("server", True), ("gameplay", True)]
+        )
+        say.assert_any_call("\nrelease kind: none")
+
+    def test_preflight_builds_in_a_throwaway_tree(self):
+        args = SimpleNamespace(side="server", ref="origin/main", tag="v2.83.0")
+        with (
+            mock.patch.object(release, "repo_dir", return_value=Path("server")),
+            mock.patch.object(release, "fetch_main"),
+            mock.patch.object(
+                release, "worktree", return_value=contextlib.nullcontext(Path("t"))
+            ),
+            mock.patch.object(
+                release, "preflight", return_value=([("ok", "built")], {})
+            ) as pre,
+            self.no_writes(),
+        ):
+            self.assertTrue(release.cmd_preflight(args))
+        pre.assert_called_once_with("server", "v2.83.0", Path("t"))
+
+    def test_candidate_dry_run_pushes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / "pack.toml").write_text('version = "2.83.1"\n')
+            with (
+                mock.patch.object(release, "repo_dir", return_value=Path("server")),
+                mock.patch.object(release, "git", return_value="c" * 40),
+                mock.patch.object(
+                    release, "worktree", return_value=contextlib.nullcontext(tree)
+                ),
+                mock.patch.object(release, "set_candidate"),
+                mock.patch.object(
+                    release, "preflight", return_value=([("ok", "built")], {})
+                ),
+                mock.patch.object(release, "mutate") as mutate,
+                self.no_writes(),
+            ):
+                sha = release.cmd_candidate(
+                    SimpleNamespace(
+                        branch="release/dedicated-2.83.1",
+                        tag="v2.83.0",
+                        dry_run=True,
+                        expected_tree=None,
+                    )
+                )
+        self.assertEqual(sha, "c" * 40)
+        self.assertTrue(mutate.call_args.args[0])
+        self.assertEqual(mutate.call_args.args[1:3], ("git", "push"))
+
+    def test_prepare_prints_the_ship_plan_with_the_digest_dispatch(self):
+        tags = {"server": "v2.83.1"}
+        order = [("tag", "server"), ("deploy", "server")]
+        said = []
+        with (
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=(tags, "server-only", order, "release/dedicated-2.83.1"),
+            ),
+            mock.patch.object(release, "say", side_effect=said.append),
+        ):
+            self.assertTrue(release.cmd_prepare(SimpleNamespace()))
+        text = "\n".join(said)
+        self.assertIn("blockfield-gameplay/actions/workflows/deploy.yml", text)
+        self.assertNotIn("blockfield-server", text)
+
+    def test_ship_dry_run_deferred_prints_gameplay_then_rerun(self):
+        said = []
+        with (
+            mock.patch.object(release, "mod_published", return_value=True),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=({"gameplay": "v2.83.0"}, "deferred", [], ""),
+            ),
+            mock.patch.object(release, "say", side_effect=said.append),
+            mock.patch.object(
+                release, "ship_tag_side", side_effect=AssertionError("no tag")
+            ),
+        ):
+            self.assertTrue(
+                release.cmd_ship(
+                    SimpleNamespace(
+                        mod="v1.54.0",
+                        only=None,
+                        dry_run=True,
+                        confirmed_by_owner=False,
+                        timeout=1,
+                        interval=0,
+                    )
+                )
+            )
+        text = "\n".join(said)
+        self.assertIn("gameplay v2.83.0", text)
+        self.assertIn("dedicated pin PR", text)
+
+    def test_gameplay_tag_is_listed_only_when_prepare_opened_it(self):
+        args = release.parser().parse_args(["prepare", "--mod", "v1.57.0", "--dry-run"])
+        for opened, expected in ((True, None), (False, None)):
+            with (
+                self.subTest(opened=opened),
+                mock.patch.object(
+                    release, "prepare_gameplay", return_value=("v2.83.0", opened)
+                ),
+                mock.patch.object(release, "release_published", return_value=True),
+                mock.patch.object(
+                    release,
+                    "prepare_dedicated",
+                    return_value=("v2.83.1", {"compatibility": PROD}),
+                ),
+                mock.patch.object(release, "say"),
+            ):
+                _, _, gameplay, _ = release.prepare_server(args, {})
+                self.assertEqual(gameplay, "v2.83.0" if opened else expected)
 
 
 if __name__ == "__main__":

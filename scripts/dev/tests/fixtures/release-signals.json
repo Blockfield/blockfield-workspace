@@ -1,7 +1,8 @@
 {
   "_sources": {
     "client": "c9b942e72672c1b2199ea90cb2983314d82208eb",
-    "server": "6d5eb299a74dabd65d4f63aad21bf5e5f3c10783"
+    "server": "e39c0d14884828ca7f03252f982f32bac94b2eb7",
+    "gameplay": "28bc2d160994397eca7cb2107162c95cbcf3c5e4"
   },
   "client/.github/workflows/client.yml": [
     "jobs:\n  check:\n",
@@ -16,14 +17,36 @@
     "    uses: ./.github/workflows/deploy.yml\n"
   ],
   "server/.github/workflows/release.yml": [
-    "jobs:\n  prepare:\n",
-    "  release:\n    needs: prepare\n",
-    "      - name: Create version GitHub Release\n",
-    "      - name: Release text\n",
-    "      - name: Publish release notes\n",
-    "            gh release upload \"$GITHUB_REF_NAME\" \"${files[@]}\" --clobber\n",
-    "  deploy:\n    needs: release\n",
-    "    uses: ./.github/workflows/deploy.yml\n"
+    "jobs:\n  release:\n",
+    "      - name: Publish GitHub release assets\n",
+    "            gh release create \"$GITHUB_REF_NAME\"",
+    "              --generate-notes\n",
+    "          gh release upload \"$GITHUB_REF_NAME\"",
+    "            dist/build.json",
+    "            dist/build-workshop.json",
+    "            dist/SHA256SUMS"
+  ],
+  "gameplay/.github/workflows/release.yml": [
+    "jobs:\n  release:\n",
+    "      - name: Publish GitHub release assets\n",
+    "            gh release create \"$GITHUB_REF_NAME\"",
+    "              --generate-notes\n",
+    "          gh release upload \"$GITHUB_REF_NAME\"",
+    "            dist/pinned-mods.json",
+    "            dist/SHA256SUMS"
+  ],
+  "gameplay/.github/workflows/deploy.yml": [
+    "    inputs:\n      digest:\n",
+    "      client_tag:\n",
+    "jobs:\n  deploy:\n",
+    "      - name: Validate target and remember previous pair\n"
+  ],
+  "gameplay/.github/workflows/deploy-client.yml": [
+    "    inputs:\n      tag:\n",
+    "      dry_run:\n"
+  ],
+  "gameplay/scripts/prepare-server-deploy.py": [
+    "\"Server moves the client contract: rerun Deploy server with client_tag \"\n"
   ],
   "client/.github/workflows/deploy.yml": [
     "jobs:\n  deploy:\n",
@@ -31,24 +54,9 @@
     "      - name: Mark the deployed client as latest\n        if: steps.deploy.outputs.served == 'true'\n",
     "data=b'{\"prerelease\":false,\"make_latest\":\"true\"}'"
   ],
-  "server/.github/workflows/deploy.yml": [
-    "jobs:\n  deploy:\n",
-    "      - name: Validate target and remember previous pair\n        id: previous\n        # ponytail: keep long code out of run blocks until actionlint fixes its pre-start stdin pipe write.\n        run: just python scripts/prepare-server-deploy.py >> \"$GITHUB_OUTPUT\"\n"
-  ],
   "client/scripts/deploy-client.py": [
     "        pack.stage(tag)\n",
     "            f\"Client {tag} staged invisibly; \"\n",
     "        return \"staged\"\n"
-  ],
-  "server/scripts/prepare-server-deploy.py": [
-    "        \"Server gates on another client than the served one: rerun Deploy server with client_tag \"\n"
-  ],
-  "server/.github/workflows/check.yml": [
-    "      image: ${{ steps.image-scope.outputs.image }}\n",
-    "          tree=$(git rev-parse \"HEAD^{tree}\")\n",
-    "          tree=$(git rev-parse \"HEAD^{tree}\")\n",
-    "  image:\n",
-    "            tree=$(git rev-parse \"HEAD^{tree}\")\n",
-    "              echo \"tag=candidate-$tree\"\n"
   ]
 }

@@ -57,6 +57,8 @@ ANNOUNCEMENT_LIMITS = {
 }
 ANNOUNCEMENT_LISTS = ("player_changes", "bug_fixes", "creators")
 ANNOUNCEMENT_ATTEMPTS = 3
+# Проверка стиля тратит попытку; после неё нужна ещё одна, иначе выпуск уходит в текст из фактов.
+NOTES_ATTEMPTS = 3
 COLOR_RELEASE, COLOR_PATCH = "5865F2", "2ECC71"
 # Бот анонсирует только клиентские релизы, поэтому клиентский выпуск несёт и сервер.
 ANNOUNCED_KINDS = ("client",)
@@ -131,6 +133,12 @@ JARGON_RE = re.compile(
     r"(?i)\b(?:чанк\w*|кеш\w*|кэш\w*|буфер\w*|миксин\w*|рендер\w*|запеч[её]н\w*|displays?"
     r"|raknet|tcp|udp|протокол\w*|пин(?:ы|ов|а|ам)?|коммит\w*|репозитор\w*|деплой\w*|ревью)\b"
 )
+# Служебное, что модель пересказывает игроку из описаний серверных PR.
+SERVICE_RE = re.compile(
+    r"(?i)\bпанел\w* управлени\w*|\bэкспериментальн\w*|\bслужебн\w*|\bдиагностик\w*"
+    r"|\bмодерац\w*|\bui json\b"
+)
+VERSION_RE = re.compile(rf"(?<![\w.]){VERSION}(?!\w|\.\d)")
 GREETING_RE = re.compile(r"(?i)^\W*(?:сообщество|дорогие|друзья|привет)")
 
 
@@ -313,18 +321,19 @@ def weak_notes(lines):
     return not lines or all(NOT_RESTORED_RE.search(line) for line in lines)
 
 
-def pin_evidence(change, old, new, gaps):
+def pin_evidence(change, old, new, gaps, key=None):
     """(выдержки release-notes, слитые PR) компонента за промежуток пина.
 
     PR между тегами берутся всегда: выдержки - уже пересказ, и анонс по пересказу
     пересказа теряет смысл. При откате это PR снятых изменений. «Не восстановлено»
     в выдержках отбрасывается.
     """
+    label = rn.display_name(key, new) if key is not None else new["name"]
     notes, missing = [], []
     try:
         notes, missing = rn.component_notes(old, new)
     except Exception as exc:
-        missing.append(f"{new['name']}: release-notes не получены ({describe(exc)})")
+        missing.append(f"{label}: release-notes не получены ({describe(exc)})")
     if weak_notes(notes):
         notes = []
     else:
@@ -344,12 +353,12 @@ def pin_evidence(change, old, new, gaps):
             )
         except Exception as exc:
             found.append(f"слитые PR не получены ({describe(exc)})")
-        gaps.extend(f"{new['name']}: {gap}" for gap in found)
+        gaps.extend(f"{label}: {gap}" for gap in found)
     if prs:
         return notes, prs
     if not notes:
         missing.append(
-            f"{new['name']}: что изменилось между {old['tag']} и {new['tag']}, источников нет"
+            f"{label}: что изменилось между {old['tag']} и {new['tag']}, источников нет"
         )
     gaps.extend(missing)
     return notes, []
@@ -596,13 +605,13 @@ def collect_facts(a, releases):
         except Exception as exc:
             rows = []
             gaps.append(f"сверка пинов не выполнена ({describe(exc)})")
-        for _key, change, old, new, text in rows:
+        for key, change, old, new, text in rows:
             notes, prs = [], []
             if change in ("update", "rollback"):
-                notes, prs = pin_evidence(change, old, new, gaps)
+                notes, prs = pin_evidence(change, old, new, gaps, key)
             facts["pins"].append(
                 {
-                    "name": (new or old)["name"],
+                    "name": rn.display_name(key, new or old),
                     "change": change,
                     "text": text,
                     "component_notes": [n.strip() for n in notes],
@@ -860,8 +869,26 @@ def player_errors(sections, facts):
     return errors
 
 
-def validate_release(obj, facts):
-    """(release-notes.md, ошибки) по ответу модели."""
+def player_style_errors(fields):
+    """Версии и служебное в текстах для игрока; повторяется, но не отменяет выпуск."""
+    errors = []
+    for name, text in fields.items():
+        for rx, what in (
+            (
+                VERSION_RE,
+                "номер версии: версии только в «Технические изменения» и «Обновлённые компоненты»",
+            ),
+            (SERVICE_RE, "служебное, игрок этого не видит: убери пункт"),
+        ):
+            found = sorted({m.group(0) for m in rx.finditer(text)})
+            if found:
+                errors.append(f"{name}: {', '.join(found[:5])} - {what}")
+    return errors
+
+
+def validate_release(obj, facts, final=False):
+    """(release-notes.md, ошибки) по ответу модели. Стиль на последней попытке
+    только предупреждает, как в анонсе: текст модели лучше текста из одних фактов."""
     if not isinstance(obj, dict) or not isinstance(obj.get("release_notes"), dict):
         return None, ["ответ должен содержать объект release_notes"]
     errors, sections = [], {}
@@ -883,7 +910,14 @@ def validate_release(obj, facts):
         if pin["name"].lower() not in components
     ]
     errors += [f"запрещено публиковать: {item}" for item in sorted(set(denied(text)))]
-    return text, errors
+    style = player_style_errors(
+        {"«Кратко»": sections["brief"], "«Для игроков»": sections["players"]}
+    )
+    if final and not errors:
+        for error in style:
+            warn(f"описание опубликовано с замечанием: {error}")
+        style = []
+    return text, errors + style
 
 
 def is_patch(version):
@@ -909,6 +943,12 @@ def style_errors(announcement, version):
                 f"announcement.{key}: служебные слова {', '.join(found[:5])} - "
                 "напиши, что игрок видит в игре"
             )
+    errors += player_style_errors(
+        {
+            f"announcement.{k}": announcement[k]
+            for k in ("summary", "player_changes", "bug_fixes")
+        }
+    )
     if GREETING_RE.search(announcement["summary"]):
         errors.append(
             "announcement.summary: не обращайся к сообществу, начни с главного изменения"
@@ -1249,11 +1289,15 @@ def report(gaps, outcome, version):
         fh.write("\n".join(lines) + "\n\n")
 
 
+# Стиль текстов для игроков; описания PR пишутся для разработчиков.
+STYLE = {"release": ("style.md",), "announcement": ("style.md",)}
+
+
 def system_prompt(name):
     """Промпт с общим словарём проекта: идентификаторы из кода → слова игрока."""
     return "\n\n".join(
         (HERE / "prompts" / f).read_text(encoding="utf-8")
-        for f in (f"{name}.md", "glossary.md")
+        for f in (f"{name}.md", *STYLE.get(name, ()), "glossary.md")
     )
 
 
@@ -1282,9 +1326,11 @@ def run_release(a):
         notes = ask(
             system_prompt("release"),
             "Факты выпуска (JSON):\n" + fit_facts(facts),
-            lambda raw, _final: validate_release(parse_json_object(raw), facts),
+            lambda raw, final: validate_release(parse_json_object(raw), facts, final),
             a.model,
             key,
+            NOTES_ATTEMPTS,
+            temperature=0,
         )
         outcome = (
             "написан моделью и прошёл проверку"
@@ -1308,7 +1354,7 @@ def run_release(a):
             model,
             key,
             ANNOUNCEMENT_ATTEMPTS,
-            temperature=0.5,
+            temperature=0.3,
         )
         if announcement:
             write_json(out / "announcement.json", announcement[0])

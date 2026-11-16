@@ -162,6 +162,36 @@ def describe(exc):
     return " ".join(" ".join(parts).split())[:300]
 
 
+def http_error_detail(exc):
+    """Статус и выдержка error.message из тела ответа OpenRouter.
+
+    Читаются только код и тело ответа: заголовки и ключ сюда не попадают."""
+    cached = getattr(exc, "release_text_detail", None)
+    if cached:
+        return cached
+    excerpt = ""
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if raw:
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            excerpt = err.get("message") if isinstance(err, dict) else err
+            excerpt = "" if excerpt is None else str(excerpt)
+        else:
+            excerpt = text
+        excerpt = " ".join(excerpt.split())[:200]
+    detail = f"HTTP {exc.code}" + (f": {excerpt}" if excerpt else "")
+    exc.release_text_detail = detail
+    return detail
+
+
 def gh(*args, binary=False):
     return subprocess.check_output(
         ["gh", *args], text=not binary, stderr=subprocess.PIPE
@@ -1053,8 +1083,13 @@ def chat(system, user, model, key, temperature=0.2):
             "X-Title": "Blockfield Release Text",
         },
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.load(resp)["choices"][0]["message"]["content"]
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            return json.load(resp)["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as exc:
+        # Статус и причина сразу в журнал: bare "HTTP 404" не говорит, что чинить.
+        warn(f"OpenRouter: {http_error_detail(exc)}")
+        raise
 
 
 def ask(system, user, validate, model, key, attempts=ATTEMPTS, temperature=0.2):
@@ -1069,7 +1104,7 @@ def ask(system, user, validate, model, key, attempts=ATTEMPTS, temperature=0.2):
             )
             errors = result[-1]
         except urllib.error.HTTPError as exc:
-            errors = [f"HTTP {exc.code}"]
+            errors = [http_error_detail(exc)]
         except Exception as exc:
             errors = [f"{type(exc).__name__}: {str(exc)[:120]}"]
         if not errors:
@@ -1275,9 +1310,11 @@ def reuse_published(releases, a, out):
 
 
 def report(gaps, outcome, version):
-    """Пробелы видны в аннотациях и в сводке шага; сборка не падает."""
+    """Пробелы и текст из фактов видны в аннотациях и в сводке шага; сборка не падает."""
     for gap in gaps:
         annotate(gap, "release-text: неполнота")
+    if outcome.startswith("только из фактов"):
+        annotate(f"{version}: {outcome}", "release-text")
     target = os.environ.get("GITHUB_STEP_SUMMARY")
     if not target:
         return

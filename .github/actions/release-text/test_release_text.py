@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -455,6 +456,13 @@ class Release(unittest.TestCase):
             rn.check(self.out / "release-notes.md", version="v2.61.0", kind="client"),
             [],
         )
+
+    def test_failed_generation_is_annotated(self):
+        bad = reply(dict(SECTIONS, brief="https://example.org"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_release(*[bad] * rt.NOTES_ATTEMPTS, ann_reply())
+        self.assertIn("только из фактов", out.getvalue())
 
     def test_rejected_announcement_leaves_it_to_the_bot(self):
         leak = ann_reply(summary="https://example.org")
@@ -1183,12 +1191,75 @@ class Loud(unittest.TestCase):
         self.assertIn("HTTP 403", text)
         self.assertIn("Текст: тест", text)
 
+    def test_facts_only_outcome_is_annotated_and_summarized(self):
+        summary = Path(tempfile.mkdtemp(), "summary.md")
+        out = io.StringIO()
+        with (
+            mock.patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}),
+            contextlib.redirect_stdout(out),
+        ):
+            rt.report([], "только из фактов: нет ключа или модели", "v2.61.0")
+        self.assertIn("только из фактов", out.getvalue())
+        self.assertIn("только из фактов", summary.read_text(encoding="utf-8"))
+
     def test_describe_includes_the_subprocess_stderr(self):
         exc = subprocess.CalledProcessError(
             128, ["git"], stderr=b"fatal: bad object v1"
         )
         self.assertIn("fatal: bad object v1", rt.describe(exc))
         self.assertIn("CalledProcessError", rt.describe(exc))
+
+
+class HttpErrorDetail(unittest.TestCase):
+    def error(self, code, body):
+        raw = body if isinstance(body, bytes) else body.encode()
+        return urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/chat/completions",
+            code,
+            "error",
+            {},
+            io.BytesIO(raw),
+        )
+
+    def test_404_message_is_logged_without_the_key(self):
+        body = json.dumps(
+            {"error": {"message": "No endpoints found for the model", "code": 404}}
+        )
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                rt.urllib.request, "urlopen", side_effect=self.error(404, body)
+            ),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(urllib.error.HTTPError),
+        ):
+            rt.chat("system", "user", "model", "sk-secret")
+        printed = out.getvalue()
+        self.assertIn("404", printed)
+        self.assertIn("No endpoints found for the model", printed)
+        self.assertNotIn("sk-secret", printed)
+
+    def test_plain_body_becomes_the_excerpt(self):
+        self.assertEqual(
+            rt.http_error_detail(self.error(503, "upstream unavailable")),
+            "HTTP 503: upstream unavailable",
+        )
+
+    def test_empty_body_gives_status_only(self):
+        self.assertEqual(rt.http_error_detail(self.error(404, "")), "HTTP 404")
+
+    def test_ask_retries_carry_the_reason(self):
+        body = json.dumps({"error": {"message": "No endpoints found"}})
+        out = io.StringIO()
+        with (
+            mock.patch.object(rt, "chat", side_effect=self.error(404, body)),
+            mock.patch.object(rt.time, "sleep"),
+            contextlib.redirect_stdout(out),
+        ):
+            self.assertIsNone(
+                rt.ask("s", "u", lambda raw, final: (None, []), "m", "k", attempts=2)
+            )
+        self.assertIn("No endpoints found", out.getvalue())
 
 
 class PullRequest(unittest.TestCase):

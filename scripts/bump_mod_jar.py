@@ -32,7 +32,7 @@ PKG = "com/lunares/blockfield"
 # Steps after the holders move: the fork release carries the pins, then
 # gameplay's mod-server/common.properties (commonVersion/Url/Sha256) moves to
 # it, then the dedicated registry is re-vendored (every gameplay mod bump
-# changes block-registry.json). Gameplay reads AnimationManifest.PINS out of
+# changes block-registry.json), then dedicated and client pack releases. Gameplay reads AnimationManifest.PINS out of
 # the released mod common jar, so no fork bump lands without this chain.
 TREES = {
     "gameplay": release.ROOT / "gameplay",
@@ -85,6 +85,7 @@ CHAIN = (
     " -> gameplay mod-server/common.properties bump (commonVersion/Url/Sha256)"
     " -> dedicated block-registry re-vendor"
     " (just vendor-block-registry <gameplay-sha>)"
+    " -> dedicated release -> client pack release"
 )
 
 

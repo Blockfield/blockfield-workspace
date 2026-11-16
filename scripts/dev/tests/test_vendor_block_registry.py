@@ -27,6 +27,8 @@ class FakeGit:
     def __init__(self, branches=("origin/next", "origin/main"), registry=REGISTRY):
         self.branches = list(branches)
         self.registry = registry
+        self.remote = "https://github.com/Blockfield/blockfield-dedicated.git"
+        self.dirty = ""
         self.calls = []
 
     def fail(self, cmd, message, check):
@@ -50,6 +52,14 @@ class FakeGit:
             if sub[3] != SHA:
                 return self.fail(cmd, f"unknown revision {sub[3]}", check)
             return "\n".join(f"  {branch}" for branch in self.branches)
+        if sub[:3] == ["config", "--get", "remote.origin.url"]:
+            if self.remote is None:
+                return self.fail(cmd, "no such key", check)
+            return self.remote
+        if sub[:2] == ["status", "--porcelain"]:
+            if self.dirty is None:
+                return self.fail(cmd, "not a git repository", check)
+            return self.dirty
         if sub[:1] == ["show"]:
             if self.registry is None or sub[1] != f"{SHA}:{vendor.REGISTRY}":
                 return self.fail(cmd, f"no such file {sub[1:]}", check)
@@ -128,6 +138,26 @@ class Vendor(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("cannot read", err)
         self.assertFalse((self.dedicated / vendor.PIN).exists())
+
+    def test_dirty_registry_is_left_alone(self):
+        dirty = (
+            b'{\n  "blocks": ["minecraft:dirt"]\n}\n'  # review probe: uncommitted text
+        )
+        (self.dedicated / vendor.REGISTRY).write_bytes(dirty)
+        self.git.dirty = f" M {vendor.REGISTRY.as_posix()}\n"
+        code, _, err = self.main(SHORT)
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted changes", err)
+        self.assertEqual((self.dedicated / vendor.REGISTRY).read_bytes(), dirty)
+        self.assertFalse((self.dedicated / vendor.PIN).exists())
+
+    def test_wrong_target_checkout_is_refused(self):
+        self.git.remote = "https://github.com/Blockfield/blockfield-gameplay.git"
+        code, _, err = self.main(SHORT)
+        self.assertEqual(code, 1)
+        self.assertIn("not a Blockfield/blockfield-dedicated checkout", err)
+        self.assertFalse((self.dedicated / vendor.PIN).exists())
+        self.assertFalse((self.dedicated / vendor.REGISTRY).exists())
 
     def test_missing_dedicated_checkout_is_an_error(self):
         (self.dedicated / vendor.REGISTRY).parent.rmdir()

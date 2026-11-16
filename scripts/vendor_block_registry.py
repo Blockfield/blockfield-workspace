@@ -28,6 +28,35 @@ class VendorError(Exception):
     pass
 
 
+def guard_dedicated(dedicated):
+    """Refuse a wrong-target or dirty dedicated checkout before any write."""
+    try:
+        url = release.git(dedicated, "config", "--get", "remote.origin.url")
+    except RuntimeError:
+        url = ""
+    if f"{release.ORG}/blockfield-dedicated" not in url:
+        raise VendorError(
+            f"{dedicated}: not a {release.ORG}/blockfield-dedicated checkout"
+        )
+    try:
+        dirty = release.git(
+            dedicated,
+            "status",
+            "--porcelain",
+            "--",
+            REGISTRY.as_posix(),
+            PIN.as_posix(),
+        )
+    except RuntimeError as error:
+        raise VendorError(
+            f"{dedicated}: cannot check for uncommitted changes: {error}"
+        ) from error
+    if dirty.strip():
+        raise VendorError(
+            f"{dedicated}: uncommitted changes in {REGISTRY} or {PIN}; commit or stash first"
+        )
+
+
 def run(sha, gameplay, dedicated, dry_run=False):
     """Copy the registry at sha into dedicated and rewrite the pin."""
     gameplay, dedicated = Path(gameplay), Path(dedicated)
@@ -61,6 +90,7 @@ def run(sha, gameplay, dedicated, dry_run=False):
     digest = hashlib.sha256(data).hexdigest()  # restores the exact source bytes
     if not (dedicated / REGISTRY).parent.is_dir():
         raise VendorError(f"{dedicated / REGISTRY}: dedicated checkout missing it")
+    guard_dedicated(dedicated)
     if not dry_run:
         (dedicated / REGISTRY).write_bytes(data)
         (dedicated / PIN).write_text(f"{full} {digest}\n")

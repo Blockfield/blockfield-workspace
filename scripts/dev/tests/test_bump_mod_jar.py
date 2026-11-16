@@ -292,6 +292,7 @@ class Bump(unittest.TestCase):
         self.assertIn("mod-server/common.properties", out)
         self.assertIn("commonVersion=1.66.0", out)
         self.assertIn("vendor-block-registry", out)
+        self.assertIn("client pack", out)
 
     def test_check_without_properties_still_reports_the_step(self):
         code, out, _ = self.run_main("--check")
@@ -304,6 +305,7 @@ class Bump(unittest.TestCase):
         self.assertIn("remaining release chain", out)
         self.assertIn("mod-server/common.properties", out)
         self.assertIn("vendor-block-registry", out)
+        self.assertIn("client pack", out)
 
 
 class Offline(unittest.TestCase):

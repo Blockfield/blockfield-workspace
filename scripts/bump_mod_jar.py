@@ -3,15 +3,20 @@
   just bump-mod-jar lr-tactical bf8              # rewrite the holders in gameplay/, localmods/blockfield-mod, client/
   just bump-mod-jar lr-tactical bf8 --dry-run    # list what would change, write nothing
   just bump-mod-jar lr-tactical --check          # every holder and the release it pins now
+  just bump-mod-jar lr-tactical bf8 --only mod   # mod holders first (gameplay moves later, with the re-export)
   just bump-mod-jar superbwarfare-fabric bf28 --gameplay ../g --mod ../m --client ../c
 
 The JAR is read from the fork's GitHub release and must match the asset digest GitHub
 records plus every SHA256SUMS/SHA512SUMS asset and the BUILD-SHA256SUMS file at the tag
 that names it. Old values are the releases the holders name now (each holder may lag on
 its own). Nothing is written when a holder is missing or pins none of them, or when any
-other tracked file in the three repos would still hold an old hash. Gameplay
+other tracked file in the rewritten trees would still hold an old hash. Gameplay
 scripts/maps/block-registry.json records the pin set it was exported from: a bump
-that moves a recorded pin stops with the re-export command instead of writing.
+that writes gameplay holders while moving a recorded pin stops with the re-export
+command instead of writing. The mod side moves first: `--only mod` rewrites just the
+mod holders (the gameplay registry guard does not apply), then the mod release carries
+the pins and the gameplay holders move with mod-server/common.properties and
+`just export-registry` in one gameplay PR.
 Commits and PRs stay with the caller.
 """
 
@@ -31,11 +36,13 @@ import release  # noqa: E402
 sys.modules.setdefault("bump_mod_jar", sys.modules[__name__])
 
 PKG = "com/lunares/blockfield"
-# Steps after the holders move: the fork release carries the pins, then
-# gameplay's mod-server/common.properties (commonVersion/Url/Sha256) moves to
-# it, then the dedicated registry is re-vendored (every gameplay mod bump
-# changes block-registry.json), then dedicated and client pack releases. Gameplay reads AnimationManifest.PINS out of
-# the released mod common jar, so no fork bump lands without this chain.
+# Release order (gameplay reads AnimationManifest.PINS out of the released mod
+# common jar, so a fork bump cannot land gameplay-first): mod holders move first
+# and the mod release carries the pins, then the gameplay holders move together
+# with mod-server/common.properties (commonVersion/Url/Sha256) and the
+# block-registry re-export in one gameplay PR, then the dedicated registry is
+# re-vendored (every gameplay mod bump changes block-registry.json), then
+# dedicated and client pack releases.
 TREES = {
     "gameplay": release.ROOT / "gameplay",
     "mod": release.ROOT / "localmods/blockfield-mod",
@@ -88,9 +95,9 @@ MODS = {
 
 
 CHAIN = (
-    "mod release carrying the pins"
-    " -> gameplay mod-server/common.properties bump (commonVersion/Url/Sha256)"
-    " -> gameplay block-registry re-export (just export-registry)"
+    "mod holders + mod release carrying the pins"
+    " -> gameplay holders + mod-server/common.properties bump (commonVersion/Url/Sha256)"
+    " + block-registry re-export (just export-registry) in one gameplay PR"
     " -> dedicated block-registry re-vendor"
     " (just vendor-block-registry <gameplay-sha>)"
     " -> dedicated release -> client pack release"
@@ -172,10 +179,12 @@ def fetch(repo, tag):
     return verified(tag, name, data, expected)
 
 
-def read_holders(mod, trees):
-    """{(tree, path): text} of every holder; a missing file is an error."""
+def read_holders(mod, trees, only=None):
+    """{(tree, path): text} of every holder in scope; a missing file is an error."""
     texts = {}
     for side, paths in MODS[mod][1].items():
+        if only is not None and side != only:
+            continue
         for path in paths:
             file = Path(trees[side]) / path
             if not file.is_file():
@@ -192,13 +201,14 @@ def pinned_tags(text, jars):
     ]
 
 
-def scan(mod, trees, fetch):
+def scan(mod, trees, fetch, only=None):
     """(holder texts, jars of the releases the holders pin, oldest first).
 
     A release counts as pinned only when a holder carries its hash: a bare jar name
     (a stale-pin guard in a test, a comment) is a reference and stays as it is.
+    `only` limits the scan to one tree (a mod-only bump skips the other trees).
     """
-    texts = read_holders(mod, trees)
+    texts = read_holders(mod, trees, only)
     stem = MODS[mod][0]
     tags = {tag for text in texts.values() for tag in re.findall(stem, text)}
     order = sorted(tags, key=lambda tag: int(tag.removeprefix("bf")))
@@ -252,7 +262,8 @@ def registry_stale(mod, trees, olds, new):
     pin would leave its blocks stale, as would a registry that is already
     behind the holders (an older recorded pin of this mod instead of the new
     one). The export downloads every pinned jar and
-    cannot run offline from here, so the bump stops with the re-export command.
+    cannot run offline from here, so a bump that writes gameplay holders stops
+    with the order below. The mod side moves first and needs no re-export.
     A missing file predates the registry (gameplay PR #41) and is not a block.
     """
     path = Path(trees["gameplay"]) / REGISTRY
@@ -283,19 +294,25 @@ def registry_stale(mod, trees, olds, new):
     if not stale:
         return None
     return (
-        f"gameplay {REGISTRY} pins {', '.join(stale)}: this bump would leave"
-        f" the registry stale. Point the gameplay pins at {new.tag} first"
-        " (--check lists the holders), then run `just export-registry` in the"
-        " gameplay checkout, commit it, push and merge it into gameplay next,"
-        " then `just vendor-block-registry <merge-sha>` for dedicated"
-        " and re-run this bump."
+        f"gameplay {REGISTRY} pins {', '.join(stale)}: writing the gameplay"
+        f" holders now would leave the registry stale. The mod side moves first"
+        f" (`just bump-mod-jar {mod} {new.tag} --only mod`, then the mod release"
+        " carrying the pins), then the gameplay holders move together with"
+        " mod-server/common.properties (commonVersion/Url/Sha256 at the new mod"
+        " release) and `just export-registry` in one gameplay PR: commit it, push"
+        " and merge it into gameplay next, then"
+        " `just vendor-block-registry <merge-sha>` for dedicated."
     )
 
 
-def plan(mod, tag, trees, fetch):
-    """(edits, new jar) for the holders that change; raises before any write."""
+def plan(mod, tag, trees, fetch, only=None):
+    """(edits, new jar) for the holders that change; raises before any write.
+
+    `only` limits the bump to one tree: a mod-only bump skips the gameplay
+    holders and the registry guard, so the mod release can carry the pins first.
+    """
     repo = f"{release.ORG}/{mod}"
-    texts, jars = scan(mod, trees, fetch)
+    texts, jars = scan(mod, trees, fetch, only)
     new = next((jar for jar in jars if jar.tag == tag), None) or fetch(repo, tag)
     olds = [jar for jar in jars if jar.tag != tag]
     errors = []
@@ -311,6 +328,8 @@ def plan(mod, tag, trees, fetch):
             edits[side, path] = updated
     old_hashes = {h for jar in olds for h in (jar.sha256, jar.sha512)}
     for side in MODS[mod][1]:
+        if only is not None and side != only:
+            continue  # other trees move in their own step of the chain
         for path in sorted(leftovers(trees[side], old_hashes)):
             if (side, path) == ("gameplay", REGISTRY):
                 continue  # the registry has its own staleness check below
@@ -318,7 +337,11 @@ def plan(mod, tag, trees, fetch):
                 errors.append(
                     f"{side} {path}: holds an old hash but is not a known holder"
                 )
-    stale = registry_stale(mod, trees, olds, new)
+    stale = (
+        registry_stale(mod, trees, olds, new)
+        if only is None or only == "gameplay"
+        else None
+    )
     if stale:
         errors.append(stale)
     if errors:
@@ -352,6 +375,13 @@ def main(argv=None):
     parser.add_argument("tag", nargs="?", help="fork release tag, e.g. bf8")
     parser.add_argument("--check", action="store_true", help="list holders and pins")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--only",
+        choices=tuple(TREES),
+        default=None,
+        help="rewrite holders in one tree only (a mod-only bump skips the"
+        " gameplay registry guard; the chain still applies)",
+    )
     for side, default in TREES.items():
         parser.add_argument(
             f"--{side}",
@@ -364,14 +394,14 @@ def main(argv=None):
     trees = {side: getattr(args, f"{side}_tree") for side in TREES}
     try:
         if args.check:
-            texts, jars = scan(args.mod, trees, fetch)
+            texts, jars = scan(args.mod, trees, fetch, args.only)
             for (side, path), text in texts.items():
                 print(f"{side} {path}: {', '.join(pinned_tags(text, jars)) or 'none'}")
             print(chain_note(trees))
             return 0
         if not args.tag:
             parser.error("tag is required without --check")
-        edits, new = plan(args.mod, args.tag, trees, fetch)
+        edits, new = plan(args.mod, args.tag, trees, fetch, args.only)
     except (BumpError, RuntimeError) as error:
         print(f"bump-mod-jar: {error}", file=sys.stderr)
         return 1
@@ -385,6 +415,8 @@ def main(argv=None):
             return 1
     for side, path in edits:
         print(f"{'would change' if args.dry_run else 'changed'} {side} {path}")
+    if args.only is not None:
+        print(f"scope: --only {args.only} (other trees untouched)")
     if not edits:
         print(f"{args.mod} {args.tag}: every holder already pins it")
     if args.dry_run:

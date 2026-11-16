@@ -262,6 +262,43 @@ class Bump(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("just export-registry", out)
 
+    def test_mod_only_bump_with_stale_registry_proceeds(self):
+        self.registry({JARS["bf6"].name: self.pin(JARS["bf6"])})
+        edits, _ = bump.plan(MOD, "bf7", self.trees, fake_fetch, "mod")
+        self.assertEqual(
+            set(edits), {("mod", path) for path in bump.MODS[MOD][1]["mod"]}
+        )
+        for (side, path), text in edits.items():
+            self.assertEqual(text, holder(path, JARS["bf7"]), path)
+
+    def test_mod_only_write_leaves_gameplay_untouched_and_prints_chain(self):
+        self.registry({JARS["bf6"].name: self.pin(JARS["bf6"])})
+        before = {
+            (side, path): (self.trees[side] / path).read_bytes()
+            for side, paths in bump.MODS[MOD][1].items()
+            for path in paths
+            if side != "mod"
+        }
+        code, out, _ = self.run_main("bf7", "--only", "mod")
+        self.assertEqual(code, 0)
+        for (side, path), text in before.items():
+            self.assertEqual((self.trees[side] / path).read_bytes(), text)
+        for path in bump.MODS[MOD][1]["mod"]:
+            self.assertEqual(
+                (self.trees["mod"] / path).read_bytes().decode(),
+                holder(path, JARS["bf7"]),
+                path,
+            )
+        self.assertIn("--only mod", out)
+        self.assertIn("remaining release chain", out)
+
+    def test_gameplay_only_bump_with_stale_registry_still_refuses(self):
+        self.registry({JARS["bf6"].name: self.pin(JARS["bf6"])})
+        before = self.holder_bytes()
+        with self.assertRaisesRegex(bump.BumpError, "just export-registry"):
+            bump.plan(MOD, "bf7", self.trees, fake_fetch, "gameplay")
+        self.assertEqual(self.holder_bytes(), before)
+
     def test_archive_fallback_naming_the_old_jar_is_an_error(self):
         path = bump.MODS[MOD][1]["gameplay"][0]
         text = (

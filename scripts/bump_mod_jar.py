@@ -29,6 +29,11 @@ import release  # noqa: E402
 sys.modules.setdefault("bump_mod_jar", sys.modules[__name__])
 
 PKG = "com/lunares/blockfield"
+# Steps after the holders move: the fork release carries the pins, then
+# gameplay's mod-server/common.properties (commonVersion/Url/Sha256) moves to
+# it, then the dedicated registry is re-vendored (every gameplay mod bump
+# changes block-registry.json). Gameplay reads AnimationManifest.PINS out of
+# the released mod common jar, so no fork bump lands without this chain.
 TREES = {
     "gameplay": release.ROOT / "gameplay",
     "mod": release.ROOT / "localmods/blockfield-mod",
@@ -73,6 +78,14 @@ MODS = {
         },
     ),
 }
+
+
+CHAIN = (
+    "mod release carrying the pins"
+    " -> gameplay mod-server/common.properties bump (commonVersion/Url/Sha256)"
+    " -> dedicated block-registry re-vendor"
+    " (just vendor-block-registry <gameplay-sha>)"
+)
 
 
 class BumpError(Exception):
@@ -203,6 +216,12 @@ def rewrite(text, repo, olds, new):
             (old.sha512, new.sha512),
         ):
             text = text.replace(a, b)
+        # Truncated hash prefixes in comments beside the pin (mod build.gradle
+        # "oracle sha512 bb8b5ff2…") go stale with the pin, so they move with it.
+        for algo in ("sha256", "sha512"):
+            text = text.replace(
+                f"{getattr(old, algo)[:8]}…", f"{getattr(new, algo)[:8]}…"
+            )
     return text
 
 
@@ -246,6 +265,26 @@ def plan(mod, tag, trees, fetch):
     return edits, new
 
 
+def common_version(gameplay):
+    """commonVersion pinned in gameplay mod-server/common.properties, if any."""
+    props = Path(gameplay) / "mod-server/common.properties"
+    if not props.is_file():
+        return None
+    match = re.search(r"^commonVersion=(.+)$", props.read_text(), re.M)
+    return match.group(1).strip() if match else None
+
+
+def chain_note(trees):
+    """Holder that only moves through a mod release: the common jar pin."""
+    version = common_version(trees["gameplay"])
+    at = f" (commonVersion={version})" if version else ""
+    return (
+        "note: gameplay AnimationManifest.PINS also arrive through the released"
+        f" mod common jar (gameplay mod-server/common.properties{at}): a fork bump"
+        f" needs {CHAIN}"
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("mod", choices=MODS)
@@ -267,6 +306,7 @@ def main(argv=None):
             texts, jars = scan(args.mod, trees, fetch)
             for (side, path), text in texts.items():
                 print(f"{side} {path}: {', '.join(pinned_tags(text, jars)) or 'none'}")
+            print(chain_note(trees))
             return 0
         if not args.tag:
             parser.error("tag is required without --check")
@@ -294,6 +334,7 @@ def main(argv=None):
     if client:
         release.refresh_index(trees["client"], client)
         print("refreshed client index.toml and pack.toml")
+    print(f"remaining release chain for {args.mod} {args.tag}: {CHAIN}")
     return 0
 
 

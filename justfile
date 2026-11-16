@@ -179,6 +179,11 @@ mirror-mod-jar *args:
     sys.argv = ["scripts/mirror_mod_jar.py", *sys.argv[1:]]
     runpy.run_path("scripts/mirror_mod_jar.py", run_name="__main__")
 
+vendor-block-registry *args:
+    import runpy, sys
+    sys.argv = ["scripts/vendor_block_registry.py", *sys.argv[1:]]
+    runpy.run_path("scripts/vendor_block_registry.py", run_name="__main__")
+
 mod *args:
     import runpy, sys
     sys.argv = ["bf.py", *["mod", *sys.argv[1:]]]

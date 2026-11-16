@@ -1179,6 +1179,21 @@ class RcBattery(unittest.TestCase):
             rc.scan_errors(boot_failure + "\n", rc.LOG_SCAN_ALLOW), [boot_failure]
         )
 
+    def test_scan_errors_allows_the_fake_cp_retry_lines(self):
+        # Same fake env, CP consumer side: the stream/presence/console/renewal
+        # retries warn every cycle while nothing listens. Exact cores pass; a
+        # differently-worded connection failure still fails.
+        allowed = [
+            "[blockfield-cp/WARN]: control-plane: control-plane stream failed, retrying",
+            "[cp-credential-renew/WARN]: CP credential renewal check failed: java.net.ConnectException",
+            "[blockfield-cp-presence/WARN]: control-plane: presence report failed: java.net.ConnectException",
+            "[blockfield-console-push/WARN]: [BlockField] Console log push failed, retrying.",
+        ]
+        for line in allowed:
+            self.assertEqual(rc.scan_errors(line + "\n", rc.LOG_SCAN_ALLOW), [])
+        other = "[blockfield-cp/WARN]: control-plane: control-plane stream failed: boom"
+        self.assertEqual(rc.scan_errors(other + "\n", rc.LOG_SCAN_ALLOW), [other])
+
     def test_arena_bounds_reads_battery_map(self):
         """arena_bounds covers any deployed map config, not just dm_arena
         (RC final5 long-range FAIL: hamburg lanes had no bounds to clamp)."""
@@ -1450,6 +1465,16 @@ class RcBattery(unittest.TestCase):
             if "FabricService" in allowed:
                 continue
             if allowed.startswith("Statistics outbox cannot be read"):
+                continue
+            # Fake-CP consumer retries (stand points CP/stats at 127.0.0.1:9):
+            # exact message cores, covered by
+            # test_scan_errors_allows_the_fake_cp_retry_lines.
+            if allowed in (
+                "control-plane: control-plane stream failed, retrying",
+                "CP credential renewal check failed: java.net.ConnectException",
+                "control-plane: presence report failed: java.net.ConnectException",
+                "[BlockField] Console log push failed, retrying.",
+            ):
                 continue
             self.assertIn("Error loading class: ", allowed)
             self.assertFalse(allowed.endswith(("class_", "/")))

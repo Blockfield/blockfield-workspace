@@ -1160,7 +1160,7 @@ Product-репозитории работают через интеграцио�
 
 Клиентский Deploy (`deploy` в паре и `rollback-client`) идёт не в публичный
 `blockfield-client` — его `deploy.yml` заглушка без раннера `blockfield-deploy`, —
-а workflow `deploy-client.yml` в `blockfield-server` (`inputs: tag, dry_run`;
+а workflow `deploy-client.yml` в `blockfield-dedicated` (`inputs: tag, dry_run`;
 `ship` всегда шлёт `dry_run=false`). Откат не пересобирает пак: workflow
 переключает раздачу на указанный старый тег и Latest. До слияния
 blockfield-server#276 следующий `ship` не стартует.

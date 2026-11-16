@@ -10,7 +10,7 @@ go through ship_mutate(), which has the same dry-run behaviour.
 Game and Workshop deploy independently: a server release never stages, moves,
 waits for or consults the Workshop, and ship never dispatches move-approved-tag.
 A Workshop release is a separate explicit dispatch, one line, e.g.:
-  gh api --method POST repos/Blockfield/blockfield-server/actions/workflows/move-approved-tag.yml/dispatches \
+  gh api --method POST repos/Blockfield/blockfield-gameplay/actions/workflows/move-approved-tag.yml/dispatches \
     -H 'X-GitHub-Api-Version: 2022-11-28' -f ref=main -F return_run_details=true \
     -f 'inputs[digest]=sha256:...'
 """
@@ -42,18 +42,19 @@ SERVER_PIN = "pins/server.sha"
 MOD_REPO = f"{ORG}/blockfield-mod"
 WORKSPACE_REPO = f"{ORG}/blockfield-workspace"
 SIDES = ("client", "server")
-REPO = {"client": f"{ORG}/blockfield-client", "server": f"{ORG}/blockfield-server"}
-# Split-server repos after the cutover: gameplay owns the game JAR and deploy,
-# dedicated owns packaging and releases. Status lists them; archive stays the
-# release source until the cutover owns releases (coordination#62).
-NEW_SERVER_REPOS = (
-    ("gameplay", f"{ORG}/blockfield-gameplay"),
-    ("dedicated", f"{ORG}/blockfield-dedicated"),
-)
+# The server side spans two repos after the split: gameplay owns the game JARs
+# and the deploy, dedicated owns packaging and releases. Gameplay checkouts live
+# in gameplay/ beside the workspace (like the dedicated server/ checkout); the
+# archived blockfield-server is frozen and no release leg touches it.
+REPO = {
+    "client": f"{ORG}/blockfield-client",
+    "server": f"{ORG}/blockfield-dedicated",
+    "gameplay": f"{ORG}/blockfield-gameplay",
+}
 # Where the published release of each side lives (the client publishes into blockfield-releases).
 RELEASES = {
     "client": f"{ORG}/blockfield-releases",
-    "server": f"{ORG}/blockfield-server",
+    "server": f"{ORG}/blockfield-dedicated",
 }
 WORKFLOW = {"client": "client.yml", "server": "release.yml"}
 # A server release never stages, waits for or consults the Workshop: Game and
@@ -64,7 +65,7 @@ PROD_ROOMS = "https://blockfield.pro/api/rooms"
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 CACHE = Path(os.environ.get("BF_DEV_HOME") or ROOT / ".dev") / "release"
 # Gitignored build inputs of a repo that a throwaway worktree must not download again.
-SHARED = {"client": (".cache",), "server": (".cache", "files", "sources")}
+SHARED = {"client": (".cache",), "server": (".cache", "files")}
 # --mod / --decor: (repo, asset stem, metafile, title, side, hash algorithm, percent-encode '+' in url)
 PINS = {
     "mod": (
@@ -133,25 +134,36 @@ def check_tag(tag, version, existing):
 
 
 def plan(changed, compat, prod):
-    """Release kind and the required order. compat holds the built contract of each changed side."""
+    """Release kind and the required order. compat holds the built contract of each changed side.
+
+    changed may also carry a "gameplay" flag: the server side spans gameplay
+    (game JARs, tagged first) and dedicated (packaging, tagged second), so a
+    gameplay change adds a ("tag-gameplay", "server") step ahead of the
+    dedicated ("tag", "server") step. compat["server"] is the dedicated build.
+    """
     sides = [s for s in SIDES if changed.get(s)]
     if not sides:
         return "none", []
+    game = [("tag-gameplay", "server")] if changed.get("gameplay") else []
     moved = {s for s in sides if compat.get(s) != prod}
     if not moved:
-        order = [("tag", s) for s in ("server", "client") if s in sides]
-        if sides == ["server"]:
-            # Server-only hotfix: tag, then the automatic tag-run Game deploy.
-            # The Workshop is never staged or moved: it deploys separately via
-            # an explicit move-approved-tag dispatch. No ("deploy", "server")
-            # step: the dry-run text would otherwise instruct a manual
-            # deploy.yml dispatch that real ship never performs.
-            order = [("tag", "server")]
+        # Server-only: tag gameplay first when it changed, then dedicated.
+        # Neither tag run deploys on its own: the Game deploy is an explicit
+        # gameplay deploy.yml dispatch (ship), so the dry-run text names no
+        # dispatch here.
+        order = []
+        for s in ("server", "client"):
+            if s not in sides:
+                continue
+            if s == "server":
+                order += game
+            order.append(("tag", s))
         return ("independent" if len(sides) == 2 else f"{sides[0]}-only"), order
     if moved == set(SIDES) and compat["client"] == compat["server"]:
         return "pair", [
             ("tag", "client"),
             ("candidate", "server"),
+            *game,
             ("tag", "server"),
             ("deploy-pair", "server"),
             ("deploy", "client"),
@@ -200,26 +212,26 @@ HELD_LABEL = "next-release"
 
 
 def held_issues():
-    """Open client/server issues with work held back for the next release (pins, tags, checks)."""
+    """Open client/server/gameplay issues with work held back for the next release (pins, tags, checks)."""
     found = []
-    for side in SIDES:
+    for repo in [REPO[side] for side in SIDES] + [REPO["gameplay"]]:
         done = run(
             "gh",
             "api",
             "--paginate",
             "--slurp",
-            f"repos/{REPO[side]}/issues?state=open&labels={HELD_LABEL}&per_page=100",
+            f"repos/{repo}/issues?state=open&labels={HELD_LABEL}&per_page=100",
             check=False,
         )
         if done.returncode:
             reason = (getattr(done, "stderr", "") or "").strip().splitlines()
             hint = f": {reason[0]}" if reason else ""
             found.append(
-                f"  {REPO[side]}: could not list `{HELD_LABEL}` issues, check by hand{hint}"
+                f"  {repo}: could not list `{HELD_LABEL}` issues, check by hand{hint}"
             )
             continue
         found += [
-            f"  {REPO[side]}#{i['number']} {i['title']} {i['html_url']}"
+            f"  {repo}#{i['number']} {i['title']} {i['html_url']}"
             for page in json.loads(done.stdout or "[]")
             for i in page
             if "pull_request" not in i
@@ -261,6 +273,11 @@ def prod_state():
 def repo_dir(side):
     path = ROOT / side
     if not (path / ".git").exists():
+        if side in ("server", "gameplay"):
+            raise SystemExit(
+                f"{path} is not checked out: just server-checkout"
+                " (dedicated clones into server/, gameplay into gameplay/)"
+            )
         raise SystemExit(
             f"{path} is not checked out: git submodule update --init {side}"
         )
@@ -299,18 +316,22 @@ def remote_tags(repo):
     return tags
 
 
-def published(side):
+def published_repo(repo):
     out = gh(
         "release",
         "list",
         "--repo",
-        RELEASES[side],
+        repo,
         "--limit",
         "100",
         "--json",
         "tagName",
     )
     return newest(r["tagName"] for r in json.loads(out))
+
+
+def published(side):
+    return published_repo(RELEASES[side])
 
 
 def show_pack(repo, ref):
@@ -360,6 +381,35 @@ def just(tree, *args):
     return run("just", *args, cwd=tree, env=env)
 
 
+def fetch_world_seed(tree):
+    """Download the world seed pinned by the tree's assets lock (verified by sha256).
+
+    Dedicated keeps no fetch script or seed blob: the seed comes from the
+    assets mirror on every build. Downloads are cached by digest; the tree
+    copy is a throwaway worktree file.
+    """
+    lock = json.loads((tree / "distribution/assets.lock.json").read_text())
+    url, sha = lock["url"], lock["sha256"]
+    if not re.fullmatch(r"[0-9a-f]{64}", sha or ""):
+        raise RuntimeError("distribution/assets.lock.json has no sha256 pin")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    cached = CACHE / "world-seed" / f"{sha}.zip"
+    if not cached.is_file() or hashlib.sha256(cached.read_bytes()).hexdigest() != sha:
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "blockfield-release"}
+        )
+        with urllib.request.urlopen(request, timeout=300) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise RuntimeError(f"world seed sha256 mismatch: {url}")
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(data)
+    dest = tree / "sources/world-seed.zip"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(cached.read_bytes())
+    return dest
+
+
 def build(side, tree, tag, manifest=None):
     """Run the repo's own `just build` (it resolves and checksum-verifies every pin) and return build.json."""
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -367,25 +417,32 @@ def build(side, tree, tag, manifest=None):
         out = Path(out) / "dist"
         steps = []
         if side == "server":
+            # Dedicated layout: fetch-mods resolves the committed mod pins,
+            # the world seed comes from the assets mirror, and the lobby
+            # sources (including the maps lock) come from the gameplay
+            # checkout via --server-source (maps build inside
+            # build-distribution; the packaged tree's gameplay lock is
+            # verified by hash at image build time in CI).
             steps = [
                 ["python", "scripts/fetch-mods.py"],
-                ["python", "scripts/maps/workshop_source.py"],
-                ["python", "scripts/fetch-world-seed.py"],
-                ["python", "scripts/maps/release_maps.py"],
             ]
+            fetch_world_seed(tree)
+            gameplay = repo_dir("gameplay") / "server"
+            if not (gameplay / "lobby").is_dir():
+                raise SystemExit(
+                    f"{gameplay} has no lobby sources: just server-checkout"
+                )
             final = [
                 "build",
                 "--out",
                 out,
                 "--server-source",
-                "server",
+                gameplay,
                 "--world-seed",
                 "sources/world-seed.zip",
                 # Contract-only preflight without Gradle (owner rule: no local
                 # Gradle): the Game image jar is built from mod-server in CI
-                # (:server:remapJar, wired in with --server-jar there; the
-                # gameplay version reads distribution/gameplay.lock.json
-                # when present, else mod-server/gradle.properties).
+                # and verified against distribution/gameplay.lock.json there.
                 "--no-server-jar",
             ]
             final += [
@@ -650,11 +707,16 @@ def set_candidate(tree, tag):
     path.write_text(json.dumps(policy, indent=2) + "\n", newline="\n")
 
 
-def open_pr(dry, repo, tree, branch, title, message, body=""):
+def open_pr(dry, repo, tree, branch, title, message, body="", allow_empty=False):
     git(tree, "add", "-u")
     say(git(tree, "diff", "--cached", "--stat"))
-    say(f"+ git commit -m {shlex.quote(message)}   [in {tree}]")
-    git(tree, "commit", "-q", "-m", message)
+    if allow_empty and not git(tree, "diff", "--cached", "--name-only"):
+        # Fork-only gameplay release: the branch already carries next's
+        # commits, so there is nothing to commit; push the branch as-is.
+        say("  (no file changes: branch already carries the release)")
+    else:
+        say(f"+ git commit -m {shlex.quote(message)}   [in {tree}]")
+        git(tree, "commit", "-q", "-m", message)
     mutate(dry, "git", "push", "-u", "origin", branch, cwd=tree)
     url = mutate(
         dry,
@@ -678,17 +740,15 @@ def open_pr(dry, repo, tree, branch, title, message, body=""):
 
 
 def pr_branch(side, tag):
-    return f"release/{side}-{tag.removeprefix('v')}"
+    # The server side releases from the dedicated repo (the gameplay leg uses
+    # side "gameplay"), matching the release/dedicated-X branch convention.
+    return (
+        f"release/{'dedicated' if side == 'server' else side}-{tag.removeprefix('v')}"
+    )
 
 
-def prepare_side(side, args, prod, manifest, repin):
-    repo = repo_dir(side)
-    fetch_main(repo)
-    base = integration_ref(repo)
-    tags = remote_tags(repo)
-    last = newest(tags)
-    version = next_version(last, show_pack(repo, base), args.bump)
-    tag, branch = f"v{version}", pr_branch(side, f"v{version}")
+def release_body(checkout, args, base):
+    """Release PR body: gate waiver plus the next->main merge note."""
     waiver = getattr(args, "gate_waiver", None)
     body = f"Release-gate waiver: {waiver}\n" if waiver else ""
     if base == "origin/next":
@@ -696,10 +756,65 @@ def prepare_side(side, args, prod, manifest, repin):
         # (never squash), and next is fast-forwarded to main right after.
         body += (
             "Merge with a merge commit (never squash); after the merge run: "
-            f"git -C {side} fetch -q origin && "
-            "git -C {side} push origin origin/main:refs/heads/next "
+            f"git -C {checkout} fetch -q origin && "
+            f"git -C {checkout} push origin origin/main:refs/heads/next "
             "(fast-forward next to main)\n"
         )
+    return body
+
+
+def release_published(repo, tag):
+    """True when the tag's release is published (read-only)."""
+    done = run("gh", "release", "view", tag, "--repo", repo, check=False)
+    if done.returncode == 0:
+        return True
+    err = (done.stderr or "").lower()
+    if "not found" in err or "no release" in err:
+        return False
+    raise RuntimeError(
+        f"gh release view {tag} failed:\n{(done.stdout + done.stderr).strip()[-1500:]}"
+    )
+
+
+def merge_branches(tree, label, args):
+    """Merge --server-merge branches into the release tree. Returns PR message parts."""
+    parts = []
+    for name in (piece.strip() for piece in args.server_merge.split(",")):
+        if not name:
+            continue
+        git(tree, "fetch", "-q", "origin", f"refs/heads/{name}")
+        sha = git(tree, "rev-parse", "FETCH_HEAD")
+        say(f"  merge {label} {name} ({sha}) into release branch")
+        git(tree, "merge", "--no-ff", "--no-edit", sha)
+        parts.append(f"merge {name} {sha[:7]}")
+    return parts
+
+
+def fork_pin_only(tree, base, last, label):
+    """Release when the tree carries unreleased commits vs the newest tag even if pins match the base.
+
+    Returns the PR message part, or None when there is nothing to release.
+    """
+    # The tag object may be unknown locally (ls-remote only lists
+    # it; a burnt tag can point at an unmerged release branch).
+    git(tree, "fetch", "-q", "origin", "tag", last)
+    if not git(tree, "log", "--no-merges", "--format=%h", f"{last}..HEAD"):
+        say("  pins unchanged: nothing to release on this side")
+        return None
+    return f"{label} commits since {last}"
+
+
+def prepare_side(side, args, prod, manifest, repin):
+    if side == "server":
+        raise AssertionError("server prepare runs through prepare_server")
+    repo = repo_dir(side)
+    fetch_main(repo)
+    base = integration_ref(repo)
+    tags = remote_tags(repo)
+    last = newest(tags)
+    version = next_version(last, show_pack(repo, base), args.bump)
+    tag, branch = f"v{version}", pr_branch(side, f"v{version}")
+    body = release_body(side, args, base)
     if git(repo, "ls-remote", "--heads", "origin", branch):
         raise SystemExit(
             f"{branch} already exists on origin; delete or reuse it manually"
@@ -707,19 +822,7 @@ def prepare_side(side, args, prod, manifest, repin):
     say(f"== {side} {tag}")
     with worktree(repo, base, branch, side) as tree:
         files, parts = [], []
-        if side == "server" and args.server_merge:
-            for name in (piece.strip() for piece in args.server_merge.split(",")):
-                if not name:
-                    continue
-                git(tree, "fetch", "-q", "origin", f"refs/heads/{name}")
-                sha = git(tree, "rev-parse", "FETCH_HEAD")
-                say(f"  merge server {name} ({sha}) into release branch")
-                git(tree, "merge", "--no-ff", "--no-edit", sha)
-                parts.append(f"merge {name} {sha[:7]}")
-        if side == "client":
-            files.append(pin_jar(tree, "mod", args.mod))
-        else:
-            run("sh", "scripts/bump-mod.sh", args.mod, cwd=tree)
+        files.append(pin_jar(tree, "mod", args.mod))
         parts.append(f"mod {args.mod}")
         if args.decor:
             files.append(pin_jar(tree, "decor", args.decor))
@@ -727,17 +830,14 @@ def prepare_side(side, args, prod, manifest, repin):
         if not git(tree, "diff", base, "--name-only"):
             # Fork-pin-only path: mod/decor pins match the integration base, but the
             # tree may still carry unreleased content vs the newest tag
-            # (client main, or the merged server branch). Release then.
+            # (client main, or the merged branch). Release then.
             if not last:
                 say("  pins unchanged: nothing to release on this side")
                 return None
-            # The tag object may be unknown locally (ls-remote only lists
-            # it; a burnt tag can point at an unmerged release branch).
-            git(tree, "fetch", "-q", "origin", "tag", last)
-            if not git(tree, "log", "--no-merges", "--format=%h", f"{last}..HEAD"):
-                say("  pins unchanged: nothing to release on this side")
+            part = fork_pin_only(tree, base, last, "fork pins")
+            if part is None:
                 return None
-            parts.append(f"fork pins since {last}")
+            parts.append(part)
         if repin:
             set_candidate(tree, "v" + prod["client_version"])
             parts.append(f"client candidate v{prod['client_version']}")
@@ -758,57 +858,219 @@ def prepare_side(side, args, prod, manifest, repin):
     return tag, meta
 
 
+def prepare_gameplay(args):
+    """Open the gameplay release PR. Returns (tag, opened).
+
+    No local build runs here: gameplay compiles with Gradle (owner rule), so
+    the branch CI owns compilation and tests; the tool checks tags and pins.
+    """
+    repo = repo_dir("gameplay")
+    fetch_main(repo)
+    base = integration_ref(repo)
+    tags = remote_tags(repo)
+    last = newest(tags)
+    if not last:
+        say("  gameplay: no tags on origin; nothing to release")
+        return None, False
+    version = next_version(last, last.removeprefix("v"), args.bump)
+    tag, branch = f"v{version}", pr_branch("gameplay", f"v{version}")
+    body = release_body("gameplay", args, base)
+    if git(repo, "ls-remote", "--heads", "origin", branch):
+        raise SystemExit(
+            f"{branch} already exists on origin; delete or reuse it manually"
+        )
+    say(f"== gameplay {tag}")
+    with worktree(repo, base, branch, "gameplay") as tree:
+        parts = []
+        if args.server_merge:
+            parts += merge_branches(tree, "gameplay", args)
+        run("sh", "scripts/bump-mod.sh", args.mod, cwd=tree)
+        parts.append(f"mod {args.mod}")
+        if not git(tree, "diff", base, "--name-only"):
+            # The bump matches the base: release only when next carries
+            # unreleased commits vs the newest tag, else the pin leg reuses it.
+            part = fork_pin_only(tree, base, last, "gameplay")
+            if part is None:
+                say(f"  gameplay: pins unchanged; pin leg reuses {last}")
+                return last, False
+            parts.append(part)
+        published_tag = published_repo(REPO["gameplay"])
+        res = check_tag(
+            tag, version, {*tags, *([published_tag] if published_tag else [])}
+        )
+        if not show(res):
+            raise SystemExit(f"preflight failed for gameplay {tag}: nothing was pushed")
+        open_pr(
+            args.dry_run,
+            REPO["gameplay"],
+            tree,
+            branch,
+            f"Release gameplay {version}",
+            f"Release gameplay {version}: {', '.join(parts)}",
+            body,
+            allow_empty=True,
+        )
+    return tag, True
+
+
+def prepare_dedicated(args, prod, gameplay_tag, manifest=None, repin=True):
+    """Open the dedicated pin PR against the published gameplay tag. Returns (tag, meta)."""
+    repo = repo_dir("server")
+    fetch_main(repo)
+    base = integration_ref(repo)
+    tags = remote_tags(repo)
+    last = newest(tags)
+    version = next_version(last, show_pack(repo, base), args.bump)
+    tag, branch = f"v{version}", pr_branch("server", f"v{version}")
+    body = release_body("server", args, base)
+    if git(repo, "ls-remote", "--heads", "origin", branch):
+        raise SystemExit(
+            f"{branch} already exists on origin; delete or reuse it manually"
+        )
+    say(f"== dedicated {tag}")
+    with worktree(repo, base, branch, "server") as tree:
+        files, parts = [], []
+        # Fails closed while the gameplay release is unpublished: the lock
+        # needs its SHA256SUMS. Tag gameplay first, then re-run prepare.
+        run("sh", "scripts/bump-gameplay.sh", gameplay_tag, cwd=tree)
+        parts.append(f"gameplay {gameplay_tag}")
+        if args.decor:
+            files.append(pin_jar(tree, "decor", args.decor))
+            parts.append(f"decor {args.decor}")
+        if not git(tree, "diff", base, "--name-only"):
+            # The lock already pins this gameplay tag and next carries no
+            # unreleased commits: nothing to release on this side.
+            if not last:
+                say("  pins unchanged: nothing to release on this side")
+                return None, None
+            part = fork_pin_only(tree, base, last, "dedicated")
+            if part is None:
+                return None, None
+            parts.append(part)
+        if repin:
+            set_candidate(tree, "v" + prod["client_version"])
+            parts.append(f"client candidate v{prod['client_version']}")
+        set_version(tree, version)
+        refresh_index(tree, files)
+        res, meta = preflight("server", tag, tree, manifest)
+        if not show(res):
+            raise SystemExit(
+                f"preflight failed for dedicated {tag}: nothing was pushed"
+            )
+        open_pr(
+            args.dry_run,
+            REPO["server"],
+            tree,
+            branch,
+            f"Release dedicated {version}",
+            f"Release dedicated {version}: {', '.join(parts)}",
+            body,
+        )
+    return tag, meta
+
+
+def prepare_server(args, prod, manifest=None, repin=True):
+    """Gameplay release leg, then the dedicated pin leg.
+
+    Returns (dedicated_tag, meta, gameplay_tag, deferred): the dedicated leg
+    pins the gameplay release, so it defers (deferred=True, no dedicated tag)
+    while that release is unpublished; re-run prepare after tagging gameplay.
+    """
+    gameplay_tag, _ = prepare_gameplay(args)
+    if gameplay_tag is None:
+        return None, None, None, False
+    if not release_published(REPO["gameplay"], gameplay_tag):
+        say(
+            f"  dedicated pin PR waits for gameplay {gameplay_tag}: "
+            "tag it, wait for the JAR release to publish, then re-run prepare"
+        )
+        return None, None, gameplay_tag, True
+    tag, meta = prepare_dedicated(args, prod, gameplay_tag, manifest, repin)
+    if tag is None:
+        # The dedicated side has nothing new (a fresh gameplay tag always
+        # changes the lock, so this only happens when reusing an old one).
+        return None, None, None, False
+    return tag, meta, gameplay_tag, False
+
+
 def tag_lines(order, tags, branch):
     lines = []
     for action, side in order:
-        tag = tags.get(side)
-        if action == "tag":
+        tag = tags.get("gameplay" if action == "tag-gameplay" else side)
+        if action == "tag-gameplay":
+            lines.append(
+                f"release gate: RC record for gameplay {tag} passes "
+                "(or a named --gate-waiver); release.push_tag refuses without one"
+            )
+            lines.append(
+                f"wait for green gameplay PR checks at pinned head; merge that head; preflight gameplay {tag} at merged SHA"
+            )
+            lines.append(
+                f'git -C gameplay fetch origin main && git -C gameplay tag -a {tag} -m {tag} "$MERGED_SHA" && git -C gameplay push origin {tag}'
+                "   # MERGED_SHA is the exact release-PR merge commit"
+            )
+            lines.append(
+                f"wait for the gameplay {tag} tag push run: release SUCCESS and published JARs "
+                "(the dedicated pin PR needs the published SHA256SUMS)"
+            )
+        elif action == "tag":
             lines.append(
                 f"release gate: RC record for {side} {tag} passes "
                 "(or a named --gate-waiver); release.push_tag refuses without one"
             )
-        if action == "tag":
-            lines.append(
-                f"wait for green {side} PR checks at pinned head"
-                + (" including image SUCCESS" if side == "server" else "")
-                + f"; merge that head; preflight {side} {tag} at merged SHA"
-            )
-            lines.append(
-                f'git -C {side} fetch origin main && git -C {side} tag -a {tag} -m {tag} "$MERGED_SHA" && git -C {side} push origin {tag}'
-                "   # MERGED_SHA is the exact release-PR merge commit"
-            )
+            if side == "server":
+                lines.append(
+                    f"wait for green dedicated PR checks at pinned head; merge that head; preflight dedicated {tag} at merged SHA"
+                )
+                lines.append(
+                    f'git -C server fetch origin main && git -C server tag -a {tag} -m {tag} "$MERGED_SHA" && git -C server push origin {tag}'
+                    "   # MERGED_SHA is the exact release-PR merge commit"
+                )
+            else:
+                lines.append(
+                    f"wait for green {side} PR checks at pinned head"
+                    + "; merge that head; preflight "
+                    + f"{side} {tag} at merged SHA"
+                )
+                lines.append(
+                    f'git -C {side} fetch origin main && git -C {side} tag -a {tag} -m {tag} "$MERGED_SHA" && git -C {side} push origin {tag}'
+                    "   # MERGED_SHA is the exact release-PR merge commit"
+                )
             if any(a == "candidate" for a, _ in order):
-                jobs = (
-                    "check (includes publish)"
-                    if side == "client"
-                    else "prepare + release"
-                )
-                lines.append(
-                    f"wait for {side} tag push run: {jobs} SUCCESS; verify published assets; "
-                    + (
+                if side == "client":
+                    lines.append(
+                        f"wait for {side} tag push run: check (includes publish) SUCCESS; verify published assets; "
                         "automatic Deploy SUCCESS (staged); client remains prerelease"
-                        if side == "client"
-                        else "continue without waiting for automatic Deploy; any observed red must match the known compatibility refusal"
                     )
-                )
+                else:
+                    lines.append(
+                        f"wait for dedicated {tag} tag push run: release SUCCESS; verify published assets "
+                        "(build.json, build-workshop.json, SHA256SUMS); "
+                        "no automatic Deploy runs on a tag"
+                    )
             elif side == "server":
-                # Server-only: the tag push run deploys Game on its own; real
-                # ship performs no manual deploy.yml dispatch for this step.
+                # No automatic Deploy on a dedicated tag: the Game deploy is an
+                # explicit gameplay deploy.yml dispatch, owned by ship (part 2).
                 lines.append(
-                    "watch the tag push run: its automatic Deploy ships "
-                    f"{tags['server']} (no manual dispatch)"
+                    f"watch the dedicated {tag} tag push run: release SUCCESS publishes "
+                    "build.json, build-workshop.json and SHA256SUMS in the dedicated repo"
                 )
         elif action == "candidate":
             lines.append(
-                f"just release candidate {tags['client']} --branch {branch}   # preflight, push; wait for NEW server CI"
+                f"just release candidate {tags['client']} --branch {branch}   # preflight, push; wait for NEW dedicated CI"
             )
         elif action == "deploy-pair":
             lines.append(
                 f"assert client {tags['client']} is still a prerelease before the server switch"
             )
+            # The digest only exists once the dedicated tag builds the image,
+            # so the plan names the dispatch shape; ship (part 2) fills it in.
             lines.append(
-                shlex.join(deploy_command("server", tags["server"], tags["client"]))
-                + "   # wait for this new dispatch run to succeed"
+                "gh api --method POST repos/Blockfield/blockfield-gameplay/actions/workflows/deploy.yml/dispatches "
+                "-H X-GitHub-Api-Version: 2022-11-28 -f ref=main -F return_run_details=true "
+                f"-f inputs[digest]=<game image digest of dedicated {tags['server']}> "
+                f"-f inputs[client_tag]={tags['client']}"
+                "   # wait for this new dispatch run to succeed"
             )
         else:
             lines.append(
@@ -816,6 +1078,12 @@ def tag_lines(order, tags, branch):
                 + "   # wait for this new dispatch run to succeed"
             )
     for action, side in order:
+        if action == "tag-gameplay":
+            lines.append(
+                "after the gameplay release merge: merge with a merge commit (never squash), then "
+                "git -C gameplay fetch -q origin && git -C gameplay push origin origin/main:refs/heads/next"
+                "   # fast-forward next to main; hotfixes go via next too"
+            )
         if action == "tag":
             lines.append(
                 f"after the {side} release merge: merge with a merge commit (never squash), then "
@@ -826,31 +1094,47 @@ def tag_lines(order, tags, branch):
 
 
 def prepare_all(args):
-    """Run prepare and return (tags, kind, order, server_branch). Shared by prepare and ship."""
+    """Run prepare and return (tags, kind, order, server_branch). Shared by prepare and ship.
+
+    tags may carry a "gameplay" entry (the new gameplay tag) next to the side
+    tags. kind "deferred" means the dedicated pin leg waits for the gameplay
+    release to publish: order is empty and the caller re-runs prepare after
+    tagging gameplay.
+    """
     if args.only == "client" and args.server_merge:
         raise ValueError("--server-merge cannot be used with --only client")
     prod = prod_state()
     say_held()
     sides = [args.only] if args.only else list(SIDES)
     results, manifest = {}, None
+    deferred = False
     CACHE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=CACHE) as scratch:
         for side in sides:
             moved_pair = manifest is not None
-            got = prepare_side(
-                side, args, prod, manifest, repin=side == "server" and not moved_pair
-            )
-            if got and side == "client":
+            if side == "server":
+                vD, meta, vG, deferred = prepare_server(
+                    args, prod, manifest, repin=not moved_pair
+                )
+                if vG is not None:
+                    results["gameplay"] = (vG, {})
+                if vD is not None:
+                    results["server"] = (vD, meta)
+                continue
+            got = prepare_side(side, args, prod, manifest, repin=False)
+            if got:
                 tag, meta = got
                 if meta["compatibility"] != prod["compatibility"]:
                     path = Path(scratch) / "client-build.json"
                     path.write_text(json.dumps(meta))
                     manifest = path.as_uri()
-            if got:
                 results[side] = got
     tags = {s: r[0] for s, r in results.items()}
-    compat = {s: r[1]["compatibility"] for s, r in results.items()}
-    kind, order = plan({s: True for s in results}, compat, prod["compatibility"])
+    compat = {s: r[1]["compatibility"] for s, r in results.items() if s in SIDES}
+    if deferred:
+        kind, order = "deferred", []
+    else:
+        kind, order = plan({s: True for s in results}, compat, prod["compatibility"])
     branch = pr_branch("server", tags["server"]) if "server" in tags else ""
     return tags, kind, order, branch
 
@@ -858,6 +1142,14 @@ def prepare_all(args):
 def cmd_prepare(args):
     tags, kind, order, branch = prepare_all(args)
     say(f"\nrelease kind: {kind}")
+    if kind == "deferred":
+        # The dedicated pin leg needs the published gameplay release: the
+        # gameplay leg above opened (or found) its tag, the rest follows.
+        say(
+            f"dedicated pin PR waits for gameplay {tags.get('gameplay')}: "
+            "tag it, wait for the JAR release to publish, then re-run prepare"
+        )
+        return True
     if kind == "mismatch":
         say(
             "client and server contracts do not match each other or production: fix before tagging"
@@ -870,7 +1162,7 @@ def cmd_prepare(args):
         say(f"  {number}. {line}")
     if kind == "pair":
         say(
-            "The server PR stays red until the candidate step pins the published client."
+            "The dedicated PR merges only after the candidate step pins the published client."
         )
     return True
 
@@ -946,35 +1238,6 @@ def latest_tag(repo):
     return out[0]["tagName"] if out else None
 
 
-def branch_exists(repo, branch):
-    """True when the branch exists on origin (read-only, no checkout)."""
-    done = run("gh", "api", f"repos/{repo}/branches/{branch}", check=False)
-    return done.returncode == 0
-
-
-def split_repo_lines(name, repo):
-    """Status lines for a split-server repo: latest release plus commits ahead of it.
-
-    Read-only (gh API, no checkout); every failure degrades to a line so
-    `release status` keeps reporting the archive-based release it gates on."""
-    try:
-        latest = latest_tag(repo)
-    except RuntimeError as error:
-        return [f"{name}: releases unreadable ({' '.join(str(error).split())[:160]})"]
-    if latest is None:
-        return [f"{name}: no published releases"]
-    ref = "next" if branch_exists(repo, "next") else "main"
-    try:
-        cmp = json.loads(gh("api", f"repos/{repo}/compare/{latest}...{ref}"))
-    except RuntimeError as error:
-        detail = " ".join(str(error).split())[:160]
-        return [f"{name}: last published {latest} (compare unreadable: {detail})"]
-    return [
-        f"{name}: last published {latest}, "
-        f"{cmp.get('ahead_by', '?')} unreleased commit(s) on origin/{ref}"
-    ]
-
-
 def cmd_status(args):
     prod = prod_state()
     say(
@@ -982,7 +1245,7 @@ def cmd_status(args):
     )
     say_held()
     say("\nnext resync (a stale next makes the next prepare collide):")
-    for side in SIDES:
+    for side in (*SIDES, "gameplay"):
         ff_next_to_main(side, False, report_only=True)
     changed, compat, broken = {}, {}, False
     mods = {}
@@ -1009,6 +1272,31 @@ def cmd_status(args):
         )
         for line in log[:8]:
             say(f"  {line}")
+    game_repo = repo_dir("gameplay")
+    fetch_main(game_repo)
+    game_tags = remote_tags(game_repo)
+    game_last = published_repo(REPO["gameplay"])
+    game_base = integration_ref(game_repo)
+    game_log = (
+        git(
+            game_repo,
+            "log",
+            "--no-merges",
+            "--format=%h %s",
+            f"{game_tags[game_last]}..{game_base}",
+        ).splitlines()
+        if game_last in game_tags
+        else []
+    )
+    changed["gameplay"] = bool(game_log)
+    if game_last is None:
+        say("\ngameplay: no published releases")
+    else:
+        say(
+            f"\ngameplay: last published {game_last}, {len(game_log)} unreleased commit(s) on {game_base.removeprefix('origin/')}"
+        )
+        for line in game_log[:8]:
+            say(f"  {line}")
     repos = sorted({repo for side in SIDES for _, repo, _ in mods[side]})
     with ThreadPoolExecutor(8) as pool:
         latest = dict(zip(repos, pool.map(latest_tag, repos)))
@@ -1021,10 +1309,6 @@ def cmd_status(args):
         )
         for name, tag, new in behind:
             say(f"  behind: {name} {tag} -> {new}")
-    say("\nsplit-server repos (cutover targets; informational until the cutover):")
-    for name, repo in NEW_SERVER_REPOS:
-        for line in split_repo_lines(name, repo):
-            say(f"  {line}")
     for side in SIDES:
         if changed[side]:
             repo = repo_dir(side)
@@ -1082,13 +1366,13 @@ def cmd_pin(args):
         out = git(ROOT, "ls-tree", base, path)
         if out.startswith("160000"):
             return out.split()[2]
-        if path == "server":
-            # The public workspace pins the private server by file, not gitlink.
-            shown = git(ROOT, "show", f"{base}:{SERVER_PIN}", check=False)
+        if path in ("pins/dedicated.sha", "pins/gameplay.sha"):
+            # The public workspace pins dedicated/gameplay by file, not gitlink.
+            shown = git(ROOT, "show", f"{base}:{path}", check=False)
             return (shown.returncode == 0 and shown.stdout.strip()) or None
         return None
 
-    def advance(path, tag, label):
+    def advance_gitlink(path, tag, label):
         repo = ROOT / path
         if not (repo / ".git").exists():
             if path not in skipped:
@@ -1112,18 +1396,70 @@ def cmd_pin(args):
             say(f"warning: {path}: {label} overrides {changes[path][1]}")
         changes[path] = (sha, label)
 
-    for side in SIDES:
-        tag = want[side]
-        if tag != prod["build" if side == "client" else "server_build"]:
-            say(f"warning: {side} {tag} is not what production runs")
-        advance(side, tag, f"{side} {tag.removeprefix('v')}")
-        for _, repo_name, mod_tag in pins(
-            repo_dir(side), tag_commit(repo_dir(side), tag)
-        ):
-            path = f"localmods/{repo_name.split('/')[1]}"
-            if pinned(path):
-                short = path.split("/")[1].removeprefix("blockfield-").split("-")[0]
-                advance(path, mod_tag, f"{short} {mod_tag.removeprefix('v')}")
+    def advance_file(pin_path, checkout_side, tag, label):
+        repo = repo_dir(checkout_side)
+        current = changes.get(pin_path, (pinned(pin_path),))[0]
+        if current is None:
+            if pin_path not in skipped:
+                say(f"skip {pin_path}: the workspace does not pin it")
+            skipped.add(pin_path)
+            return
+        sha = tag_commit(repo, tag)
+        if sha == current:
+            return
+        git(repo, "fetch", "-q", "origin", sha)
+        if not is_ancestor(repo, current, sha):
+            say(f"skip {pin_path}: {sha[:7]} is not ahead of the pinned {current[:7]}")
+            return
+        if pin_path in changes and changes[pin_path][0] != sha:
+            say(f"warning: {pin_path}: {label} overrides {changes[pin_path][1]}")
+        changes[pin_path] = (sha, label)
+
+    def gameplay_tag_for(dedicated_sha):
+        lock = json.loads(
+            git(
+                repo_dir("server"),
+                "show",
+                f"{dedicated_sha}:distribution/gameplay.lock.json",
+            )
+        )
+        tag = lock.get("tag")
+        if not parse(tag or ""):
+            raise RuntimeError(
+                f"dedicated {dedicated_sha[:7]} pins invalid gameplay tag {tag!r}"
+            )
+        return tag
+
+    tag = want["client"]
+    if tag != prod["build"]:
+        say(f"warning: client {tag} is not what production runs")
+    advance_gitlink("client", tag, f"client {tag.removeprefix('v')}")
+    for _, repo_name, mod_tag in pins(
+        repo_dir("client"), tag_commit(repo_dir("client"), tag)
+    ):
+        path = f"localmods/{repo_name.split('/')[1]}"
+        if pinned(path):
+            short = path.split("/")[1].removeprefix("blockfield-").split("-")[0]
+            advance_gitlink(path, mod_tag, f"{short} {mod_tag.removeprefix('v')}")
+    tag = want["server"]
+    if tag != prod["server_build"]:
+        say(f"warning: server {tag} is not what production runs")
+    advance_file(
+        "pins/dedicated.sha", "server", tag, f"dedicated {tag.removeprefix('v')}"
+    )
+    dedicated_sha = tag_commit(repo_dir("server"), tag)
+    game_tag = gameplay_tag_for(dedicated_sha)
+    advance_file(
+        "pins/gameplay.sha",
+        "gameplay",
+        game_tag,
+        f"gameplay {game_tag.removeprefix('v')}",
+    )
+    for _, repo_name, mod_tag in pins(repo_dir("server"), dedicated_sha):
+        path = f"localmods/{repo_name.split('/')[1]}"
+        if pinned(path):
+            short = path.split("/")[1].removeprefix("blockfield-").split("-")[0]
+            advance_gitlink(path, mod_tag, f"{short} {mod_tag.removeprefix('v')}")
     if not changes:
         say("nothing to pin: the workspace already pins what production runs")
         return True
@@ -1135,9 +1471,9 @@ def cmd_pin(args):
     )
     with worktree(ROOT, base, branch) as tree:
         for path, (sha, _) in changes.items():
-            if path == "server" and not git(tree, "ls-tree", base, path):
-                (tree / SERVER_PIN).write_text(sha + "\n", encoding="utf-8")
-                git(tree, "add", SERVER_PIN)
+            if path.startswith("pins/"):
+                (tree / path).write_text(sha + "\n", encoding="utf-8")
+                git(tree, "add", path)
                 continue
             git(tree, "update-index", "--add", "--cacheinfo", f"160000,{sha},{path}")
         say(git(tree, "diff", "--cached", "--stat"))
@@ -1528,9 +1864,9 @@ def verify_publication(side, tag):
     if data["draft"] or data["tag_name"] != tag:
         raise RuntimeError(f"{side} {tag}: release is not published")
     assets = {a["name"]: a for a in data["assets"]}
-    required = {"release-notes.md"}
     if side == "client":
-        required |= {
+        required = {
+            "release-notes.md",
             "build.json",
             "SHA256SUMS",
             "Blockfield-client.zip",
@@ -1538,32 +1874,35 @@ def verify_publication(side, tag):
             "Blockfield.mrpack",
             "Blockfield-web.tar",
         }
+    else:
+        # Dedicated publishes generated notes (no release-notes.md asset):
+        # the Game/workshop manifests plus their checksum file.
+        required = {"build.json", "build-workshop.json", "SHA256SUMS"}
     if required - assets.keys():
         raise RuntimeError(
             f"{side} {tag}: missing assets {sorted(required - assets.keys())}"
         )
-    if side == "server":
-        return
     CACHE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=CACHE) as tmp:
-        gh(
-            "release",
-            "download",
-            tag,
-            "--repo",
-            RELEASES[side],
-            "-p",
-            "build.json",
-            "-p",
-            "SHA256SUMS",
-            "-D",
-            tmp,
+        patterns = (
+            ("build.json", "SHA256SUMS")
+            if side == "client"
+            else ("build.json", "build-workshop.json", "SHA256SUMS")
         )
+        args = ["release", "download", tag, "--repo", RELEASES[side]]
+        for name in patterns:
+            args += ["-p", name]
+        gh(*args, "-D", tmp)
         sums = dict(
             line.split("  ", 1)[::-1]
             for line in (Path(tmp) / "SHA256SUMS").read_text().splitlines()
         )
-        for name in required - {"SHA256SUMS", "release-notes.md"}:
+        check_names = (
+            required - {"SHA256SUMS", "release-notes.md"}
+            if side == "client"
+            else ("build.json", "build-workshop.json")
+        )
+        for name in check_names:
             digest = sums.get(name)
             if not digest or assets[name].get("digest") != f"sha256:{digest}":
                 raise RuntimeError(
@@ -1617,9 +1956,9 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s, client_stage_run=
         and client_stage_run is not None
         and verify_client_stage(tag, client_stage_run)
     )
-    required = {"check"} if side == "client" else {"prepare", "release"}
+    required = {"check"} if side == "client" else {"release"}
     refusal_step = "Validate target and remember previous pair"
-    refusal = "Server gates on another client than the served one: rerun Deploy server with client_tag"
+    refusal = "Server moves the client contract: rerun Deploy server with client_tag"
 
     def ready():
         data = json.loads(
@@ -1654,6 +1993,10 @@ def wait_publication(side, tag, run_id, timeout_s, interval_s, client_stage_run=
             if conclusion in (None, "", "success") or (
                 staged and conclusion == "skipped"
             ):
+                # An unconcluded automatic Deploy on an incomplete run is
+                # still running, not published: keep polling (backlog 30).
+                if conclusion in (None, "") and data["status"] != "completed":
+                    return False
                 continue
             if side == "client":
                 raise RuntimeError(
@@ -2143,7 +2486,7 @@ def cmd_ship(args):
                     f"ship stopped: origin/next of {side} is not synced with origin/main; fix it first"
                 )
     tags, kind, order, branch = resume_pair(args) if resume else prepare_all(args)
-    if kind in ("none", "mismatch") or not tags:
+    if kind in ("none", "mismatch", "deferred") or not tags:
         raise SystemExit(f"ship stopped: release kind is {kind}")
     say(f"\nrelease kind: {kind}")
     if dry:

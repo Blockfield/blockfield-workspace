@@ -1160,39 +1160,53 @@ class WorldC2Pack(unittest.TestCase):
 
 
 class RcBattery(unittest.TestCase):
-    def test_scan_errors_allows_only_the_stand_outbox_retry_line(self):
-        # The stand boots with the prod-shape fake CP env and no CP answers it,
-        # so the best-effort transport retry logs exactly one error line per
-        # tick; the boot path under test already passed by then. Any other
-        # stats error (notably the boot failure of the v2.83.3 incident) must
-        # still fail the scan.
-        retry = (
-            "[Server thread/ERROR]: Statistics outbox cannot be read or committed;"
-            " queued files retained. Inspect the volume."
-        )
-        self.assertEqual(rc.scan_errors(retry + "\n", rc.LOG_SCAN_ALLOW), [])
-        boot_failure = (
-            "[Server thread/ERROR]: Statistics export was explicitly enabled but"
-            " configuration/storage initialization failed"
-        )
-        self.assertEqual(
-            rc.scan_errors(boot_failure + "\n", rc.LOG_SCAN_ALLOW), [boot_failure]
-        )
+    def test_fake_cp_noise_allowed_only_against_the_fake_endpoint(self):
+        # backlog:blockfield#63: every fake-CP allowlist line applies only
+        # while the RC runs against the fake endpoint; a stand pointed at a
+        # real CP keeps flagging the same lines.
+        for needle in rc.FAKE_CP_NOISE:
+            level = "WARN" if "fail" in needle.lower() else "ERROR"
+            line = f"[Server thread/{level}]: {needle}"
+            with self.subTest(needle=needle):
+                self.assertEqual(
+                    rc.scan_errors(
+                        line + "\n",
+                        rc.scan_allow({"BLOCKFIELD_CP_URL": "http://127.0.0.1:9"}),
+                    ),
+                    [],
+                )
+                # The stand default is the fake env (devstack fills gaps).
+                self.assertEqual(rc.scan_errors(line + "\n", rc.scan_allow({})), [])
+                self.assertEqual(
+                    rc.scan_errors(
+                        line + "\n",
+                        rc.scan_allow({"BLOCKFIELD_CP_URL": "https://cp.example"}),
+                    ),
+                    [line],
+                )
 
-    def test_scan_errors_allows_the_fake_cp_retry_lines(self):
-        # Same fake env, CP consumer side: the stream/presence/console/renewal
-        # retries warn every cycle while nothing listens. Exact cores pass; a
-        # differently-worded connection failure still fails.
-        allowed = [
-            "[blockfield-cp/WARN]: control-plane: control-plane stream failed, retrying",
-            "[cp-credential-renew/WARN]: CP credential renewal check failed: java.net.ConnectException",
-            "[blockfield-cp-presence/WARN]: control-plane: presence report failed: java.net.ConnectException",
-            "[blockfield-console-push/WARN]: [BlockField] Console log push failed, retrying.",
+    def test_real_cp_failures_still_fail_the_scan(self):
+        # backlog:blockfield#63: a 401/503/timeout from a real CP must fail
+        # even while the fake endpoint is active.
+        allow = rc.scan_allow({"BLOCKFIELD_CP_URL": "http://127.0.0.1:9"})
+        lines = [
+            "[cp-credential-renew/WARN]: CP credential renewal check failed:"
+            " java.io.IOException: HTTP 401",
+            "[blockfield-cp-presence/WARN]: control-plane: presence report failed:"
+            " java.io.IOException: HTTP 503",
+            "[blockfield-cp-presence/WARN]: control-plane: presence report failed:"
+            " Timed out",
+            "[blockfield-cp/WARN]: control-plane: control-plane stream failed: boom",
+            "[blockfield-console-push/WARN]: [BlockField] Console log push"
+            " failed permanently.",
+            "[Server thread/ERROR]: Statistics export was explicitly enabled but"
+            " configuration/storage initialization failed",
+            "[Render thread/WARN]: Failed to load gun animation runtime:"
+            " tacz:ak47_display",
         ]
-        for line in allowed:
-            self.assertEqual(rc.scan_errors(line + "\n", rc.LOG_SCAN_ALLOW), [])
-        other = "[blockfield-cp/WARN]: control-plane: control-plane stream failed: boom"
-        self.assertEqual(rc.scan_errors(other + "\n", rc.LOG_SCAN_ALLOW), [other])
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(rc.scan_errors(line + "\n", allow), [line])
 
     def test_arena_bounds_reads_battery_map(self):
         """arena_bounds covers any deployed map config, not just dm_arena
@@ -1457,24 +1471,17 @@ class RcBattery(unittest.TestCase):
     def test_scan_errors_allowlists_exact_optional_integration_probes(self):
         # Each allowlist entry names the exact class: a failure for any other
         # class must still fail the scan.
-        for allowed in rc.LOG_SCAN_ALLOW:
+        for allowed in rc.LOG_SCAN_ALLOW + rc.FAKE_CP_NOISE:
             if allowed == "Error loading class: net/minecraft/class_":
                 continue
             if allowed.startswith("No data fixer registered for "):
                 continue
             if "FabricService" in allowed:
                 continue
-            if allowed.startswith("Statistics outbox cannot be read"):
-                continue
-            # Fake-CP consumer retries (stand points CP/stats at 127.0.0.1:9):
-            # exact message cores, covered by
-            # test_scan_errors_allows_the_fake_cp_retry_lines.
-            if allowed in (
-                "control-plane: control-plane stream failed, retrying",
-                "CP credential renewal check failed: java.net.ConnectException",
-                "control-plane: presence report failed: java.net.ConnectException",
-                "[BlockField] Console log push failed, retrying.",
-            ):
+            # Fake-CP retry noise (stand points CP/stats at 127.0.0.1:9):
+            # exact cores gated on the fake env, covered by
+            # test_fake_cp_noise_allowed_only_against_the_fake_endpoint.
+            if allowed in rc.FAKE_CP_NOISE:
                 continue
             self.assertIn("Error loading class: ", allowed)
             self.assertFalse(allowed.endswith(("class_", "/")))

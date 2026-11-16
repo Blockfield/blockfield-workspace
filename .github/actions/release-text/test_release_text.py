@@ -269,6 +269,23 @@ class Validate(unittest.TestCase):
             with self.subTest(name):
                 self.assertTrue(self.run_validate(raw)[1])
 
+    def test_player_style_is_retried_then_published_with_a_warning(self):
+        cases = {
+            "version": {"brief": "Клиентский мод обновлён, теперь 1.62.0."},
+            "service": {
+                "players": "- Администрация получила модерацию из панели управления."
+            },
+        }
+        for name, over in cases.items():
+            with self.subTest(name):
+                obj = json.loads(reply(dict(SECTIONS, **over)))
+                self.assertTrue(rt.validate_release(obj, facts())[1])
+                with mock.patch.object(rt, "warn") as warn:
+                    self.assertEqual(rt.validate_release(obj, facts(), True)[1], [])
+                warn.assert_called()
+        technical = dict(SECTIONS, technical="- Мод 1.62.0, служебные проверки.")
+        self.assertEqual(self.run_validate(reply(technical))[1], [])
+
     def test_every_changed_pin_must_appear(self):
         f = facts(
             pins=[{"name": "Gun", "change": "added", "text": "", "component_notes": []}]
@@ -331,6 +348,8 @@ class Announcement(unittest.TestCase):
             "greeting": {"summary": "Сообщество Blockfield, вышел выпуск."},
             "no version": {"title": "🚀 Новый интерфейс"},
             "telegraph": {"player_changes": "Новый интерфейс, панели, значки"},
+            "version": {"summary": "Клиентский мод теперь 1.62.0."},
+            "service": {"bug_fixes": "• **Сервер.** Служебные проверки быстрее."},
         }
         for name, over in cases.items():
             with self.subTest(name):
@@ -417,7 +436,7 @@ class Release(unittest.TestCase):
         self.assertIn("Словарь проекта", announcement_call.args[0])
         self.assertIn("Выпуск v2.61.0 (крупный выпуск)", announcement_call.args[1])
         self.assertIn("Новый HUD", announcement_call.args[1])
-        self.assertEqual(announcement_call.args[4], 0.5)
+        self.assertEqual(announcement_call.args[4], 0.3)
 
     def test_retry_gets_errors_and_can_succeed(self):
         chat = self.run_release("не JSON", reply(), ann_reply())
@@ -425,10 +444,10 @@ class Release(unittest.TestCase):
         self.assertIn("отклонён", chat.call_args_list[1].args[1])
         self.assertEqual(self.files(), ["announcement.json", "release-notes.md"])
 
-    def test_two_bad_replies_give_facts_only_notes_and_still_an_announcement(self):
+    def test_bad_replies_give_facts_only_notes_and_still_an_announcement(self):
         bad = reply(dict(SECTIONS, brief="https://example.org"))
-        chat = self.run_release(bad, bad, ann_reply())
-        self.assertEqual(chat.call_count, 3)
+        chat = self.run_release(*[bad] * rt.NOTES_ATTEMPTS, ann_reply())
+        self.assertEqual(chat.call_count, rt.NOTES_ATTEMPTS + 1)
         self.assertEqual(self.files(), ["announcement.json", "release-notes.md"])
         notes = (self.out / "release-notes.md").read_text(encoding="utf-8")
         self.assertIn("Текст собран без модели", notes)
@@ -456,7 +475,9 @@ class Release(unittest.TestCase):
         self.assertEqual([c.args[2] for c in chat.call_args_list], ["m", "big"])
 
     def test_llm_exception_gives_facts_only(self):
-        self.run_release(*[OSError("network")] * (2 + rt.ANNOUNCEMENT_ATTEMPTS))
+        self.run_release(
+            *[OSError("network")] * (rt.NOTES_ATTEMPTS + rt.ANNOUNCEMENT_ATTEMPTS)
+        )
         self.assertEqual(self.files(), ["release-notes.md"])
 
     def test_no_key_or_model_skips_the_call(self):
@@ -527,7 +548,7 @@ class Release(unittest.TestCase):
         self.assertIn("Значки HUD перерисованы", notes)
         self.assertNotIn("нет release-notes.md", notes)
 
-    def test_filler_twice_gives_facts_only_with_pin_pr_titles(self):
+    def test_filler_every_time_gives_facts_only_with_pin_pr_titles(self):
         for p in self.pin_args():
             p.start()
             self.addCleanup(p.stop)
@@ -536,8 +557,8 @@ class Release(unittest.TestCase):
             brief="Рекомендуется обновиться.",
             components="- X: v1.41.0 → v1.42.0.",
         )
-        chat = self.run_release(reply(filler), reply(filler), ann_reply())
-        self.assertEqual(chat.call_count, 3)
+        chat = self.run_release(*[reply(filler)] * rt.NOTES_ATTEMPTS, ann_reply())
+        self.assertEqual(chat.call_count, rt.NOTES_ATTEMPTS + 1)
         self.assertEqual(self.files(), ["announcement.json", "release-notes.md"])
         notes = (self.out / "release-notes.md").read_text(encoding="utf-8")
         self.assertIn("- Значки HUD", notes)

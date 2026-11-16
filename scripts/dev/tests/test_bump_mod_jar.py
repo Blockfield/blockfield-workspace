@@ -161,5 +161,22 @@ class Verify(unittest.TestCase):
             bump.verified("bf1", "x.jar", data, [("sha256", "", "asset digest")])
 
 
+class RunpyIdentity(unittest.TestCase):
+    def test_bump_run_via_runpy_shares_bumperror_with_mirror(self):
+        scripts = Path(bump.__file__).resolve().parent
+        code = (
+            "import runpy, sys; "
+            f"sys.path.insert(0, {str(scripts)!r}); "
+            f"ns = runpy.run_path({str(Path(bump.__file__).resolve())!r},"
+            " run_name='bump_runpy_probe'); "
+            "import mirror_mod_jar as m; "
+            "print(ns['BumpError'] is m.bump.BumpError)"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+        self.assertEqual(done.stdout.strip(), "True")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,8 @@ from typing import NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release  # noqa: E402
 
+sys.modules.setdefault("bump_mod_jar", sys.modules[__name__])
+
 PKG = "com/lunares/blockfield"
 TREES = {
     "gameplay": release.ROOT / "gameplay",

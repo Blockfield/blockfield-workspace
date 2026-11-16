@@ -250,6 +250,58 @@ def say_held():
             say(line)
 
 
+FACTS_ONLY_MARKER = "Текст собран без модели"
+FACTS_ONLY_CHECK_LIMIT = 5
+
+
+def facts_only_releases(repo, limit=FACTS_ONLY_CHECK_LIMIT):
+    """Latest releases of repo whose release-notes.md was written from facts only.
+
+    Returns (tags, problems): "repo tag" lines with the marker, and lines for
+    releases that could not be checked. Releases without a notes asset
+    (dedicated publishes none) are skipped."""
+    try:
+        releases = json.loads(gh("api", f"repos/{repo}/releases?per_page={limit}"))
+    except RuntimeError:
+        return [], [f"{repo}: could not list releases, check by hand"]
+    tags, problems = [], []
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        tag = rel.get("tag_name", "?")
+        asset = next(
+            (a for a in rel.get("assets", []) if a.get("name") == "release-notes.md"),
+            None,
+        )
+        if asset is None:
+            continue
+        try:
+            notes = gh(
+                "api",
+                "-H",
+                "Accept: application/octet-stream",
+                f"repos/{repo}/releases/assets/{asset['id']}",
+            )
+        except RuntimeError:
+            problems.append(f"{repo} {tag}: could not read release-notes.md")
+            continue
+        if FACTS_ONLY_MARKER in notes:
+            tags.append(f"{repo} {tag}")
+    return tags, problems
+
+
+def say_facts_only():
+    tags, problems = [], []
+    for repo in RELEASES.values():
+        found, failed = facts_only_releases(repo)
+        tags += found
+        problems += failed
+    say(f"\nrelease notes from facts only (last {FACTS_ONLY_CHECK_LIMIT} releases):")
+    say("  " + "\n  ".join(tags) if tags else "  none")
+    for line in problems:
+        say(f"  {line}")
+
+
 def mutate(dry, *cmd, cwd=None):
     """The only place that pushes branches or opens PRs. Refuses anything that could tag or deploy."""
     bad = ("--tags", "--follow-tags", "--mirror", "--all")
@@ -1246,6 +1298,7 @@ def cmd_status(args):
         f"production: client {prod['build']}, server {prod['server_build']}, contract {prod['compatibility'][:12]}"
     )
     say_held()
+    say_facts_only()
     say("\nnext resync (a stale next makes the next prepare collide):")
     for side in (*SIDES, "gameplay"):
         ff_next_to_main(side, False, report_only=True)

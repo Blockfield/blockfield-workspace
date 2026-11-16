@@ -189,6 +189,20 @@ class Bump(unittest.TestCase):
         ):
             bump.plan(MOD, "bf7", self.trees, fake_fetch)
 
+    def test_mod_only_bump_flags_old_hash_pinned_only_in_other_trees(self):
+        # After a `--only mod` bump to bf6 (gameplay/client still pin bf5), a
+        # later `--only mod` bump to bf7 must still flag a forgotten bf5 hash
+        # in the mod tree even though bf5 is pinned only outside the scope.
+        for side in ("gameplay", "client"):
+            for path in bump.MODS[MOD][1][side]:
+                self.write(side, path, holder(path, JARS["bf5"]))
+        self.write("mod", "src/StalePins.java", f'"{JARS["bf5"].sha256}"\n')
+        self.track()
+        with self.assertRaisesRegex(
+            bump.BumpError, "src/StalePins.java: holds an old hash"
+        ):
+            bump.plan(MOD, "bf7", self.trees, fake_fetch, "mod")
+
     def registry(self, entries):
         """Fixture block-registry.json in the gameplay tree, tracked by git."""
         path = self.trees["gameplay"] / bump.REGISTRY

@@ -327,6 +327,22 @@ def plan(mod, tag, trees, fetch, only=None):
         if updated != text:
             edits[side, path] = updated
     old_hashes = {h for jar in olds for h in (jar.sha256, jar.sha512)}
+    if only is not None:
+        # The leftover check below runs only in the written tree, but the old
+        # releases it knows must come from every tree: after a `--only mod`
+        # bump the other trees still pin the previous release, so a stale
+        # hash in the written tree would otherwise go unnoticed. Read-only.
+        others = read_holders(mod, trees)
+        stem = MODS[mod][0]
+        seen = {tag for text in others.values() for tag in re.findall(stem, text)}
+        known = {jar.tag: jar for jar in jars}
+        held = "".join(others.values())
+        for old_tag in sorted(seen, key=lambda tag: int(tag.removeprefix("bf"))):
+            if old_tag == new.tag:
+                continue
+            jar = known.get(old_tag) or fetch(repo, old_tag)
+            if jar.sha256 in held or jar.sha512 in held:
+                old_hashes.update((jar.sha256, jar.sha512))
     for side in MODS[mod][1]:
         if only is not None and side != only:
             continue  # other trees move in their own step of the chain

@@ -9,6 +9,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import bump_mod_jar as bump  # noqa: E402
 import mirror_mod_jar as mirror  # noqa: E402
+import release  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_bump_mod_jar import FakeMirror, offline  # noqa: E402
 
 MOD = "superbwarfare-fabric"
 TAG = "bf27"
@@ -21,6 +25,10 @@ SHA512 = hashlib.sha512(DATA).hexdigest()
 def fake_download(repo, tag):
     assert (repo, tag) == (f"Blockfield/{MOD}", TAG), (repo, tag)
     return NAME, DATA, [("sha256", SHA256, "asset digest")]
+
+
+def setUpModule():
+    unittest.enterModuleContext(offline())
 
 
 def existing_for(size=len(DATA), digest=f"sha256:{SHA256}"):
@@ -68,6 +76,18 @@ class Mirror(unittest.TestCase):
                     mock.Mock(),
                 )
 
+    def test_main_uploads_through_gh_once_then_skips(self):
+        fake = FakeMirror({})
+        with (
+            mock.patch.object(bump, "download", fake_download),
+            mock.patch.object(release, "gh", fake),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(mirror.main([MOD, TAG]), 0)
+            self.assertEqual(fake.assets, existing_for())
+            self.assertEqual(mirror.main([MOD, TAG]), 0)
+        self.assertEqual(len(fake.uploads()), 1)
+
 
 class BumpRefusal(unittest.TestCase):
     def test_bump_refuses_pins_whose_jar_is_not_mirrored(self):
@@ -80,16 +100,6 @@ class BumpRefusal(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             with mock.patch.object(mirror, "assets", return_value=existing_for()):
                 mirror.require_mirrored(MOD, TAG, jar)
-
-    def test_bump_main_writes_nothing_when_the_jar_is_not_mirrored(self):
-        with (
-            mock.patch.object(bump, "download", fake_download),
-            mock.patch.object(mirror, "assets", return_value={}),
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()) as err,
-        ):
-            self.assertEqual(mirror.main([MOD, TAG]), 1)
-        self.assertIn("mirror-mod-jar", err.getvalue())
 
 
 if __name__ == "__main__":

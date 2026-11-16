@@ -3807,6 +3807,89 @@ class Hotfix(unittest.TestCase):
             ],
         )
 
+    def test_live_deferred_gates_reprepared_server_tags(self):
+        """Deferred gameplay leg: no gate on the empty pre-tag set; the real
+        RC gate runs after re-prepare on the server tags, like ship."""
+        calls = []
+        deferred = self.prepared({"gameplay": "v2.83.0"}, "deferred", [], "")
+        shipped = self.prepared(
+            {"server": "v2.83.1"},
+            "server-only",
+            [("tag", "server"), ("deploy", "server")],
+        )
+        record = {
+            "releases": {"server": "v2.83.1"},
+            "checks": [{"name": "smoke", "result": "PASS", "evidence": "ok"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "rc.json")
+            Path(path).write_text(json.dumps(record))
+            with (
+                mock.patch.object(
+                    release, "gh", side_effect=self.fake_gh(self.fix_view())
+                ),
+                mock.patch.object(release, "pr_checks", return_value="green"),
+                mock.patch.object(
+                    release, "prepare_all", side_effect=[deferred, shipped]
+                ),
+                mock.patch.object(release, "say"),
+                mock.patch.object(release, "say_held"),
+                mock.patch.object(
+                    release,
+                    "ship_tag_side",
+                    side_effect=lambda a, side, tag, t, i, **kw: calls.append(
+                        ("tag", side)
+                    ),
+                ),
+                mock.patch.object(release, "image_digest", return_value=DIGEST),
+                mock.patch.object(
+                    release,
+                    "dispatch_deploy",
+                    side_effect=lambda side, ref, t, i, **kw: calls.append(
+                        ("deploy", side, ref)
+                    ),
+                ),
+            ):
+                self.assertTrue(
+                    release.cmd_hotfix(
+                        self.hotfix_args(repo="gameplay", pr=12, rc_record=path)
+                    )
+                )
+        self.assertEqual(
+            calls,
+            [
+                ("tag", "gameplay"),
+                ("tag", "server"),
+                ("deploy", "server", DIGEST),
+            ],
+        )
+
+    def test_dry_run_deferred_prints_gameplay_then_rerun(self):
+        said = []
+        args = self.hotfix_args(repo="gameplay", pr=12, yes=False, dry_run=False)
+        with (
+            mock.patch.object(release, "gh", side_effect=self.fake_gh(self.fix_view())),
+            mock.patch.object(release, "pr_checks", return_value="green"),
+            mock.patch.object(
+                release,
+                "prepare_all",
+                return_value=self.prepared({"gameplay": "v2.83.0"}, "deferred", [], ""),
+            ) as prepare,
+            mock.patch.object(release, "say", side_effect=said.append),
+            mock.patch.object(
+                release, "ship_tag_side", side_effect=AssertionError("no tag")
+            ),
+            mock.patch.object(
+                release, "dispatch_deploy", side_effect=AssertionError("no deploy")
+            ),
+        ):
+            self.assertTrue(release.cmd_hotfix(args))
+        prepare.assert_called_once()
+        text = "\n".join(said)
+        self.assertIn("release kind: deferred", text)
+        self.assertIn("gameplay v2.83.0", text)
+        self.assertIn("dedicated pin PR", text)
+
     def test_live_client_only_skips_digest(self):
         calls = []
         with (

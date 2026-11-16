@@ -2818,9 +2818,13 @@ def cmd_hotfix(args):
     ref = None
     try:
         side_tags = {s: tags[s] for s in SIDES if s in tags}
-        raction = "gate"
-        require_rc_gate(side_tags, args.rc_record, args.gate_waiver)
+        if kind != "deferred":
+            raction = "gate"
+            require_rc_gate(side_tags, args.rc_record, args.gate_waiver)
         if kind == "deferred":
+            # Like ship: the gameplay tag deploys nothing and needs no gate,
+            # so the RC gate runs after the gameplay tag plus re-prepare, on
+            # the re-prepared server tags.
             rside, raction = "gameplay", "tag"
             ship_tag_side(
                 ship_args, "gameplay", tags["gameplay"], timeout_s, interval_s
@@ -2834,6 +2838,8 @@ def cmd_hotfix(args):
                     "the dedicated pin PR is missing"
                 )
             side_tags = {s: tags[s] for s in SIDES if s in tags}
+            rside, raction = "server", "gate"
+            require_rc_gate(side_tags, args.rc_record, args.gate_waiver)
             say(f"\nrelease kind: {kind}")
             for number, line in enumerate(tag_lines(order, tags, branch), 1):
                 say(f"  {number}. {line}")

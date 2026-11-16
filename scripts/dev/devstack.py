@@ -73,6 +73,26 @@ if not (1 <= PORT <= 65535 and 1 <= RCON_PORT <= 65535) or PORT == RCON_PORT:
     )
 RCON_PASSWORD = "leaks"
 BOT_PORTS = {1: 47777, 2: 47778}
+
+# Prod-shape CP/stats env for the stand: export on over an internal-http-form URL
+# with fake values of valid shapes, so every stand boot runs
+# StatsDelivery.resolveConfig (the v2.83.3 incident path: the RC stand set nothing
+# and prod crashed on the first boot with export on). Fakes only fill gaps, never
+# override a developer's real env; nothing here is a real credential. No CP answers
+# on the stand, so the best-effort transport retry logs once a tick (allowlisted in
+# scenarios/rc.py); the boot line it asserts stays the signal.
+RC_STATS_ENV = {
+    "BLOCKFIELD_STATS_EXPORT_ENABLED": "true",
+    "BLOCKFIELD_STATS_SERVER_ID": "00000000-0000-4000-8000-000000000000",
+    "BLOCKFIELD_STATS_RULESET": "rc-fake",
+    "BLOCKFIELD_SESSION_PURPOSE": "test",
+    "BLOCKFIELD_CP_URL": "http://127.0.0.1:9",
+    "BLOCKFIELD_STATS_ALLOW_HTTP": "true",
+    "BLOCKFIELD_CP_STATS_INGEST_TOKEN": "rc-stand-fake-stats-ingest-token-00",
+    "BLOCKFIELD_CP_AGENT_ID": "rc-fake",
+    "BLOCKFIELD_CP_COMMAND_TOKEN": "rc-stand-fake-cp-command-token-00",
+    "BLOCKFIELD_CP_CONSOLE_READ_TOKEN": "rc-stand-fake-cp-console-token-00",
+}
 # Two headless clients share one stand server, display and RCON; game dirs and
 # pid/cmd/log records stay per-client (AGENTS.md: separate ownership records).
 CLIENTS = {
@@ -1634,6 +1654,8 @@ def server_start(args):
         "nogui",
     ]
     env = dict(os.environ, BLOCKFIELD_MAPS_DIR=maps_dir)
+    for key, fake in RC_STATS_ENV.items():
+        env.setdefault(key, fake)
     if getattr(args, "gate", False):
         env.pop("BLOCKFIELD_DEV", None)
         env["BLOCKFIELD_BUILD_FILE"] = str(SERVER / "build.json")

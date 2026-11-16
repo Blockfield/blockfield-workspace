@@ -1160,6 +1160,25 @@ class WorldC2Pack(unittest.TestCase):
 
 
 class RcBattery(unittest.TestCase):
+    def test_scan_errors_allows_only_the_stand_outbox_retry_line(self):
+        # The stand boots with the prod-shape fake CP env and no CP answers it,
+        # so the best-effort transport retry logs exactly one error line per
+        # tick; the boot path under test already passed by then. Any other
+        # stats error (notably the boot failure of the v2.83.3 incident) must
+        # still fail the scan.
+        retry = (
+            "[Server thread/ERROR]: Statistics outbox cannot be read or committed;"
+            " queued files retained. Inspect the volume."
+        )
+        self.assertEqual(rc.scan_errors(retry + "\n", rc.LOG_SCAN_ALLOW), [])
+        boot_failure = (
+            "[Server thread/ERROR]: Statistics export was explicitly enabled but"
+            " configuration/storage initialization failed"
+        )
+        self.assertEqual(
+            rc.scan_errors(boot_failure + "\n", rc.LOG_SCAN_ALLOW), [boot_failure]
+        )
+
     def test_arena_bounds_reads_battery_map(self):
         """arena_bounds covers any deployed map config, not just dm_arena
         (RC final5 long-range FAIL: hamburg lanes had no bounds to clamp)."""
@@ -1429,6 +1448,8 @@ class RcBattery(unittest.TestCase):
             if allowed.startswith("No data fixer registered for "):
                 continue
             if "FabricService" in allowed:
+                continue
+            if allowed.startswith("Statistics outbox cannot be read"):
                 continue
             self.assertIn("Error loading class: ", allowed)
             self.assertFalse(allowed.endswith(("class_", "/")))
@@ -3086,7 +3107,10 @@ class RcBattery(unittest.TestCase):
                         args,
                         rcon_factory=lambda *_: Rcon(),
                         bot_factory=factory,
-                        get_log=lambda: "",
+                        get_log=lambda: (
+                            "Statistics delivery initialized;"
+                            " new gameplay export false\n"
+                        ),
                         server_dir=tmp,
                     ),
                     0,

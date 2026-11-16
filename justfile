@@ -169,6 +169,11 @@ release *args:
     sys.argv = ["scripts/release.py", *sys.argv[1:]]
     runpy.run_path("scripts/release.py", run_name="__main__")
 
+bump-mod-jar *args:
+    import runpy, sys
+    sys.argv = ["scripts/bump_mod_jar.py", *sys.argv[1:]]
+    runpy.run_path("scripts/bump_mod_jar.py", run_name="__main__")
+
 mod *args:
     import runpy, sys
     sys.argv = ["bf.py", *["mod", *sys.argv[1:]]]

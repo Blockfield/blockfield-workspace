@@ -218,6 +218,26 @@ class Bump(unittest.TestCase):
         holders = {(s, p) for s, paths in bump.MODS[MOD][1].items() for p in paths}
         self.assertEqual(set(edits), holders)
 
+    def test_already_behind_registry_stops_the_write(self):
+        # Holders moved on (bf6) without a re-export, so the registry still
+        # records bf5: bumping to bf7 must stop even though no bumped old
+        # release is recorded.
+        self.registry({JARS["bf5"].name: self.pin(JARS["bf5"])})
+        before = self.holder_bytes()
+        with self.assertRaisesRegex(bump.BumpError, "just export-registry") as ctx:
+            bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        self.assertIn(JARS["bf5"].name, str(ctx.exception))
+        self.assertEqual(self.holder_bytes(), before)
+
+    def test_stale_registry_message_names_push_merge_and_vendor_sha(self):
+        self.registry({JARS["bf6"].name: self.pin(JARS["bf6"])})
+        with self.assertRaisesRegex(bump.BumpError, "just export-registry") as ctx:
+            bump.plan(MOD, "bf7", self.trees, fake_fetch)
+        err = str(ctx.exception)
+        self.assertIn("push", err)
+        self.assertIn("gameplay next", err)
+        self.assertIn("just vendor-block-registry <merge-sha>", err)
+
     def test_registry_without_this_mod_is_not_a_block(self):
         self.registry(
             {"other-1.0.jar": {"url": "x", "algorithm": "sha512", "hash": "0" * 128}}

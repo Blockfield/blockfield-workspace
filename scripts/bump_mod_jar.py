@@ -249,7 +249,9 @@ def registry_stale(mod, trees, olds, new):
     """Why the gameplay block registry blocks this bump, or None.
 
     The registry records the pin set it was exported from, so moving a recorded
-    pin would leave its blocks stale. The export downloads every pinned jar and
+    pin would leave its blocks stale, as would a registry that is already
+    behind the holders (an older recorded pin of this mod instead of the new
+    one). The export downloads every pinned jar and
     cannot run offline from here, so the bump stops with the re-export command.
     A missing file predates the registry (gameplay PR #41) and is not a block.
     """
@@ -272,13 +274,20 @@ def registry_stale(mod, trees, olds, new):
         or jar.sha256 in recorded_hashes
         or jar.sha512 in recorded_hashes
     ]
+    if not stale and new.name not in recorded and new.sha512 not in recorded_hashes:
+        # Holders moved on without a re-export (e.g. they pin bf6 while the
+        # registry still records bf5), so no bumped old is recorded but the
+        # registry is still behind the new pin.
+        stem = MODS[mod][0]
+        stale = sorted(name for name in recorded if re.search(stem, name or ""))
     if not stale:
         return None
     return (
         f"gameplay {REGISTRY} pins {', '.join(stale)}: this bump would leave"
-        f" the registry stale. Point the gameplay pins at {new.tag} first, then run"
-        " `just export-registry` in the gameplay checkout, commit it, then"
-        " `just vendor-block-registry <gameplay-sha>` for dedicated"
+        f" the registry stale. Point the gameplay pins at {new.tag} first"
+        " (--check lists the holders), then run `just export-registry` in the"
+        " gameplay checkout, commit it, push and merge it into gameplay next,"
+        " then `just vendor-block-registry <merge-sha>` for dedicated"
         " and re-run this bump."
     )
 

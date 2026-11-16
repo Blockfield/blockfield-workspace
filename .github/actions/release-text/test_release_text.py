@@ -1803,5 +1803,145 @@ class PinChangeLinesUseKey(unittest.TestCase):
         self.assertEqual(rows[0][4], "pack.zip: обновление v1 → v2.")
 
 
+class Coverage(unittest.TestCase):
+    """Один игровой факт из сводного PR нельзя терять (v2.81.0: killfeed)."""
+
+    KILL = "HUD top bar to UI JSON, killfeed carries the death-event weapon (#426)"
+
+    def killfeed_facts(self):
+        pr = {
+            "number": 435,
+            "title": "Release server 2.80.0",
+            "body": "merge",
+            "commits": [self.KILL],
+        }
+        return facts(
+            pins=[
+                {
+                    "name": "blockfield-server",
+                    "change": "update",
+                    "text": "blockfield-server: архив main",
+                    "component_notes": [],
+                    "pull_requests": [pr],
+                }
+            ]
+        )
+
+    def test_dropped_killfeed_is_rejected_with_the_fact_line(self):
+        errors = rt.coverage_errors("- Рамка фокуса по краю.", self.killfeed_facts())
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ленту убийств", errors[0])
+        self.assertIn("killfeed", errors[0])
+
+    def test_covered_killfeed_passes(self):
+        self.assertEqual(
+            rt.coverage_errors(
+                "- В ленте убийств указывается оружие.", self.killfeed_facts()
+            ),
+            [],
+        )
+
+    def test_near_match_without_killfeed_phrase_is_rejected(self):
+        errors = rt.coverage_errors(
+            "- Добавлен эквивалентный набор снаряжения.", self.killfeed_facts()
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ленту убийств", errors[0])
+
+    def test_test_only_killfeed_line_does_not_force_a_bullet(self):
+        pr = {
+            "number": 1,
+            "title": "x",
+            "body": "y",
+            "commits": ["killfeed: fix flaky unit test"],
+        }
+        f = facts(
+            pins=[
+                {
+                    "name": "blockfield-server",
+                    "change": "update",
+                    "text": "t",
+                    "component_notes": [],
+                    "pull_requests": [pr],
+                }
+            ]
+        )
+        self.assertEqual(rt.coverage_errors("- Рамка фокуса.", f), [])
+
+    def test_multiline_body_skip_applies_per_line(self):
+        pr = {
+            "number": 435,
+            "title": "Release server 2.80.0",
+            "body": "killfeed carries the death-event weapon\nTests: passed",
+            "commits": [],
+        }
+        f = facts(
+            pins=[
+                {
+                    "name": "blockfield-server",
+                    "change": "update",
+                    "text": "t",
+                    "component_notes": [],
+                    "pull_requests": [pr],
+                }
+            ]
+        )
+        errors = rt.coverage_errors("- Рамка фокуса.", f)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ленту убийств", errors[0])
+
+    def test_facts_without_the_token_are_unaffected(self):
+        self.assertEqual(rt.coverage_errors("- Рамка фокуса.", facts()), [])
+
+    def test_validate_release_retries_then_accepts(self):
+        f = self.killfeed_facts()
+        dropped = reply(
+            dict(
+                SECTIONS,
+                players="- Рамка фокуса по краю.",
+                components="- blockfield-server: архив main.",
+            )
+        )
+        self.assertTrue(rt.validate_release(rt.parse_json_object(dropped), f)[1])
+        kept = reply(
+            dict(
+                SECTIONS,
+                players="- Рамка фокуса по краю.\n- В ленте убийств указывается оружие.",
+                components="- blockfield-server: архив main.",
+            )
+        )
+        self.assertEqual(rt.validate_release(rt.parse_json_object(kept), f)[1], [])
+
+    def test_validate_release_final_warns_instead_of_failing(self):
+        f = self.killfeed_facts()
+        dropped = reply(
+            dict(
+                SECTIONS,
+                players="- Рамка фокуса по краю.",
+                components="- blockfield-server: архив main.",
+            )
+        )
+        with mock.patch.object(rt, "warn") as warn:
+            self.assertEqual(
+                rt.validate_release(rt.parse_json_object(dropped), f, True)[1], []
+            )
+        warn.assert_called()
+
+    def test_validate_announcement_requires_the_item_in_the_lists(self):
+        f = self.killfeed_facts()
+        _, errors, _ = self.errors(f=f)
+        self.assertTrue(any("ленту убийств" in e for e in errors))
+        good, errors, _ = self.errors(
+            f=f, player_changes="• **Лента убийств.** Видно оружие."
+        )
+        self.assertEqual(errors, [])
+
+    def errors(self, final=False, f=None, **over):
+        obj = rt.parse_json_object(ann_reply(**over))
+        with mock.patch.object(rt, "warn") as warn:
+            got, errors = rt.validate_announcement(obj, f or facts(), final)
+        return got, errors, warn
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1841,6 +1841,33 @@ class Coverage(unittest.TestCase):
             [],
         )
 
+    def test_near_match_without_killfeed_phrase_is_rejected(self):
+        errors = rt.coverage_errors(
+            "- Добавлен эквивалентный набор снаряжения.", self.killfeed_facts()
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ленту убийств", errors[0])
+
+    def test_test_only_killfeed_line_does_not_force_a_bullet(self):
+        pr = {
+            "number": 1,
+            "title": "x",
+            "body": "y",
+            "commits": ["killfeed: fix flaky unit test"],
+        }
+        f = facts(
+            pins=[
+                {
+                    "name": "blockfield-server",
+                    "change": "update",
+                    "text": "t",
+                    "component_notes": [],
+                    "pull_requests": [pr],
+                }
+            ]
+        )
+        self.assertEqual(rt.coverage_errors("- Рамка фокуса.", f), [])
+
     def test_facts_without_the_token_are_unaffected(self):
         self.assertEqual(rt.coverage_errors("- Рамка фокуса.", facts()), [])
 

@@ -904,8 +904,16 @@ def player_errors(sections, facts):
 # внутри «Release server 2.80.0»). Пара: токен факта → слово, которое игрок
 # должен увидеть. Проверка цитирует строку факта, повтор вынуждает модель
 # вернуть пункт; на последней попытке лишь предупреждает, как стиль.
+# shortcut: таблица — реестр доказанных потерь (один инцидент = одна строка с тестом); токен обязан описывать видимое игроку изменение, строку с ложным требованием буллета сузить или удалить.
+COVERAGE_SKIP_RX = re.compile(
+    r"(?i)\b(?:test\w*|refactor\w*|flaky|тест\w*|рефактор\w*)\b"
+)
 COVERAGE_TERMS = (
-    (re.compile(r"(?i)killfeed"), re.compile(r"(?i)лент"), "ленту убийств"),
+    (
+        re.compile(r"(?i)killfeed"),
+        re.compile(r"(?i)лент[а-я]*\s+убийств"),
+        "ленту убийств",
+    ),
 )
 
 
@@ -926,11 +934,18 @@ def coverage_errors(player_text, facts):
     errors = []
     sources = coverage_source(facts)
     for fact_rx, player_rx, what in COVERAGE_TERMS:
-        if not any(fact_rx.search(line) for line in sources):
+        if not any(
+            fact_rx.search(line) and not COVERAGE_SKIP_RX.search(line)
+            for line in sources
+        ):
             continue
         if player_rx.search(player_text):
             continue
-        sample = next(line.strip()[:120] for line in sources if fact_rx.search(line))
+        sample = next(
+            line.strip()[:120]
+            for line in sources
+            if fact_rx.search(line) and not COVERAGE_SKIP_RX.search(line)
+        )
         errors.append(
             f"в фактах есть «{sample}», а в тексте для игроков нет про {what}"
         )

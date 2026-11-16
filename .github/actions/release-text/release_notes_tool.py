@@ -117,6 +117,12 @@ def read_pins(repo_root, ref):
     return pins
 
 
+def display_name(key, pin):
+    # Ключ пина вместо длинного описания из `name`: иначе модель пересказывает
+    # описание как изменения выпуска (workspace#113).
+    return key.removeprefix("resource:")
+
+
 def pin_diff(old_pins, new_pins):
     """(key, change, old, new, text); change: added/removed/url-change/re-pinned/rollback/update.
 
@@ -127,11 +133,23 @@ def pin_diff(old_pins, new_pins):
         old, new = old_pins.get(key), new_pins.get(key)
         if old is None:
             rows.append(
-                (key, "added", None, new, f"Добавлен {new['name']} ({new['tag']}).")
+                (
+                    key,
+                    "added",
+                    None,
+                    new,
+                    f"Добавлен {display_name(key, new)} ({new['tag']}).",
+                )
             )
         elif new is None:
             rows.append(
-                (key, "removed", old, None, f"Удалён {old['name']} ({old['tag']}).")
+                (
+                    key,
+                    "removed",
+                    old,
+                    None,
+                    f"Удалён {display_name(key, old)} ({old['tag']}).",
+                )
             )
         elif old["hash"] == new["hash"]:
             if old["url"] != new["url"]:
@@ -141,7 +159,7 @@ def pin_diff(old_pins, new_pins):
                         "url-change",
                         old,
                         new,
-                        f"{new['name']}: байты те же ({old['tag']}), изменён только адрес загрузки.",
+                        f"{display_name(key, new)}: байты те же ({old['tag']}), изменён только адрес загрузки.",
                     )
                 )
         elif old["tag"] == new["tag"]:
@@ -151,7 +169,7 @@ def pin_diff(old_pins, new_pins):
                     "re-pinned",
                     old,
                     new,
-                    f"{new['name']}: {new['tag']} пересобран (хеш изменился).",
+                    f"{display_name(key, new)}: {new['tag']} пересобран (хеш изменился).",
                 )
             )
         else:
@@ -164,7 +182,7 @@ def pin_diff(old_pins, new_pins):
                     change,
                     old,
                     new,
-                    f"{new['name']}: {word} {old['tag']} → {new['tag']}.",
+                    f"{display_name(key, new)}: {word} {old['tag']} → {new['tag']}.",
                 )
             )
     return rows

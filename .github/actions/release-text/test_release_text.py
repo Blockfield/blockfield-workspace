@@ -1625,5 +1625,52 @@ backfilled: false
         )
 
 
+class PinChangeLinesUseKey(unittest.TestCase):
+    """workspace#113: строки изменения называют ключ пина, а не длинное описание из `name`."""
+
+    LONG = (
+        "M700 -- повышен разброс от бедра; баланс Glock 17/HK416D; "
+        "анимации под тайминги; HUD Blockfield"
+    )
+
+    def named(self, tag, sha):
+        return pin(tag, sha) | {"name": self.LONG}
+
+    def test_update_uses_key(self):
+        rows = rn.pin_diff(
+            {"tacz-refabricated": self.named("bf13", "a")},
+            {"tacz-refabricated": self.named("bf14", "b")},
+        )
+        self.assertEqual(
+            [(row[1], row[4]) for row in rows],
+            [("update", "tacz-refabricated: обновление bf13 → bf14.")],
+        )
+
+    def test_no_change_line_carries_the_long_name(self):
+        old, new = self.named("bf13", "a"), self.named("bf14", "b")
+        moved = dict(new, url=new["url"] + "?mirror=1")
+        cases = [
+            ({"k": old}, {"k": new}),
+            ({"k": new}, {"k": old}),
+            ({}, {"k": new}),
+            ({"k": old}, {}),
+            ({"k": old}, {"k": self.named("bf13", "other")}),
+            ({"k": new}, {"k": moved}),
+        ]
+        for before, after in cases:
+            with self.subTest(before=before, after=after):
+                rows = rn.pin_diff(before, after)
+                self.assertEqual(len(rows), 1)
+                self.assertTrue(rows[0][4].startswith(("k", "Добавлен k", "Удалён k")))
+                self.assertNotIn(self.LONG, rows[0][4])
+
+    def test_resource_key_drops_prefix(self):
+        rows = rn.pin_diff(
+            {"resource:pack.zip": self.named("v1", "a")},
+            {"resource:pack.zip": self.named("v2", "b")},
+        )
+        self.assertEqual(rows[0][4], "pack.zip: обновление v1 → v2.")
+
+
 if __name__ == "__main__":
     unittest.main()

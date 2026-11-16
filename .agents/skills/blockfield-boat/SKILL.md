@@ -22,20 +22,17 @@ Load the `blockfield-agent` skill first: it owns the unit sequence
   shows their account. Nothing in this repository grants it. Never use another
   developer's account or extend an opt-in to other projects, accounts or machines;
   without one, work locally.
-- A quota warning is information, not a new approval gate. Continue within the
-  existing authorization and enough allowance; report if the next batch cannot fit.
+- Boat spending is not a constraint: no allowance or budget checks, no approvals for
+  cost. Run as many parallel VMs as the work needs; the only rules are ownership and cleanup.
 
 ## One task, one owned VM
 
-- Before create/resume, have the coordinator check allowance, planned spend and
-  `just boat list --all --json`. Choose the smallest size that fits the unchanged
-  memory limits. Trial `default` is for builds/server work; do not squeeze the
-  full 3 GB server + 4 GB client into 8 GB or pay to unlock `large` automatically.
-  `large` bills double and is only for a live server + client stand. Rebases, reviews,
-  triage, builds, tests and server-only runs use `default` or `small`.
-- An idle VM bills like a busy one. Stop it before any wait over 5 minutes with no
-  stand process it needs (child, review, model quota), then `resume`; prefer resuming
-  your stopped VM over a new fork when its state still fits the task.
+- Before create/resume, check `just boat list --all --json`. Choose the size that fits
+  the unchanged memory limits: `large` for a live server + client stand, `default` or
+  `small` for rebases, reviews, triage, builds, tests and server-only runs.
+- Stop a VM before any wait over 5 minutes with no stand process it needs (child,
+  review, model quota), then `resume`; prefer resuming your stopped VM over a new fork
+  when its state still fits the task.
 - Set an explicit auto-stop deadline covering only the current batch plus setup
   and cleanup. Use `--environment blockfield`, never share the sandbox or account.
 - Immediately record VM ID, task/thread, process-owner session, `BF_DEV_HOME`,
@@ -46,7 +43,7 @@ Load the `blockfield-agent` skill first: it owns the unit sequence
   worktree patch by default; `--local-jar DIR=PATH` for a locally built fork jar), never
   credentials or unrelated changes.
 - Existing headless-client consent must cover this task and this VM/backend.
-  Authorization to spend Boat time does not grant computer-use consent.
+  Boat use does not grant computer-use consent.
 
 ## Return the VM
 
@@ -57,5 +54,4 @@ only your registered client/server/watchers, prune the task's `BF_DEV_HOME`, the
 
 Tell the coordinator: ID, final state, evidence location, final usage, and anything
 still running. Stop a VM while waiting for reviews or a model quota reset, then
-resume only for useful work. Never switch accounts, buy time or extend beyond the
-approved batch to hide a budget problem.
+resume only for useful work. Never switch accounts.

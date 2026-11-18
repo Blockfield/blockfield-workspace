@@ -27,13 +27,13 @@ personal opt-in: the Boat parts below apply only when the task owner opted in
    only when the brief or common rules grant TEMPORARY LOCAL BUILDS. Never run bare `./gradlew`/`java`
    on a VM: the `just` recipes pick the pinned JDK 21 themselves — in a bare
    shell `source .dev/<task>/boat-env.sh` (or the BOAT.md JAVA_HOME prelude) first.
-4. Push the branch, then finish — never wait on the bot-review gate or CI, never poll PR/CI state for validation
+4. Push the branch, then finish — never wait on review or CI, never poll PR/CI state for validation
    (T3 forbids children to wait on PRs). Finish
    with `PR <url>, head <sha>, checks and reviews <observed state>`; the coordinator
    watches the PR and dispatches the findings round or the merge. Never
    copy scripts to /tmp, never `sleep`-poll output files.
    Push budget (default 2, brief may change): push 1 after green gates;
-   when a findings brief arrives, read the review App body and every unresolved review thread,
+   when a findings brief arrives (the reviewer agent's report or GitHub review threads), read it and every unresolved review thread,
    including outdated ones from earlier heads (only checks on older heads are superseded), and handle them per the `babysit-pr` skill (it wins over
    this playbook on PR handling): verify each against the source, fix real bugs in one
    batch, decline the rest (unneeded tests, unimportant edge-case guards, extra

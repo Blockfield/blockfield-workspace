@@ -187,4 +187,5 @@ Gradle 2 ГБ (лимиты этой машины; на Boat их нет). Ло�
 - Push budget — из брифа (по умолчанию 2); перед push хуки подключены (`git config core.hooksPath` не пуст), форматирование проходит до ревью; PR ведут по скиллу `babysit-pr` (при расхождении прав скилл): отставшую ветку PR rebase на базу (`origin/next`, где она есть, иначе `origin/main`) и `push --force-with-lease` — только свою ветку PR, не next/main/теги; находки ревью проверяют по коду, реальные исправляют, лишние отклоняют с письменной причиной и follow-up issue; на PR/CI/бота не ждать — push и финал (см. скилл `blockfield-agent`, шаги 4–6).
 - Перед финалом — все свои Boat VM в `state=stopped` (см. «Удалённые стенды Boat»).
 - Финал: первая строка `DONE:/PARTIAL:/BLOCKED:`, далее каждый пункт ACCEPTANCE с evidence, PR URL + head SHA + состояние checks, VM-минуты.
-  Пункт ACCEPTANCE без evidence — не DONE: координатор считает такой финал PARTIAL и возвращает пункт исполнителю.
+  Пункт ACCEPTANCE без evidence — не DONE: финал `DONE:` с таким пунктом координатор считает PARTIAL и возвращает пункт
+  исполнителю; `BLOCKED:` остаётся BLOCKED.

@@ -54,4 +54,4 @@
 
 Для игровых проверок — только собственный стенд: не подключайте бота и не меняйте мир, датапаки,
 `options.txt` или JAR другой сессии; чужой стенд занимает ресурс — ждите или сообщите владельцу.
-Стенд задачи — `BF_DEV_HOME=.dev/<задача>-stand`, evidence — в `.dev/<задача>/`; после сохранения evidence очистите стенд: `just dev prune --apply .dev/<задача>-stand` (каталог остаётся с `PRUNED.json`).
+Стенд задачи — `BF_DEV_HOME=.dev/<задача>-stand`, evidence — в `.dev/<задача>/`; после сохранения evidence остановите свои server и client стенда (`just server stop`, `just play --stop`) и очистите стенд: `just dev prune --apply .dev/<задача>-stand` (каталог остаётся с `PRUNED.json`).
